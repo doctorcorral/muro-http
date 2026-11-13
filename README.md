@@ -4,8 +4,8 @@
 library and it is not a book inside murolang/muro. A muro web server
 will live here. This repository is version `0.1.0-dev`.
 
-It pins the released Hex package muro `0.20.40` (`{:muro, "~> 0.20.40"}`
-in `mix.exs`, `muro: "0.20.40"` in `muro.exs`). It does not depend on a
+It pins the released Hex package muro `0.20.42` (`{:muro, "~> 0.20.42"}`
+in `mix.exs`, `muro: "0.20.42"` in `muro.exs`). It does not depend on a
 compiler checkout.
 
 It is hosted at https://github.com/doctorcorral/muro-http. There is no Hex publish.
@@ -93,7 +93,8 @@ The shim, the driver, and the generated file are compiled with
 
 The driver prints `OK` and allocation counts. `methodView`,
 `targetView`, `pathView`, and `versionView` allocate 0. On muro
-0.20.40, `classify` of `GET /health` allocates 4 and `classify` of
-`POST /posts` with a two-byte body allocates 6. See `GAPS.md`.
+0.20.42, `classify` of `GET /health` allocates 1 and `classify` of
+`POST /posts` with a two-byte body allocates 1. That object is the
+`Classified` result. See `GAPS.md`.
 Method, path, authorization, and body views still point at the
 original buffer, or at the out-of-range empty when the span is absent.

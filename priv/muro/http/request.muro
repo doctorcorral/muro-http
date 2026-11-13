@@ -7,9 +7,10 @@
 -- methodView, targetView, pathView, and versionView are only
 -- sliceUntil / sliceAfter / slice.
 --
--- The header scan carries one HSt. A data record is a heap object, so
--- the fold returns the same record on an ordinary byte and allocates
--- only when a colon or a line end changes phase, flags, or a mark.
+-- The header scan carries one unboxed HSt, nine machine words passed
+-- by value. The fold rebuilds that product when a colon or a line end
+-- changes phase, flags, or a mark, and returns the same value on an
+-- ordinary byte. Neither allocates.
 -- The byte index is the buffer length minus the unconsumed tail.
 -- classify reads that one scan. Loops over a slice are sliceFold of a
 -- machine word, not toNat.
@@ -35,7 +36,7 @@ data AuthMark : Type where
 data Classified : Type where
   classified : Status → Verb → PathShape → IdClass → Keep → AuthMark → BodyClass → Classified
 
-data HSt : Type where
+unboxed data HSt : Type where
   hst : Π (+ a : U64) → Π (+ b : U64) → Π (+ c : U64) → Π (+ d : U64) → Π (+ e : U64) → Π (+ f : U64) → Π (+ g : U64) → Π (+ h : U64) → Π (+ i : U64) → HSt
 
 -- i, lineStart, phase, flags, content-length, authStart, authLen, which, mark
@@ -140,14 +141,9 @@ def spanEq : run Π (+ s : Slice) → Π (+ w : Slice) → Bool :=
       | wfalse => false
 -- Index of the byte whose unconsumed tail is rest. sliceFold hands
 -- the step that tail, so the scan does not store a moving index.
--- The subtraction is a helper: Elixir emit cannot see a word kind on
--- the left of a nested word operation.
-def subLen : run Π (n : U64) → Π (m : U64) → U64 :=
-  λ (n : U64) → λ (m : U64) → subi n m
-
 def byteIndex : run Π (+ s : Slice) → Π (+ rest : Slice) → U64 :=
   λ (+ s : Slice) → λ (+ rest : Slice) →
-    subLen (sliceLen s) (addi (sliceLen rest) (toU64 1))
+    subi (sliceLen s) (addi (sliceLen rest) (toU64 1))
 
 -- The fold binder is affine, so the comparison lives in a helper that
 -- may read the accumulator again after the test.
@@ -218,13 +214,11 @@ def leadStep : run Π (b : U8) → Π (+ acc : U64) → U64 :=
             | false => ori acc leadStop)
       | false => acc
 
--- The mask is the literal, not `noti leadStop`. Elixir emit needs a
--- word kind on that operand, and a bare name does not carry one.
 def leadCount : run Π (+ s : Slice) → U64 :=
   λ (+ s : Slice) →
     andi (sliceFold U64 (toU64 0)
       (λ (b : U8) → λ (_r : Slice) → λ (acc : U64) → leadStep b acc)
-      s) (noti (toU64 9223372036854775808))
+      s) (noti leadStop)
 
 def trailEnd : run Π (+ s : Slice) → U64 :=
   λ (+ s : Slice) →
