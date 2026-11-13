@@ -35,7 +35,7 @@ jobs:
         run: mix format --check-formatted
 
       - name: Check books and generated modules
-        run: mix run script/check_generated.exs
+        run: mix muro.gen --check
 
       - name: Test
         run: mix test
@@ -45,8 +45,7 @@ jobs:
           cc -Wall -Wextra -Werror -std=c11 -I c -I c/generated -include c/shim.h \
             -c -o c/test_classify.o c/test_classify.c
           cc -Wall -Wextra -Werror -std=c11 -I c -c -o c/shim.o c/shim.c
-          cc -Wall -Wextra -Werror -Wno-missing-field-initializers \
-            -Wno-unused-variable -Wno-unused-function -std=c11 \
+          cc -Wall -Wextra -Werror -std=c11 \
             -I c -I c/generated -include c/shim.h \
             -c -o c/request.o c/generated/request.c
           cc -o c/test_classify c/test_classify.o c/request.o c/shim.o
