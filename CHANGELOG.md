@@ -2,6 +2,9 @@
 
 ## 0.1.0-dev — unreleased
 
+- CI type-checks each book once, then compares the committed C, Elixir,
+  and ExUnit files, instead of running `mix muro.gen --check` (which
+  re-checks the same book once per target).
 - First-order request classifier over a `Slice` of the receive buffer.
   Method, path shape, id token, keepalive, Content-Length, and a raw
   Authorization view. Malformed and need-more are constructors.

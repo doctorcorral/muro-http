@@ -57,11 +57,14 @@ like, and db facts from the host. This step does not call it.
 
 ```sh
 mise exec -- mix deps.get
-mise exec -- mix muro.check priv/muro/http/request.muro
-mise exec -- mix muro.check priv/muro/challenge/decide.muro
-mise exec -- mix muro.gen --check
+mise exec -- mix run script/check_generated.exs
 mise exec -- mix test
 ```
+
+`script/check_generated.exs` type-checks each book once, then checks
+that the committed C, Elixir, and ExUnit files still match those
+books. `mix muro.gen --check` is the same comparison, but it
+type-checks and re-emits the same book once per target.
 
 `muro.exs` sets fuel to 5000000. The closed evidence walks the header
 scanner, and the default fuel of 2000 is not enough.

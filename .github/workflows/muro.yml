@@ -19,20 +19,23 @@ jobs:
           elixir-version: "1.20.4"
           otp-version: "29.1"
 
+      - uses: actions/cache@v4
+        with:
+          path: |
+            deps
+            _build
+          key: ${{ runner.os }}-otp-29.1-elixir-1.20.4-mix-${{ hashFiles('mix.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-otp-29.1-elixir-1.20.4-mix-
+
       - name: Fetch dependencies
         run: mix deps.get
 
       - name: Check formatting
         run: mix format --check-formatted
 
-      - name: Check request book
-        run: mix muro.check --fuel 5000000 priv/muro/http/request.muro
-
-      - name: Check decide book
-        run: mix muro.check --fuel 5000000 priv/muro/challenge/decide.muro
-
-      - name: Check generated modules
-        run: mix muro.gen --check
+      - name: Check books and generated modules
+        run: mix run script/check_generated.exs
 
       - name: Test
         run: mix test
