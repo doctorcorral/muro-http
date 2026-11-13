@@ -1,3 +1,3 @@
 %{
-  "muro": {:hex, :muro, "0.20.40", "c1a02718439d0cfaa4497d7cfa83e0f52af16a0b8398e7e8ce98ac39afe070ec", [:mix], [{:elixir_make, "~> 0.10", [hex: :elixir_make, repo: "hexpm", optional: true]}, {:makeup, "~> 1.2", [hex: :makeup, repo: "hexpm", optional: true]}, {:nx, "~> 0.9", [hex: :nx, repo: "hexpm", optional: true]}], "hexpm", "734552d8def4d9d7607ebf006ab8f8fdf7b6589b0c268aeb1313331e654cd0f9"},
+  "muro": {:hex, :muro, "0.20.42", "7e945b7ae3e677260c1abf9221adbe5bc3cd5cbb811b551ff4a0287681018f1b", [:mix], [{:elixir_make, "~> 0.10", [hex: :elixir_make, repo: "hexpm", optional: true]}, {:makeup, "~> 1.2", [hex: :makeup, repo: "hexpm", optional: true]}, {:nx, "~> 0.9", [hex: :nx, repo: "hexpm", optional: true]}], "hexpm", "8e6147ef71e7a0694fcbfe588e4553976bc5fe16e5c9ad3282694dfb777489f6"},
 }
