@@ -1,5 +1,5 @@
 [
-  muro: "0.20.36",
+  muro: "0.20.40",
   fuel: 5_000_000,
   modules: [
     {"priv/muro/http/request.muro", "c/generated/request.c", [kind: :c]},

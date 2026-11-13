@@ -1,6 +1,6 @@
 /* Feed raw request bytes to the generated classifier.
    Pure views must allocate nothing and stay inside the buffer.
-   classify itself allocates on muro 0.20.36 (see GAPS.md). */
+   classify allocates one record per state change (see GAPS.md). */
 
 #include "shim.h"
 #include "request.h"
