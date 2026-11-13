@@ -8,7 +8,7 @@ It pins the released Hex package muro `0.20.36` (`{:muro, "~> 0.20.36"}`
 in `mix.exs`, `muro: "0.20.36"` in `muro.exs`). It does not depend on a
 compiler checkout.
 
-Hosting is undecided. There is no GitHub remote and no Hex publish.
+It is hosted at https://github.com/doctorcorral/muro-http. There is no Hex publish.
 
 ## What step 1 covers
 
