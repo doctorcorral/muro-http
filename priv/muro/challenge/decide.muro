@@ -1,0 +1,364 @@
+-- Finite request decision for the local $12 server baseline.
+-- Checked evidence is closed equations (refl). Only this run is emitted.
+-- Networking, HTTP, JSON, HMAC, and SQLite stay in the trusted C host.
+-- Tag order is the constructor order. It must match src/decision_tags.h.
+-- Nested matches are parenthesized so a later sibling arm is not swallowed.
+--
+-- Host contract: classify verb, path, id shape, auth, and body first.
+-- Pass DB and like facts as unknown until this function returns act-observe.
+-- Auth is matched before id on POST /posts/:id/like, including a bad id.
+-- id-present is a completed lookup. The host does not combine it with db-down.
+
+data Verb : Type where
+  verb-get : Verb
+  verb-post : Verb
+  verb-other : Verb
+
+data PathShape : Type where
+  path-health : PathShape
+  path-feed : PathShape
+  path-posts : PathShape
+  path-post-id : PathShape
+  path-post-like : PathShape
+  path-other : PathShape
+
+data IdClass : Type where
+  id-none : IdClass
+  id-bad : IdClass
+  id-unknown : IdClass
+  id-missing : IdClass
+  id-present : IdClass
+
+data AuthClass : Type where
+  auth-absent : AuthClass
+  auth-bad-token : AuthClass
+  auth-bad-payload : AuthClass
+  auth-ok : AuthClass
+
+data BodyClass : Type where
+  body-none : BodyClass
+  body-malformed : BodyClass
+  body-required : BodyClass
+  body-too-long : BodyClass
+  body-ok : BodyClass
+
+data LikeFact : Type where
+  like-none : LikeFact
+  like-unknown : LikeFact
+  like-new : LikeFact
+  like-again : LikeFact
+
+data DbFact : Type where
+  db-unknown : DbFact
+  db-down : DbFact
+  db-ok : DbFact
+
+data StatusCode : Type where
+  st-200 : StatusCode
+  st-201 : StatusCode
+  st-400 : StatusCode
+  st-401 : StatusCode
+  st-404 : StatusCode
+  st-500 : StatusCode
+  st-503 : StatusCode
+  st-observe : StatusCode
+
+data ErrKind : Type where
+  err-none : ErrKind
+  err-not-found : ErrKind
+  err-invalid-id : ErrKind
+  err-post-missing : ErrKind
+  err-missing-bearer : ErrKind
+  err-bad-token : ErrKind
+  err-bad-payload : ErrKind
+  err-malformed : ErrKind
+  err-body-required : ErrKind
+  err-body-long : ErrKind
+  err-internal : ErrKind
+  err-db : ErrKind
+  err-observe : ErrKind
+
+data ActKind : Type where
+  act-health : ActKind
+  act-feed : ActKind
+  act-read : ActKind
+  act-create : ActKind
+  act-like-new : ActKind
+  act-like-again : ActKind
+  act-error : ActKind
+  act-observe : ActKind
+
+data Decision : Type where
+  decided : StatusCode -> ErrKind -> ActKind -> Decision
+
+def decide : run
+  Π (verb : Verb) -> Π (path : PathShape) -> Π (idc : IdClass) ->
+  Π (auth : AuthClass) -> Π (body : BodyClass) -> Π (like : LikeFact) ->
+  Π (dbf : DbFact) -> Decision :=
+  λ (verb : Verb) -> λ (path : PathShape) -> λ (idc : IdClass) ->
+  λ (auth : AuthClass) -> λ (body : BodyClass) -> λ (like : LikeFact) ->
+  λ (dbf : DbFact) ->
+    match path motive (λ _ -> Decision)
+      | path-health =>
+          (match verb motive (λ _ -> Decision)
+            | verb-get =>
+                (match dbf motive (λ _ -> Decision)
+                  | db-unknown => decided st-observe err-observe act-observe
+                  | db-down => decided st-503 err-db act-error
+                  | db-ok => decided st-200 err-none act-health)
+            | verb-post => decided st-404 err-not-found act-error
+            | verb-other => decided st-404 err-not-found act-error)
+      | path-feed =>
+          (match verb motive (λ _ -> Decision)
+            | verb-get =>
+                (match dbf motive (λ _ -> Decision)
+                  | db-unknown => decided st-observe err-observe act-observe
+                  | db-down => decided st-500 err-internal act-error
+                  | db-ok => decided st-200 err-none act-feed)
+            | verb-post => decided st-404 err-not-found act-error
+            | verb-other => decided st-404 err-not-found act-error)
+      | path-posts =>
+          (match verb motive (λ _ -> Decision)
+            | verb-get => decided st-404 err-not-found act-error
+            | verb-post =>
+                (match auth motive (λ _ -> Decision)
+                  | auth-absent => decided st-401 err-missing-bearer act-error
+                  | auth-bad-token => decided st-401 err-bad-token act-error
+                  | auth-bad-payload => decided st-401 err-bad-payload act-error
+                  | auth-ok =>
+                      (match body motive (λ _ -> Decision)
+                        | body-none => decided st-400 err-malformed act-error
+                        | body-malformed => decided st-400 err-malformed act-error
+                        | body-required => decided st-400 err-body-required act-error
+                        | body-too-long => decided st-400 err-body-long act-error
+                        | body-ok =>
+                            (match dbf motive (λ _ -> Decision)
+                              | db-unknown => decided st-observe err-observe act-observe
+                              | db-down => decided st-500 err-internal act-error
+                              | db-ok => decided st-201 err-none act-create)))
+            | verb-other => decided st-404 err-not-found act-error)
+      | path-post-id =>
+          (match verb motive (λ _ -> Decision)
+            | verb-get =>
+                (match idc motive (λ _ -> Decision)
+                  | id-none => decided st-400 err-invalid-id act-error
+                  | id-bad => decided st-400 err-invalid-id act-error
+                  | id-unknown =>
+                      (match dbf motive (λ _ -> Decision)
+                        | db-unknown => decided st-observe err-observe act-observe
+                        | db-down => decided st-500 err-internal act-error
+                        | db-ok => decided st-observe err-observe act-observe)
+                  | id-missing => decided st-404 err-post-missing act-error
+                  | id-present => decided st-200 err-none act-read)
+            | verb-post => decided st-404 err-not-found act-error
+            | verb-other => decided st-404 err-not-found act-error)
+      | path-post-like =>
+          (match verb motive (λ _ -> Decision)
+            | verb-get => decided st-404 err-not-found act-error
+            | verb-post =>
+                (match auth motive (λ _ -> Decision)
+                  | auth-absent => decided st-401 err-missing-bearer act-error
+                  | auth-bad-token => decided st-401 err-bad-token act-error
+                  | auth-bad-payload => decided st-401 err-bad-payload act-error
+                  | auth-ok =>
+                      (match idc motive (λ _ -> Decision)
+                        | id-none => decided st-400 err-invalid-id act-error
+                        | id-bad => decided st-400 err-invalid-id act-error
+                        | id-unknown =>
+                            (match dbf motive (λ _ -> Decision)
+                              | db-unknown => decided st-observe err-observe act-observe
+                              | db-down => decided st-500 err-internal act-error
+                              | db-ok => decided st-observe err-observe act-observe)
+                        | id-missing => decided st-404 err-post-missing act-error
+                        | id-present =>
+                            (match like motive (λ _ -> Decision)
+                              | like-none => decided st-observe err-observe act-observe
+                              | like-unknown => decided st-observe err-observe act-observe
+                              | like-new => decided st-201 err-none act-like-new
+                              | like-again => decided st-200 err-none act-like-again)))
+            | verb-other => decided st-404 err-not-found act-error)
+      | path-other => decided st-404 err-not-found act-error
+
+def eq-health-ok : evidence
+  {decide verb-get path-health id-none auth-absent body-none like-none db-ok
+    ≡ decided st-200 err-none act-health : Decision} := refl
+
+def eq-health-down : evidence
+  {decide verb-get path-health id-none auth-absent body-none like-none db-down
+    ≡ decided st-503 err-db act-error : Decision} := refl
+
+def eq-health-observe : evidence
+  {decide verb-get path-health id-none auth-absent body-none like-none db-unknown
+    ≡ decided st-observe err-observe act-observe : Decision} := refl
+
+def eq-health-ignores-auth : evidence
+  {decide verb-get path-health id-bad auth-bad-token body-malformed like-new db-ok
+    ≡ decided st-200 err-none act-health : Decision} := refl
+
+def eq-health-post : evidence
+  {decide verb-post path-health id-none auth-ok body-ok like-none db-ok
+    ≡ decided st-404 err-not-found act-error : Decision} := refl
+
+def eq-feed-ok : evidence
+  {decide verb-get path-feed id-none auth-absent body-none like-none db-ok
+    ≡ decided st-200 err-none act-feed : Decision} := refl
+
+def eq-feed-down : evidence
+  {decide verb-get path-feed id-none auth-absent body-none like-none db-down
+    ≡ decided st-500 err-internal act-error : Decision} := refl
+
+def eq-feed-observe : evidence
+  {decide verb-get path-feed id-none auth-absent body-none like-none db-unknown
+    ≡ decided st-observe err-observe act-observe : Decision} := refl
+
+def eq-feed-post : evidence
+  {decide verb-post path-feed id-none auth-ok body-ok like-new db-ok
+    ≡ decided st-404 err-not-found act-error : Decision} := refl
+
+def eq-unknown : evidence
+  {decide verb-get path-other id-bad auth-ok body-ok like-new db-ok
+    ≡ decided st-404 err-not-found act-error : Decision} := refl
+
+def eq-get-posts-collection : evidence
+  {decide verb-get path-posts id-none auth-ok body-ok like-none db-ok
+    ≡ decided st-404 err-not-found act-error : Decision} := refl
+
+def eq-post-on-post-id : evidence
+  {decide verb-post path-post-id id-present auth-ok body-none like-none db-ok
+    ≡ decided st-404 err-not-found act-error : Decision} := refl
+
+def eq-get-like : evidence
+  {decide verb-get path-post-like id-present auth-ok body-none like-new db-ok
+    ≡ decided st-404 err-not-found act-error : Decision} := refl
+
+def eq-create-no-auth : evidence
+  {decide verb-post path-posts id-none auth-absent body-malformed like-none db-ok
+    ≡ decided st-401 err-missing-bearer act-error : Decision} := refl
+
+def eq-create-auth-before-body : evidence
+  {decide verb-post path-posts id-none auth-absent body-ok like-none db-ok
+    ≡ decided st-401 err-missing-bearer act-error : Decision} := refl
+
+def eq-create-bad-token : evidence
+  {decide verb-post path-posts id-none auth-bad-token body-ok like-none db-ok
+    ≡ decided st-401 err-bad-token act-error : Decision} := refl
+
+def eq-create-bad-payload : evidence
+  {decide verb-post path-posts id-none auth-bad-payload body-ok like-none db-ok
+    ≡ decided st-401 err-bad-payload act-error : Decision} := refl
+
+def eq-create-body-none : evidence
+  {decide verb-post path-posts id-none auth-ok body-none like-none db-ok
+    ≡ decided st-400 err-malformed act-error : Decision} := refl
+
+def eq-create-malformed : evidence
+  {decide verb-post path-posts id-none auth-ok body-malformed like-none db-ok
+    ≡ decided st-400 err-malformed act-error : Decision} := refl
+
+def eq-create-required : evidence
+  {decide verb-post path-posts id-none auth-ok body-required like-none db-ok
+    ≡ decided st-400 err-body-required act-error : Decision} := refl
+
+def eq-create-long : evidence
+  {decide verb-post path-posts id-none auth-ok body-too-long like-none db-ok
+    ≡ decided st-400 err-body-long act-error : Decision} := refl
+
+def eq-create-observe : evidence
+  {decide verb-post path-posts id-bad auth-ok body-ok like-none db-unknown
+    ≡ decided st-observe err-observe act-observe : Decision} := refl
+
+def eq-create-db-down : evidence
+  {decide verb-post path-posts id-none auth-ok body-ok like-none db-down
+    ≡ decided st-500 err-internal act-error : Decision} := refl
+
+def eq-create-ok : evidence
+  {decide verb-post path-posts id-bad auth-ok body-ok like-none db-ok
+    ≡ decided st-201 err-none act-create : Decision} := refl
+
+def eq-read-id-none : evidence
+  {decide verb-get path-post-id id-none auth-absent body-none like-none db-ok
+    ≡ decided st-400 err-invalid-id act-error : Decision} := refl
+
+def eq-read-id-bad : evidence
+  {decide verb-get path-post-id id-bad auth-absent body-none like-none db-ok
+    ≡ decided st-400 err-invalid-id act-error : Decision} := refl
+
+def eq-read-missing : evidence
+  {decide verb-get path-post-id id-missing auth-absent body-none like-none db-ok
+    ≡ decided st-404 err-post-missing act-error : Decision} := refl
+
+def eq-read-present : evidence
+  {decide verb-get path-post-id id-present auth-bad-token body-malformed like-again db-down
+    ≡ decided st-200 err-none act-read : Decision} := refl
+
+def eq-read-observe : evidence
+  {decide verb-get path-post-id id-unknown auth-absent body-none like-none db-unknown
+    ≡ decided st-observe err-observe act-observe : Decision} := refl
+
+def eq-read-db-down : evidence
+  {decide verb-get path-post-id id-unknown auth-absent body-none like-none db-down
+    ≡ decided st-500 err-internal act-error : Decision} := refl
+
+def eq-read-db-ok-still-unknown : evidence
+  {decide verb-get path-post-id id-unknown auth-absent body-none like-none db-ok
+    ≡ decided st-observe err-observe act-observe : Decision} := refl
+
+def eq-like-auth-before-bad-id : evidence
+  {decide verb-post path-post-like id-bad auth-absent body-none like-none db-ok
+    ≡ decided st-401 err-missing-bearer act-error : Decision} := refl
+
+def eq-like-auth-before-missing : evidence
+  {decide verb-post path-post-like id-missing auth-absent body-none like-none db-down
+    ≡ decided st-401 err-missing-bearer act-error : Decision} := refl
+
+def eq-like-auth-before-present : evidence
+  {decide verb-post path-post-like id-present auth-absent body-ok like-new db-ok
+    ≡ decided st-401 err-missing-bearer act-error : Decision} := refl
+
+def eq-like-bad-token-before-id : evidence
+  {decide verb-post path-post-like id-bad auth-bad-token body-none like-none db-ok
+    ≡ decided st-401 err-bad-token act-error : Decision} := refl
+
+def eq-like-bad-payload-before-id : evidence
+  {decide verb-post path-post-like id-bad auth-bad-payload body-none like-new db-ok
+    ≡ decided st-401 err-bad-payload act-error : Decision} := refl
+
+def eq-like-bad-id : evidence
+  {decide verb-post path-post-like id-bad auth-ok body-none like-none db-ok
+    ≡ decided st-400 err-invalid-id act-error : Decision} := refl
+
+def eq-like-id-none : evidence
+  {decide verb-post path-post-like id-none auth-ok body-none like-none db-ok
+    ≡ decided st-400 err-invalid-id act-error : Decision} := refl
+
+def eq-like-missing : evidence
+  {decide verb-post path-post-like id-missing auth-ok body-none like-none db-ok
+    ≡ decided st-404 err-post-missing act-error : Decision} := refl
+
+def eq-like-observe : evidence
+  {decide verb-post path-post-like id-unknown auth-ok body-none like-none db-unknown
+    ≡ decided st-observe err-observe act-observe : Decision} := refl
+
+def eq-like-db-down : evidence
+  {decide verb-post path-post-like id-unknown auth-ok body-none like-none db-down
+    ≡ decided st-500 err-internal act-error : Decision} := refl
+
+def eq-like-new : evidence
+  {decide verb-post path-post-like id-present auth-ok body-malformed like-new db-down
+    ≡ decided st-201 err-none act-like-new : Decision} := refl
+
+def eq-like-again : evidence
+  {decide verb-post path-post-like id-present auth-ok body-none like-again db-ok
+    ≡ decided st-200 err-none act-like-again : Decision} := refl
+
+def eq-like-fact-missing : evidence
+  {decide verb-post path-post-like id-present auth-ok body-none like-none db-ok
+    ≡ decided st-observe err-observe act-observe : Decision} := refl
+
+def eq-like-fact-unknown : evidence
+  {decide verb-post path-post-like id-present auth-ok body-none like-unknown db-ok
+    ≡ decided st-observe err-observe act-observe : Decision} := refl
+
+def eq-other-verb-posts : evidence
+  {decide verb-other path-posts id-none auth-ok body-ok like-none db-ok
+    ≡ decided st-404 err-not-found act-error : Decision} := refl
