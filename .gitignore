@@ -1,0 +1,7 @@
+/_build/
+/deps/
+/erl_crash.dump
+*.ez
+/tmp/
+c/test_classify
+*.o
