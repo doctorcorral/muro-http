@@ -9,7 +9,7 @@ permissions:
 
 jobs:
   check:
-    name: mix muro.gen --check
+    name: check
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
@@ -19,8 +19,32 @@ jobs:
           elixir-version: "1.20.4"
           otp-version: "29.1"
 
-      - name: Install the muro archive
-        run: mix archive.install hex muro 0.20.36 --force
+      - name: Fetch dependencies
+        run: mix deps.get
+
+      - name: Check formatting
+        run: mix format --check-formatted
+
+      - name: Check request book
+        run: mix muro.check --fuel 5000000 priv/muro/http/request.muro
+
+      - name: Check decide book
+        run: mix muro.check --fuel 5000000 priv/muro/challenge/decide.muro
 
       - name: Check generated modules
         run: mix muro.gen --check
+
+      - name: Test
+        run: mix test
+
+      - name: Build and run the C classify driver
+        run: |
+          cc -Wall -Wextra -Werror -std=c11 -I c -I c/generated -include c/shim.h \
+            -c -o c/test_classify.o c/test_classify.c
+          cc -Wall -Wextra -Werror -std=c11 -I c -c -o c/shim.o c/shim.c
+          cc -Wall -Wextra -Werror -Wno-missing-field-initializers \
+            -Wno-unused-variable -Wno-unused-function -std=c11 \
+            -I c -I c/generated -include c/shim.h \
+            -c -o c/request.o c/generated/request.c
+          cc -o c/test_classify c/test_classify.o c/request.o c/shim.o
+          ./c/test_classify
