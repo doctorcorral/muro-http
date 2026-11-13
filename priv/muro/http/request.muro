@@ -1,0 +1,871 @@
+-- Request classifier over a host receive buffer.
+--
+-- The buffer is a Slice of the request line, the headers, and whatever
+-- body bytes have arrived. Views are sub-slices of that buffer.
+-- muro 0.20.36 has no eliminator for WBool or Opt, so a byte test is
+-- toNat of the difference and a Nat match. That allocates in the C
+-- image. methodView, targetView, pathView, and versionView do not:
+-- they are only sliceUntil / sliceAfter / slice.
+--
+-- JSON body class and JWT checks are not this step. BodyClass stays
+-- body-none. The host still gets the raw body Slice and the length.
+import "std:bool.muro"
+import "../challenge/decide.muro"
+
+data Status : Type where
+  status-ok : Status
+  status-malformed : Status
+  status-need-more : Status
+
+data Keep : Type where
+  keep-yes : Keep
+  keep-no : Keep
+
+data AuthMark : Type where
+  mark-absent : AuthMark
+  mark-present : AuthMark
+
+data Classified : Type where
+  classified : Status → Verb → PathShape → IdClass → Keep → AuthMark → BodyClass → Classified
+
+data CL : Type where
+  cl-bad : CL
+  cl-ok : Π (+ v : U64) → CL
+
+data HSt : Type where
+  hst : Π (+ a : U64) → Π (+ b : U64) → Π (+ c : U64) → Π (+ d : U64) → Π (+ e : U64) → Π (+ f : U64) → Π (+ g : U64) → Π (+ h : U64) → Π (+ i : U64) → HSt
+
+-- i, lineStart, phase, flags, content-length, authStart, authLen, which, mark
+
+def u8nil : run Π (b : U8) → Bool :=
+  λ (b : U8) →
+    match (toNat b) motive (λ _ → Bool)
+      | 0 => true
+      | suc _ => false
+
+def u8eq : run Π (x : U8) → Π (y : U8) → Bool :=
+  λ (x : U8) → λ (y : U8) → u8nil (subi x y)
+
+-- U64 has no eliminator. toNat of a wrapped difference is not usable, so
+-- equality and order walk the eight bytes. A byte test is still toNat.
+def n8 : run Nat :=
+  suc (suc (suc (suc (suc (suc (suc (suc 0)))))))
+
+def natLt : run Π (a : Nat) → Π (b : Nat) → Bool :=
+  λ (a : Nat) → λ (b : Nat) →
+    match a motive (λ _ → Bool)
+      | 0 =>
+          (match b motive (λ _ → Bool)
+            | 0 => false
+            | suc _ => true)
+      | suc a1 =>
+          (match b motive (λ _ → Bool)
+            | 0 => false
+            | suc b1 => natLt a1 b1)
+
+def u8lt : run Π (x : U8) → Π (y : U8) → Bool :=
+  λ (x : U8) → λ (y : U8) → natLt (toNat x) (toNat y)
+
+def sh8 : run Π (n : U64) → U64 :=
+  λ (n : U64) → shri n n8
+
+def shl8 : run Π (n : U64) → U64 :=
+  λ (n : U64) → muli n (toU64 256)
+
+def topByte : run Π (n : U64) → U8 :=
+  λ (n : U64) → asU8 (sh8 (sh8 (sh8 (sh8 (sh8 (sh8 (sh8 n)))))))
+
+def eqGo : run Π (+ x : U64) → Π (+ y : U64) → Π (k : Nat) → Bool :=
+  λ (+ x : U64) → λ (+ y : U64) → λ (k : Nat) →
+    match k motive (λ _ → Bool)
+      | 0 => true
+      | suc k1 =>
+          (match (u8eq (asU8 x) (asU8 y)) motive (λ _ → Bool)
+            | true => eqGo (sh8 x) (sh8 y) k1
+            | false => false)
+def u64eq : run Π (x : U64) → Π (y : U64) → Bool :=
+  λ (x : U64) → λ (y : U64) → eqGo x y n8
+
+def u64nil : run Π (n : U64) → Bool :=
+  λ (n : U64) → u64eq n (toU64 0)
+
+def ltGo : run Π (+ x : U64) → Π (+ y : U64) → Π (k : Nat) → Bool :=
+  λ (+ x : U64) → λ (+ y : U64) → λ (k : Nat) →
+    match k motive (λ _ → Bool)
+      | 0 => false
+      | suc k1 =>
+          (match (u8eq (topByte x) (topByte y)) motive (λ _ → Bool)
+            | true => ltGo (shl8 x) (shl8 y) k1
+            | false => u8lt (topByte x) (topByte y))
+def u64lt : run Π (x : U64) → Π (y : U64) → Bool :=
+  λ (x : U64) → λ (y : U64) → ltGo x y n8
+
+-- True when n > 16384. BODY_MAX itself is still a legal length.
+def gt16384 : run Π (n : U64) → Bool :=
+  λ (n : U64) → u64lt (toU64 16384) n
+
+def lastB : run Π (+ s : Slice) → U8 :=
+  λ (+ s : Slice) →
+    sliceFold U8 (toU8 0)
+      (λ (b : U8) → λ (_r : Slice) → λ (_a : U8) → b)
+      s
+
+def byteAt : run Π (+ s : Slice) → Π (i : U64) → U8 :=
+  λ (+ s : Slice) → λ (i : U64) →
+    lastB (slice s i (toU64 1))
+
+def methodView : run Π (+ s : Slice) → Slice :=
+  λ (+ s : Slice) →
+    sliceUntil (sliceUntil s (toU8 10)) (toU8 32)
+
+def targetView : run Π (+ s : Slice) → Slice :=
+  λ (+ s : Slice) →
+    sliceUntil (sliceAfter (sliceUntil s (toU8 10)) (toU8 32)) (toU8 32)
+
+def pathView : run Π (+ s : Slice) → Slice :=
+  λ (+ s : Slice) →
+    sliceUntil (targetView s) (toU8 63)
+
+def versionView : run Π (+ s : Slice) → Slice :=
+  λ (+ s : Slice) →
+    slice (sliceAfter (sliceAfter (sliceUntil s (toU8 10)) (toU8 32)) (toU8 32)) (toU64 0) (toU64 8)
+
+def isEmpty : run Π (+ s : Slice) → Bool :=
+  λ (+ s : Slice) → u64eq (sliceLen s) (toU64 0)
+
+def crFlag : run Π (+ s : Slice) → U64 :=
+  λ (+ s : Slice) →
+    match (isEmpty s) motive (λ _ → U64)
+      | true => toU64 0
+      | false =>
+          (match (u8eq (lastB s) (toU8 13)) motive (λ _ → U64)
+            | true => toU64 1
+            | false => toU64 0)
+
+def dropCR : run Π (+ s : Slice) → Slice :=
+  λ (+ s : Slice) →
+    slice s (toU64 0) (subi (sliceLen s) (crFlag s))
+
+def lineOf : run Π (+ s : Slice) → Slice :=
+  λ (+ s : Slice) → dropCR (sliceUntil s (toU8 10))
+
+def versionTok : run Π (+ s : Slice) → Slice :=
+  λ (+ s : Slice) →
+    sliceAfter (sliceAfter (lineOf s) (toU8 32)) (toU8 32)
+
+def lower : run Π (+ b : U8) → U8 :=
+  λ (+ b : U8) →
+    match (and (not (u8lt b (toU8 65))) (not (u8lt (toU8 90) b))) motive (λ _ → U8)
+      | true => addi b (toU8 32)
+      | false => b
+
+def spanGo : run Π (+ s : Slice) → Π (+ w : Slice) → Π (k : Nat) → Π (+ j : U64) → Bool :=
+  λ (+ s : Slice) → λ (+ w : Slice) → λ (k : Nat) → λ (+ j : U64) →
+    match k motive (λ _ → Bool)
+      | 0 => true
+      | suc k1 =>
+          (match (u8eq (byteAt s j) (byteAt w j)) motive (λ _ → Bool)
+            | true => spanGo s w k1 (addi j (toU64 1))
+            | false => false)
+def spanEq : run Π (+ s : Slice) → Π (+ w : Slice) → Bool :=
+  λ (+ s : Slice) → λ (+ w : Slice) →
+    match (u64eq (sliceLen s) (sliceLen w)) motive (λ _ → Bool)
+      | true => spanGo s w (toNat (sliceLen w)) (toU64 0)
+      | false => false
+def nameGo : run Π (+ s : Slice) → Π (+ w : Slice) → Π (k : Nat) → Π (+ j : U64) → Bool :=
+  λ (+ s : Slice) → λ (+ w : Slice) → λ (k : Nat) → λ (+ j : U64) →
+    match k motive (λ _ → Bool)
+      | 0 => true
+      | suc k1 =>
+          (match (u8eq (lower (byteAt s j)) (lower (byteAt w j))) motive (λ _ → Bool)
+            | true => nameGo s w k1 (addi j (toU64 1))
+            | false => false)
+def nameEq : run Π (+ s : Slice) → Π (+ w : Slice) → Bool :=
+  λ (+ s : Slice) → λ (+ w : Slice) →
+    match (u64eq (sliceLen s) (sliceLen w)) motive (λ _ → Bool)
+      | true => nameGo s w (toNat (sliceLen w)) (toU64 0)
+      | false => false
+def prefGo : run Π (+ s : Slice) → Π (+ i : U64) → Π (+ w : Slice) → Π (k : Nat) → Π (+ j : U64) → Bool :=
+  λ (+ s : Slice) → λ (+ i : U64) → λ (+ w : Slice) → λ (k : Nat) → λ (+ j : U64) →
+    match k motive (λ _ → Bool)
+      | 0 => true
+      | suc k1 =>
+          (match (u64lt (addi i j) (sliceLen s)) motive (λ _ → Bool)
+            | true =>
+                (match (u8eq (lower (byteAt s (addi i j))) (lower (byteAt w j))) motive (λ _ → Bool)
+                  | true => prefGo s i w k1 (addi j (toU64 1))
+                  | false => false)
+            | false => false)
+def prefAt : run Π (+ s : Slice) → Π (i : U64) → Π (+ w : Slice) → Bool :=
+  λ (+ s : Slice) → λ (i : U64) → λ (+ w : Slice) →
+    prefGo s i w (toNat (sliceLen w)) (toU64 0)
+
+def findGo : run Π (+ s : Slice) → Π (+ w : Slice) → Π (k : Nat) → Π (+ i : U64) → Bool :=
+  λ (+ s : Slice) → λ (+ w : Slice) → λ (k : Nat) → λ (+ i : U64) →
+    match k motive (λ _ → Bool)
+      | 0 => false
+      | suc k1 =>
+          (match (prefAt s i w) motive (λ _ → Bool)
+            | true => true
+            | false => findGo s w k1 (addi i (toU64 1)))
+
+def hasToken : run Π (+ s : Slice) → Π (+ w : Slice) → Bool :=
+  λ (+ s : Slice) → λ (+ w : Slice) →
+    match (isEmpty w) motive (λ _ → Bool)
+      | true => false
+      | false => findGo s w (toNat (addi (sliceLen s) (toU64 1))) (toU64 0)
+
+def isDigit : run Π (+ b : U8) → Bool :=
+  λ (+ b : U8) →
+    and (not (u8lt b (toU8 48))) (not (u8lt (toU8 57) b))
+
+def leadWS : run Π (+ b : U8) → Bool :=
+  λ (+ b : U8) → or (u8eq b (toU8 32)) (u8eq b (toU8 9))
+
+def trailWS : run Π (+ b : U8) → Bool :=
+  λ (+ b : U8) → or (leadWS b) (u8eq b (toU8 13))
+
+def leadGo : run Π (+ s : Slice) → Π (k : Nat) → Π (+ i : U64) → U64 :=
+  λ (+ s : Slice) → λ (k : Nat) → λ (+ i : U64) →
+    match k motive (λ _ → U64)
+      | 0 => i
+      | suc k1 =>
+          (match (leadWS (byteAt s i)) motive (λ _ → U64)
+            | true => leadGo s k1 (addi i (toU64 1))
+            | false => i)
+def leadCount : run Π (+ s : Slice) → U64 :=
+  λ (+ s : Slice) → leadGo s (toNat (sliceLen s)) (toU64 0)
+
+def trailGo : run Π (+ s : Slice) → Π (k : Nat) → Π (+ i : U64) → U64 :=
+  λ (+ s : Slice) → λ (k : Nat) → λ (+ i : U64) →
+    match k motive (λ _ → U64)
+      | 0 => i
+      | suc k1 =>
+          (match (u64eq i (toU64 0)) motive (λ _ → U64)
+            | true => i
+            | false =>
+                (match (trailWS (byteAt s (subi i (toU64 1)))) motive (λ _ → U64)
+                  | true => trailGo s k1 (subi i (toU64 1))
+                  | false => i))
+def trailEnd : run Π (+ s : Slice) → U64 :=
+  λ (+ s : Slice) → trailGo s (toNat (sliceLen s)) (sliceLen s)
+
+def trimmed : run Π (+ s : Slice) → Slice :=
+  λ (+ s : Slice) →
+    slice (slice s (leadCount s) (subi (sliceLen s) (leadCount s))) (toU64 0) (trailEnd (slice s (leadCount s) (subi (sliceLen s) (leadCount s))))
+
+def packEnd : run Π (st : U64) → Π (i : U64) → U64 :=
+  λ (st : U64) → λ (i : U64) →
+    ori (andi st (toU64 7)) (muli i (toU64 8))
+
+def endSt : run Π (a : U64) → U64 :=
+  λ (a : U64) → andi a (toU64 7)
+
+def endIx : run Π (a : U64) → U64 :=
+  λ (a : U64) → shri a (suc (suc (suc 0)))
+
+def crlfByte : run Π (+ b : U8) → Π (+ a : U64) → U64 :=
+  λ (+ b : U8) → λ (+ a : U64) →
+    match (u64eq (endSt a) (toU64 4)) motive (λ _ → U64)
+      | true => a
+      | false =>
+          (match (u8eq b (toU8 13)) motive (λ _ → U64)
+            | true =>
+                (match (u64eq (endSt a) (toU64 2)) motive (λ _ → U64)
+                  | true => packEnd (toU64 3) (addi (endIx a) (toU64 1))
+                  | false => packEnd (toU64 1) (addi (endIx a) (toU64 1)))
+            | false =>
+                (match (u8eq b (toU8 10)) motive (λ _ → U64)
+                  | true =>
+                      (match (u64eq (endSt a) (toU64 1)) motive (λ _ → U64)
+                        | true => packEnd (toU64 2) (addi (endIx a) (toU64 1))
+                        | false =>
+                            (match (u64eq (endSt a) (toU64 3)) motive (λ _ → U64)
+                              | true => packEnd (toU64 4) (addi (endIx a) (toU64 1))
+                              | false => packEnd (toU64 0) (addi (endIx a) (toU64 1))))
+                  | false => packEnd (toU64 0) (addi (endIx a) (toU64 1))))
+
+def lfByte : run Π (+ b : U8) → Π (+ a : U64) → U64 :=
+  λ (+ b : U8) → λ (+ a : U64) →
+    match (u64eq (endSt a) (toU64 2)) motive (λ _ → U64)
+      | true => a
+      | false =>
+          (match (u8eq b (toU8 10)) motive (λ _ → U64)
+            | true =>
+                (match (u64eq (endSt a) (toU64 1)) motive (λ _ → U64)
+                  | true => packEnd (toU64 2) (addi (endIx a) (toU64 1))
+                  | false => packEnd (toU64 1) (addi (endIx a) (toU64 1)))
+            | false => packEnd (toU64 0) (addi (endIx a) (toU64 1)))
+
+def crlfFold : run Π (+ s : Slice) → U64 :=
+  λ (+ s : Slice) →
+    sliceFold U64 (packEnd (toU64 0) (toU64 0))
+      (λ (b : U8) → λ (_r : Slice) → λ (a : U64) → crlfByte b a)
+      s
+
+def lfFold : run Π (+ s : Slice) → U64 :=
+  λ (+ s : Slice) →
+    sliceFold U64 (packEnd (toU64 0) (toU64 0))
+      (λ (b : U8) → λ (_r : Slice) → λ (a : U64) → lfByte b a)
+      s
+
+def takeEnd : run Π (+ a : U64) → Π (done : U64) → Π (miss : U64) → U64 :=
+  λ (+ a : U64) → λ (done : U64) → λ (miss : U64) →
+    match (u64eq (endSt a) done) motive (λ _ → U64)
+      | true => endIx a
+      | false => miss
+
+def crlfEnd : run Π (+ s : Slice) → U64 :=
+  λ (+ s : Slice) → takeEnd (crlfFold s) (toU64 4) (addi (sliceLen s) (toU64 1))
+
+def lfEnd : run Π (+ s : Slice) → U64 :=
+  λ (+ s : Slice) → takeEnd (lfFold s) (toU64 2) (addi (sliceLen s) (toU64 1))
+
+def pickEnd : run Π (+ s : Slice) → Π (+ c : U64) → Π (+ l : U64) → U64 :=
+  λ (+ s : Slice) → λ (+ c : U64) → λ (+ l : U64) →
+    match (u64lt c (addi (sliceLen s) (toU64 1))) motive (λ _ → U64)
+      | true => c
+      | false =>
+          (match (u64lt l (addi (sliceLen s) (toU64 1))) motive (λ _ → U64)
+            | true => l
+            | false => addi (sliceLen s) (toU64 1))
+
+def headerEnd : run Π (+ s : Slice) → U64 :=
+  λ (+ s : Slice) → pickEnd s (crlfEnd s) (lfEnd s)
+
+def headersDone : run Π (+ s : Slice) → Bool :=
+  λ (+ s : Slice) → not (u64eq (headerEnd s) (addi (sliceLen s) (toU64 1)))
+
+def has : run Π (f : U64) → Π (bit : U64) → Bool :=
+  λ (f : U64) → λ (bit : U64) → not (u64nil (andi f bit))
+
+def withBit : run Π (f : U64) → Π (bit : U64) → U64 :=
+  λ (f : U64) → λ (bit : U64) → ori f bit
+
+def noBit : run Π (f : U64) → Π (bit : U64) → U64 :=
+  λ (f : U64) → λ (bit : U64) → andi f (noti bit)
+
+def clStep : run Π (+ b : U8) → Π (acc : CL) → CL :=
+  λ (+ b : U8) → λ (acc : CL) →
+    match acc motive (λ _ → CL)
+      | cl-bad => cl-bad
+      | cl-ok v =>
+          (match (isDigit b) motive (λ _ → CL)
+            | true =>
+                (match (gt16384 (addi (muli v (toU64 10)) (asU64 (subi b (toU8 48))))) motive (λ _ → CL)
+                  | true => cl-bad
+                  | false => cl-ok (addi (muli v (toU64 10)) (asU64 (subi b (toU8 48)))))
+            | false => cl-bad)
+def digits : run Π (+ s : Slice) → CL :=
+  λ (+ s : Slice) →
+    match (isEmpty s) motive (λ _ → CL)
+      | true => cl-bad
+      | false =>
+          (match (gt16384 (subi (sliceLen s) (toU64 1))) motive (λ _ → CL)
+            | true => cl-bad
+            | false =>
+                sliceFold CL (cl-ok (toU64 0))
+                  (λ (b : U8) → λ (_r : Slice) → λ (acc : CL) → clStep b acc)
+                  s)
+
+-- gt16384 (len - 1) is true when len > 16385, so a 32-byte value is still
+-- rejected below. The host rejects a trimmed value of 32 bytes or more.
+def digitsOrLong : run Π (+ s : Slice) → CL :=
+  λ (+ s : Slice) →
+    match (u64lt (toU64 31) (sliceLen s)) motive (λ _ → CL)
+      | true => cl-bad
+      | false => digits s
+
+def parseCL : run Π (+ s : Slice) → CL :=
+  λ (+ s : Slice) →
+    match (isEmpty s) motive (λ _ → CL)
+      | true => cl-bad
+      | false =>
+          (match (u8eq (byteAt s (toU64 0)) (toU8 43)) motive (λ _ → CL)
+            | true => digitsOrLong (slice s (toU64 1) (subi (sliceLen s) (toU64 1)))
+            | false => digitsOrLong s)
+
+def postsRest : run Π (+ path : Slice) → Slice :=
+  λ (+ path : Slice) →
+    slice path (toU64 7) (subi (sliceLen path) (toU64 7))
+
+def slashGo : run Π (+ s : Slice) → Π (k : Nat) → Π (+ i : U64) → Π (stopped : Bool) → U64 :=
+  λ (+ s : Slice) → λ (k : Nat) → λ (+ i : U64) → λ (stopped : Bool) →
+    match k motive (λ _ → U64)
+      | 0 => i
+      | suc k1 =>
+          (match stopped motive (λ _ → U64)
+            | true => i
+            | false =>
+                (match (u8eq (byteAt s i) (toU8 47)) motive (λ _ → U64)
+                  | true => i
+                  | false => slashGo s k1 (addi i (toU64 1)) false))
+
+def slashAt : run Π (+ s : Slice) → U64 :=
+  λ (+ s : Slice) → slashGo s (toNat (sliceLen s)) (toU64 0) false
+
+def idSlice : run Π (+ path : Slice) → Slice :=
+  λ (+ path : Slice) →
+    slice (postsRest path) (toU64 0) (slashAt (postsRest path))
+
+def likeRest : run Π (+ path : Slice) → Slice :=
+  λ (+ path : Slice) →
+    slice (postsRest path) (slashAt (postsRest path)) (subi (sliceLen (postsRest path)) (slashAt (postsRest path)))
+
+def noSlash : run Π (+ s : Slice) → Bool :=
+  λ (+ s : Slice) → u64eq (slashAt s) (sliceLen s)
+
+-- Equal-length digit strings. The first different byte decides.
+-- INT64_MAX is 9223372036854775807.
+def lexGo : run Π (+ s : Slice) → Π (+ w : Slice) → Π (k : Nat) → Π (+ j : U64) → Bool :=
+  λ (+ s : Slice) → λ (+ w : Slice) → λ (k : Nat) → λ (+ j : U64) →
+    match k motive (λ _ → Bool)
+      | 0 => true
+      | suc k1 =>
+          (match (u8eq (byteAt s j) (byteAt w j)) motive (λ _ → Bool)
+            | true => lexGo s w k1 (addi j (toU64 1))
+            | false => u8lt (byteAt s j) (byteAt w j))
+
+def lexLe : run Π (+ s : Slice) → Bool :=
+  λ (+ s : Slice) →
+    lexGo s b"9223372036854775807" (toNat (sliceLen b"9223372036854775807")) (toU64 0)
+
+def fitsInt : run Π (+ s : Slice) → Bool :=
+  λ (+ s : Slice) →
+    match (u64lt (sliceLen s) (toU64 19)) motive (λ _ → Bool)
+      | true => true
+      | false =>
+          (match (u64eq (sliceLen s) (toU64 19)) motive (λ _ → Bool)
+            | true => lexLe s
+            | false => false)
+def allDigits : run Π (+ s : Slice) → Bool :=
+  λ (+ s : Slice) →
+    match (isEmpty s) motive (λ _ → Bool)
+      | true => false
+      | false =>
+          sliceFold Bool true
+            (λ (b : U8) → λ (_r : Slice) → λ (acc : Bool) → and acc (isDigit b))
+            s
+
+def leadingOk : run Π (+ s : Slice) → Bool :=
+  λ (+ s : Slice) →
+    and (isDigit (byteAt s (toU64 0))) (u8lt (toU8 48) (byteAt s (toU64 0)))
+
+def idOk : run Π (+ s : Slice) → Bool :=
+  λ (+ s : Slice) →
+    and (not (u64lt (toU64 19) (sliceLen s)))
+      (and (not (isEmpty s))
+        (and (leadingOk s)
+          (and (allDigits s) (fitsInt s))))
+
+def idNum : run Π (+ s : Slice) → I64 :=
+  λ (+ s : Slice) →
+    sliceFold I64 (toI64 0)
+      (λ (b : U8) → λ (_r : Slice) → λ (v : I64) →
+        addi (muli v (toI64 10)) (asI64 (subi b (toU8 48))))
+      s
+
+def verbOf : run Π (+ s : Slice) → Verb :=
+  λ (+ s : Slice) →
+    match (spanEq (methodView s) b"GET") motive (λ _ → Verb)
+      | true => verb-get
+      | false =>
+          (match (spanEq (methodView s) b"POST") motive (λ _ → Verb)
+            | true => verb-post
+            | false => verb-other)
+
+def postShape : run Π (+ path : Slice) → PathShape :=
+  λ (+ path : Slice) →
+    match (noSlash (postsRest path)) motive (λ _ → PathShape)
+      | true => path-post-id
+      | false =>
+          (match (spanEq (likeRest path) b"/like") motive (λ _ → PathShape)
+            | true => path-post-like
+            | false => path-other)
+
+def pathOf : run Π (+ s : Slice) → PathShape :=
+  λ (+ s : Slice) →
+    match (spanEq (pathView s) b"/health") motive (λ _ → PathShape)
+      | true => path-health
+      | false =>
+          (match (spanEq (pathView s) b"/feed") motive (λ _ → PathShape)
+            | true => path-feed
+            | false =>
+                (match (spanEq (pathView s) b"/posts") motive (λ _ → PathShape)
+                  | true => path-posts
+                  | false =>
+                      (match (and (u64lt (toU64 7) (sliceLen (pathView s))) (prefAt (pathView s) (toU64 0) b"/posts/")) motive (λ _ → PathShape)
+                        | true => postShape (pathView s)
+                        | false => path-other)))
+
+def idClassOf : run Π (+ s : Slice) → IdClass :=
+  λ (+ s : Slice) →
+    match (pathOf s) motive (λ _ → IdClass)
+      | path-health => id-none
+      | path-feed => id-none
+      | path-posts => id-none
+      | path-post-id =>
+          (match (idOk (idSlice (pathView s))) motive (λ _ → IdClass)
+            | true => id-unknown
+            | false => id-bad)
+      | path-post-like =>
+          (match (idOk (idSlice (pathView s))) motive (λ _ → IdClass)
+            | true => id-unknown
+            | false => id-bad)
+      | path-other => id-none
+
+def idNumber : run Π (+ s : Slice) → I64 :=
+  λ (+ s : Slice) →
+    match (idClassOf s) motive (λ _ → I64)
+      | id-none => toI64 0
+      | id-bad => toI64 0
+      | id-unknown => idNum (idSlice (pathView s))
+      | id-missing => toI64 0
+      | id-present => toI64 0
+
+def missingSpace : run Π (+ s : Slice) → Bool :=
+  λ (+ s : Slice) →
+    or (u64eq (sliceLen (methodView s)) (sliceLen (sliceUntil s (toU8 10))))
+      (u64eq (sliceLen (targetView s)) (sliceLen (sliceAfter (sliceUntil s (toU8 10)) (toU8 32))))
+
+def versionOk : run Π (+ s : Slice) → Bool :=
+  λ (+ s : Slice) →
+    or (spanEq (versionTok s) b"HTTP/1.1") (spanEq (versionTok s) b"HTTP/1.0")
+
+def lineOk : run Π (+ s : Slice) → Bool :=
+  λ (+ s : Slice) → and (not (missingSpace s)) (versionOk s)
+
+def keepDefault : run Π (+ s : Slice) → Keep :=
+  λ (+ s : Slice) →
+    match (spanEq (versionTok s) b"HTTP/1.0") motive (λ _ → Keep)
+      | true => keep-no
+      | false => keep-yes
+
+def blank : run HSt :=
+  hst (toU64 0) (toU64 0) (toU64 4) (toU64 0) (toU64 0) (toU64 0) (toU64 0) (toU64 0) (toU64 0)
+
+def stick : run Π (i : U64) → Π (ls : U64) → Π (ph : U64) → Π (fl : U64) → Π (cl : U64) → Π (aS : U64) → Π (aL : U64) → Π (wh : U64) → Π (mark : U64) → HSt :=
+  λ (i : U64) → λ (ls : U64) → λ (ph : U64) → λ (fl : U64) → λ (cl : U64) → λ (aS : U64) → λ (aL : U64) → λ (wh : U64) → λ (mark : U64) →
+    hst i ls ph fl cl aS aL wh mark
+
+def whichOf : run Π (+ name : Slice) → U64 :=
+  λ (+ name : Slice) →
+    match (nameEq name b"content-length") motive (λ _ → U64)
+      | true => toU64 1
+      | false =>
+          (match (nameEq name b"authorization") motive (λ _ → U64)
+            | true => toU64 2
+            | false =>
+                (match (nameEq name b"connection") motive (λ _ → U64)
+                  | true => toU64 3
+                  | false =>
+                      (match (nameEq name b"transfer-encoding") motive (λ _ → U64)
+                        | true => toU64 4
+                        | false => toU64 5)))
+
+def valueSlice : run Π (+ buf : Slice) → Π (+ mark : U64) → Π (endI : U64) → Slice :=
+  λ (+ buf : Slice) → λ (+ mark : U64) → λ (endI : U64) →
+    trimmed (slice buf mark (subi endI mark))
+
+data CLOut : Type where
+  cl-out : U64 → U64 → CLOut
+
+data AuthOut : Type where
+  auth-out : U64 → U64 → U64 → AuthOut
+
+def finishCL : run Π (+ raw : Slice) → Π (+ fl : U64) → Π (+ cl : U64) → CLOut :=
+  λ (+ raw : Slice) → λ (+ fl : U64) → λ (+ cl : U64) →
+    match (has fl (toU64 2)) motive (λ _ → CLOut)
+      | true => cl-out (withBit fl (toU64 32)) cl
+      | false =>
+          (match (parseCL raw) motive (λ _ → CLOut)
+            | cl-bad => cl-out (withBit fl (toU64 32)) cl
+            | cl-ok v => cl-out (withBit fl (toU64 2)) v)
+
+def finishAuth : run Π (+ raw : Slice) → Π (fl : U64) → Π (abs : U64) → AuthOut :=
+  λ (+ raw : Slice) → λ (fl : U64) → λ (abs : U64) →
+    auth-out (withBit fl (toU64 8)) (addi abs (leadCount raw)) (sliceLen (trimmed raw))
+
+def finishConn : run Π (+ raw : Slice) → Π (fl : U64) → U64 :=
+  λ (+ raw : Slice) → λ (fl : U64) →
+    match (hasToken (trimmed raw) b"close") motive (λ _ → U64)
+      | true => withBit (noBit (withBit fl (toU64 64)) (toU64 16)) (toU64 64)
+      | false =>
+          (match (hasToken (trimmed raw) b"keep-alive") motive (λ _ → U64)
+            | true => withBit (withBit fl (toU64 64)) (toU64 16)
+            | false => fl)
+
+def contentEnd : run Π (+ buf : Slice) → Π (+ i : U64) → Π (ls : U64) → U64 :=
+  λ (+ buf : Slice) → λ (+ i : U64) → λ (ls : U64) →
+    match (u64eq i ls) motive (λ _ → U64)
+      | true => i
+      | false =>
+          (match (u8eq (byteAt buf (subi i (toU64 1))) (toU8 13)) motive (λ _ → U64)
+            | true => subi i (toU64 1)
+            | false => i)
+
+def nextLine : run Π (+ i : U64) → Π (fl : U64) → Π (cl : U64) → Π (aS : U64) → Π (aL : U64) → HSt :=
+  λ (+ i : U64) → λ (fl : U64) → λ (cl : U64) → λ (aS : U64) → λ (aL : U64) →
+    hst (addi i (toU64 1)) (addi i (toU64 1)) (toU64 0) (noBit fl (toU64 1)) cl aS aL (toU64 0) (toU64 0)
+
+def finishLine : run Π (+ buf : Slice) → Π (+ i : U64) → Π (+ ls : U64) → Π (+ ph : U64) → Π (+ fl : U64) → Π (+ cl : U64) → Π (+ aS : U64) → Π (+ aL : U64) → Π (wh : U64) → Π (mark : U64) → HSt :=
+  λ (+ buf : Slice) → λ (+ i : U64) → λ (+ ls : U64) → λ (+ ph : U64) → λ (+ fl : U64) → λ (+ cl : U64) → λ (+ aS : U64) → λ (+ aL : U64) → λ (wh : U64) → λ (mark : U64) →
+    match (u64eq ph (toU64 4)) motive (λ _ → HSt)
+      | true => nextLine i fl cl aS aL
+      | false =>
+          (match (or (u64eq ph (toU64 2)) (u64eq ph (toU64 3))) motive (λ _ → HSt)
+            | true => hst i ls ph fl cl aS aL wh mark
+            | false =>
+                (match (u64eq (contentEnd buf i ls) ls) motive (λ _ → HSt)
+                  | true => hst (addi i (toU64 1)) (addi i (toU64 1)) (toU64 2) fl cl aS aL (toU64 0) (toU64 0)
+                  | false =>
+                      (match (has fl (toU64 1)) motive (λ _ → HSt)
+                        | true => finishKnown buf i ls fl cl aS aL wh mark
+                        | false => hst i ls (toU64 3) (withBit fl (toU64 32)) cl aS aL wh mark)))
+def finishKnown : run Π (+ buf : Slice) → Π (+ i : U64) → Π (+ ls : U64) → Π (+ fl : U64) → Π (+ cl : U64) → Π (+ aS : U64) → Π (+ aL : U64) → Π (+ wh : U64) → Π (+ mark : U64) → HSt :=
+  λ (+ buf : Slice) → λ (+ i : U64) → λ (+ ls : U64) → λ (+ fl : U64) → λ (+ cl : U64) → λ (+ aS : U64) → λ (+ aL : U64) → λ (+ wh : U64) → λ (+ mark : U64) →
+    match (u64eq wh (toU64 1)) motive (λ _ → HSt)
+      | true =>
+          (match (finishCL (valueSlice buf mark (contentEnd buf i ls)) fl cl) motive (λ _ → HSt)
+            | cl-out fl2 cl2 => nextLine i fl2 cl2 aS aL)
+      | false =>
+          (match (u64eq wh (toU64 2)) motive (λ _ → HSt)
+            | true =>
+                (match (finishAuth (slice buf mark (subi (contentEnd buf i ls) mark)) fl mark) motive (λ _ → HSt)
+                  | auth-out fl2 aS2 aL2 => nextLine i fl2 cl aS2 aL2)
+            | false =>
+                (match (u64eq wh (toU64 3)) motive (λ _ → HSt)
+                  | true => nextLine i (finishConn (slice buf mark (subi (contentEnd buf i ls) mark)) fl) cl aS aL
+                  | false =>
+                      (match (u64eq wh (toU64 4)) motive (λ _ → HSt)
+                        | true => nextLine i (withBit fl (toU64 4)) cl aS aL
+                        | false => nextLine i fl cl aS aL)))
+
+def onColon : run Π (+ buf : Slice) → Π (+ i : U64) → Π (+ ls : U64) → Π (fl : U64) → Π (cl : U64) → Π (aS : U64) → Π (aL : U64) → HSt :=
+  λ (+ buf : Slice) → λ (+ i : U64) → λ (+ ls : U64) → λ (fl : U64) → λ (cl : U64) → λ (aS : U64) → λ (aL : U64) →
+    hst (addi i (toU64 1)) ls (toU64 1) (withBit fl (toU64 1)) cl aS aL (whichOf (slice buf ls (subi i ls))) (addi i (toU64 1))
+
+def stepB : run Π (+ buf : Slice) → Π (+ b : U8) → Π (+ st : HSt) → HSt :=
+  λ (+ buf : Slice) → λ (+ b : U8) → λ (+ st : HSt) →
+    match st motive (λ _ → HSt)
+      | hst i ls ph fl cl aS aL wh mark =>
+          (match (or (u64eq ph (toU64 2)) (u64eq ph (toU64 3))) motive (λ _ → HSt)
+            | true => st
+            | false =>
+                (match (u8eq b (toU8 10)) motive (λ _ → HSt)
+                  | true => finishLine buf i ls ph fl cl aS aL wh mark
+                  | false =>
+                      (match (u64eq ph (toU64 4)) motive (λ _ → HSt)
+                        | true => hst (addi i (toU64 1)) ls ph fl cl aS aL wh mark
+                        | false =>
+                            (match (and (u64eq ph (toU64 0)) (u8eq b (toU8 58))) motive (λ _ → HSt)
+                              | true => onColon buf i ls fl cl aS aL
+                              | false => hst (addi i (toU64 1)) ls ph fl cl aS aL wh mark))))
+
+def scan : run Π (+ s : Slice) → HSt :=
+  λ (+ s : Slice) →
+    sliceFold HSt blank
+      (λ (b : U8) → λ (_r : Slice) → λ (st : HSt) → stepB s b st)
+      s
+
+def scanPh : run Π (st : HSt) → U64 :=
+  λ (st : HSt) →
+    match st motive (λ _ → U64)
+      | hst _i _ls ph _fl _cl _aS _aL _wh _mark => ph
+
+def scanFl : run Π (st : HSt) → U64 :=
+  λ (st : HSt) →
+    match st motive (λ _ → U64)
+      | hst _i _ls _ph fl _cl _aS _aL _wh _mark => fl
+
+def scanCL : run Π (st : HSt) → U64 :=
+  λ (st : HSt) →
+    match st motive (λ _ → U64)
+      | hst _i _ls _ph _fl cl _aS _aL _wh _mark => cl
+
+def scanAS : run Π (st : HSt) → U64 :=
+  λ (st : HSt) →
+    match st motive (λ _ → U64)
+      | hst _i _ls _ph _fl _cl aS _aL _wh _mark => aS
+
+def scanAL : run Π (st : HSt) → U64 :=
+  λ (st : HSt) →
+    match st motive (λ _ → U64)
+      | hst _i _ls _ph _fl _cl _aS aL _wh _mark => aL
+
+def headersOk : run Π (+ s : Slice) → Bool :=
+  λ (+ s : Slice) →
+    and (u64eq (scanPh (scan s)) (toU64 2)) (not (has (scanFl (scan s)) (toU64 32)))
+
+def sawTE : run Π (+ s : Slice) → Bool :=
+  λ (+ s : Slice) → has (scanFl (scan s)) (toU64 4)
+
+def sawCL : run Π (+ s : Slice) → Bool :=
+  λ (+ s : Slice) → has (scanFl (scan s)) (toU64 2)
+
+def contentLength : run Π (+ s : Slice) → U64 :=
+  λ (+ s : Slice) →
+    match (sawCL s) motive (λ _ → U64)
+      | true => scanCL (scan s)
+      | false => toU64 0
+
+def authMark : run Π (+ s : Slice) → AuthMark :=
+  λ (+ s : Slice) →
+    match (has (scanFl (scan s)) (toU64 8)) motive (λ _ → AuthMark)
+      | true => mark-present
+      | false => mark-absent
+
+def authAt : run Π (+ s : Slice) → U64 :=
+  λ (+ s : Slice) →
+    match (authMark s) motive (λ _ → U64)
+      | mark-absent => addi (sliceLen s) (toU64 1)
+      | mark-present => scanAS (scan s)
+
+def authLen : run Π (+ s : Slice) → U64 :=
+  λ (+ s : Slice) →
+    match (authMark s) motive (λ _ → U64)
+      | mark-absent => toU64 0
+      | mark-present => scanAL (scan s)
+
+def authValue : run Π (+ s : Slice) → Slice :=
+  λ (+ s : Slice) → slice s (authAt s) (authLen s)
+
+def keepOf : run Π (+ s : Slice) → Keep :=
+  λ (+ s : Slice) →
+    match (has (scanFl (scan s)) (toU64 64)) motive (λ _ → Keep)
+      | true =>
+          (match (has (scanFl (scan s)) (toU64 16)) motive (λ _ → Keep)
+            | true => keep-yes
+            | false => keep-no)
+      | false => keepDefault s
+
+def bodyShort : run Π (+ s : Slice) → Bool :=
+  λ (+ s : Slice) →
+    and (sawCL s) (u64lt (sliceLen s) (addi (headerEnd s) (contentLength s)))
+
+def bodyAt : run Π (+ s : Slice) → U64 :=
+  λ (+ s : Slice) →
+    match (headersDone s) motive (λ _ → U64)
+      | true => headerEnd s
+      | false => addi (sliceLen s) (toU64 1)
+
+def bodyLen : run Π (+ s : Slice) → U64 :=
+  λ (+ s : Slice) →
+    match (headersDone s) motive (λ _ → U64)
+      | true =>
+          (match (and (sawCL s) (not (bodyShort s))) motive (λ _ → U64)
+            | true => contentLength s
+            | false => toU64 0)
+      | false => toU64 0
+
+def bodyView : run Π (+ s : Slice) → Slice :=
+  λ (+ s : Slice) → slice s (bodyAt s) (bodyLen s)
+
+def statusOf : run Π (+ s : Slice) → Status :=
+  λ (+ s : Slice) →
+    match (headersDone s) motive (λ _ → Status)
+      | true =>
+          (match (gt16384 (headerEnd s)) motive (λ _ → Status)
+            | true => status-malformed
+            | false =>
+                (match (lineOk s) motive (λ _ → Status)
+                  | true =>
+                      (match (headersOk s) motive (λ _ → Status)
+                        | true =>
+                            (match (or (sawTE s) (has (scanFl (scan s)) (toU64 32))) motive (λ _ → Status)
+                              | true => status-malformed
+                              | false =>
+                                  (match (bodyShort s) motive (λ _ → Status)
+                                    | true => status-need-more
+                                    | false => status-ok))
+                        | false => status-malformed)
+                  | false => status-malformed))
+      | false =>
+          (match (gt16384 (sliceLen s)) motive (λ _ → Status)
+            | true => status-malformed
+            | false => status-need-more)
+def classify : run Π (+ s : Slice) → Classified :=
+  λ (+ s : Slice) →
+    classified (statusOf s) (verbOf s) (pathOf s) (idClassOf s) (keepOf s) (authMark s) body-none
+
+def method-get : evidence {methodView b"GET /health HTTP/1.1\r\n" ≡ b"GET" : Slice} := refl
+
+def path-feed-q : evidence {pathView b"GET /feed?x=1 HTTP/1.1\r\n" ≡ b"/feed" : Slice} := refl
+
+def version-view : evidence {versionView b"GET /health HTTP/1.1\r\n" ≡ b"HTTP/1.1" : Slice} := refl
+
+def glued-method : evidence {methodView b"GET/feed\r\n" ≡ b"GET/feed\r" : Slice} := refl
+
+def crlf-end : evidence {crlfEnd b"\r\n\r\n" ≡ toU64 4 : U64} := refl
+
+def lf-end : evidence {lfEnd b"\n\n" ≡ toU64 2 : U64} := refl
+
+def hdr-prefers-crlf : evidence {headerEnd b"GET /health HTTP/1.1\r\n\r\n" ≡ toU64 24 : U64} := refl
+
+def verb-health : evidence {verbOf b"GET /health HTTP/1.1\r\n\r\n" ≡ verb-get : Verb} := refl
+
+def path-health-eq : evidence {pathOf b"GET /health HTTP/1.1\r\n\r\n" ≡ path-health : PathShape} := refl
+
+def path-feed-eq : evidence {pathOf b"GET /feed?x=1 HTTP/1.1\r\n\r\n" ≡ path-feed : PathShape} := refl
+
+def path-posts-eq : evidence {pathOf b"GET /posts HTTP/1.1\r\n\r\n" ≡ path-posts : PathShape} := refl
+
+def path-id-eq : evidence {pathOf b"GET /posts/42 HTTP/1.1\r\n\r\n" ≡ path-post-id : PathShape} := refl
+
+def path-like-eq : evidence {pathOf b"POST /posts/42/like HTTP/1.1\r\n\r\n" ≡ path-post-like : PathShape} := refl
+
+def id-42 : evidence {idClassOf b"GET /posts/42 HTTP/1.1\r\n\r\n" ≡ id-unknown : IdClass} := refl
+
+def id-num-42 : evidence {idNumber b"GET /posts/42 HTTP/1.1\r\n\r\n" ≡ toI64 42 : I64} := refl
+
+def id-zero : evidence {idClassOf b"GET /posts/0 HTTP/1.1\r\n\r\n" ≡ id-bad : IdClass} := refl
+
+def id-abc : evidence {idClassOf b"GET /posts/abc HTTP/1.1\r\n\r\n" ≡ id-bad : IdClass} := refl
+
+def id-lead : evidence {idClassOf b"GET /posts/01 HTTP/1.1\r\n\r\n" ≡ id-bad : IdClass} := refl
+
+def id-like : evidence {idClassOf b"POST /posts/42/like HTTP/1.1\r\n\r\n" ≡ id-unknown : IdClass} := refl
+
+def id-other-tail : evidence {idClassOf b"GET /posts/42/likes HTTP/1.1\r\n\r\n" ≡ id-none : IdClass} := refl
+
+def keep-11 : evidence {keepOf b"GET /health HTTP/1.1\r\n\r\n" ≡ keep-yes : Keep} := refl
+
+def keep-10 : evidence {keepOf b"GET /health HTTP/1.0\r\n\r\n" ≡ keep-no : Keep} := refl
+
+def keep-close : evidence {keepOf b"GET /health HTTP/1.1\r\nConnection: close\r\n\r\n" ≡ keep-no : Keep} := refl
+
+def te-bad : evidence {statusOf b"GET /health HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n" ≡ status-malformed : Status} := refl
+
+def glued-bad : evidence {statusOf b"GET/feed HTTP/1.1\r\n\r\n" ≡ status-malformed : Status} := refl
+
+def auth-no : evidence {authMark b"GET /health HTTP/1.1\r\n\r\n" ≡ mark-absent : AuthMark} := refl
+
+def auth-yes : evidence {authMark b"GET /health HTTP/1.1\r\nAuthorization: Bearer z\r\n\r\n" ≡ mark-present : AuthMark} := refl
+
+def auth-raw : evidence {authValue b"GET /health HTTP/1.1\r\nAuthorization: Bearer z\r\n\r\n" ≡ b"Bearer z" : Slice} := refl
+
+def need-body : evidence {statusOf b"POST /posts HTTP/1.1\r\nContent-Length: 2\r\n\r\n" ≡ status-need-more : Status} := refl
+
+def post-body : evidence {classify b"POST /posts HTTP/1.1\r\nContent-Length: 2\r\n\r\nab" ≡ classified status-ok verb-post path-posts id-none keep-yes mark-absent body-none : Classified} := refl
+
+def post-slice : evidence {bodyView b"POST /posts HTTP/1.1\r\nContent-Length: 2\r\n\r\nab" ≡ b"ab" : Slice} := refl
+
+def health-class : evidence {classify b"GET /health HTTP/1.1\r\n\r\n" ≡ classified status-ok verb-get path-health id-none keep-yes mark-absent body-none : Classified} := refl
+
+def feed-class : evidence {classify b"GET /feed HTTP/1.1\r\n\r\n" ≡ classified status-ok verb-get path-feed id-none keep-yes mark-absent body-none : Classified} := refl
+
+def posts-class : evidence {classify b"GET /posts HTTP/1.1\r\n\r\n" ≡ classified status-ok verb-get path-posts id-none keep-yes mark-absent body-none : Classified} := refl
+
+def id-class : evidence {classify b"GET /posts/42 HTTP/1.1\r\n\r\n" ≡ classified status-ok verb-get path-post-id id-unknown keep-yes mark-absent body-none : Classified} := refl
+
+def like-class : evidence {classify b"POST /posts/42/like HTTP/1.1\r\n\r\n" ≡ classified status-ok verb-post path-post-like id-unknown keep-yes mark-absent body-none : Classified} := refl
+
+def http10-class : evidence {classify b"GET /health HTTP/1.0\r\n\r\n" ≡ classified status-ok verb-get path-health id-none keep-no mark-absent body-none : Classified} := refl
+
+def close-class : evidence {classify b"GET /health HTTP/1.1\r\nConnection: close\r\n\r\n" ≡ classified status-ok verb-get path-health id-none keep-no mark-absent body-none : Classified} := refl
+
+def auth-class : evidence {classify b"GET /feed HTTP/1.1\r\nAuthorization: Bearer z\r\n\r\n" ≡ classified status-ok verb-get path-feed id-none keep-yes mark-present body-none : Classified} := refl
+
+def gap-class : evidence {classify b"GET  HTTP/1.1\r\n\r\n" ≡ classified status-ok verb-get path-other id-none keep-yes mark-absent body-none : Classified} := refl
+
+def partial-need : evidence {statusOf b"GET /health HTTP/1.1\r\n" ≡ status-need-more : Status} := refl
