@@ -1,0 +1,18 @@
+-- A receive after the response on the half-closed arm.
+-- That arm ends. It does not return to the loop.
+-- Checked by test/conn_test.exs. Not part of the manifest.
+import "../session.muro"
+
+conform bad-half : conn :=
+  rec Loop.
+    pick0 (cover
+      (get (p : Piece) (match p
+        Loop
+        (put reply-ok (pick0 Loop))
+        (put reply-bad done)))
+      (cover
+        (get (p : Piece) (match p
+          (put reply-bad done)
+          (put reply-ok (get (q : Piece) done))
+          (put reply-bad done)))
+        done))

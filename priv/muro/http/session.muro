@@ -1,0 +1,131 @@
+-- Connection protocol. This book is evidence. C does not emit it.
+--
+-- muro 0.21.6 still emits a session stepper only for --backend fsm and
+-- --backend js. A run that names a session is refused (c:session).
+-- priv/muro/http/conn.muro is the image: an unboxed Conn, an unboxed
+-- Ev, and run step. The two meet in test/conn_test.exs, which replays
+-- this session's fsm stepper beside step.
+--
+-- Server end `conn`. Client end `peer` is dual conn.
+-- One turn of the loop, the server chooses:
+--   pick0  talk to the peer
+--   pick1  idle timeout: end, no read and no write
+-- The peer then chooses:
+--   pick0  the connection is still open for a later request
+--   pick1  the peer has half-closed (no further read on this end)
+-- An open piece is chunk (need-more), req (a full request), or bad.
+-- A request is answered, and this end chooses keep (loop) or close.
+-- A bad request is answered and the connection ends.
+-- A half-closed piece is answered and the connection ends. The next
+-- action is end, not the loop, so this end does not read again.
+-- A bare FIN is end.
+--
+-- Forbidden continuations live in priv/muro/http/neg/. They are not
+-- part of this book. mix muro.check refuses each one.
+
+data Piece : Type where
+  piece-chunk : Piece
+  piece-req : Piece
+  piece-bad : Piece
+
+data Reply : Type where
+  reply-ok : Reply
+  reply-bad : Reply
+
+session conn :=
+  rec Loop.
+    choose
+      (branch
+        (recv (p : Piece) (case p
+          | piece-chunk => Loop
+          | piece-req => send Reply (choose Loop end)
+          | piece-bad => send Reply end))
+        (branch
+          (recv (p : Piece) (case p
+            | piece-chunk => send Reply end
+            | piece-req => send Reply end
+            | piece-bad => send Reply end))
+          end))
+      end
+
+session peer := dual conn
+
+conform server-keep : conn :=
+  rec Loop.
+    pick0 (cover
+      (get (p : Piece) (match p
+        Loop
+        (put reply-ok (pick0 Loop))
+        (put reply-bad done)))
+      (cover
+        (get (p : Piece) (match p
+          (put reply-bad done)
+          (put reply-ok done)
+          (put reply-bad done)))
+        done))
+
+conform server-close : conn :=
+  rec Loop.
+    pick0 (cover
+      (get (p : Piece) (match p
+        Loop
+        (put reply-ok (pick1 done))
+        (put reply-bad done)))
+      (cover
+        (get (p : Piece) (match p
+          (put reply-bad done)
+          (put reply-ok done)
+          (put reply-bad done)))
+        done))
+
+conform server-timeout : conn :=
+  pick1 done
+
+conform client-keep : peer :=
+  rec Loop.
+    cover
+      (pick0 (put piece-req (get (r : Reply) (cover Loop done))))
+      done
+
+conform client-bad : peer :=
+  cover
+    (pick0 (put piece-bad (get (r : Reply) done)))
+    done
+
+conform client-half : peer :=
+  cover
+    (pick1 (pick0 (put piece-req (get (r : Reply) done))))
+    done
+
+conform client-fin : peer :=
+  cover
+    (pick1 (pick1 done))
+    done
+
+conform client-chunk : peer :=
+  rec Loop.
+    cover
+      (pick0 (put piece-chunk Loop))
+      done
+
+meet keep-wire : server-keep with client-keep
+
+meet keep-swap : client-keep with server-keep
+
+meet close-wire : server-close with client-keep
+
+meet close-swap : client-keep with server-close
+
+meet bad-wire : server-keep with client-bad
+
+meet half-wire : server-keep with client-half
+
+meet half-swap : client-half with server-keep
+
+meet fin-wire : server-keep with client-fin
+
+meet chunk-wire : server-keep with client-chunk
+
+meet timeout-wire : server-timeout with client-keep
+
+meet timeout-swap : client-keep with server-timeout

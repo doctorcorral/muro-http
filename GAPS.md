@@ -1,9 +1,11 @@
 # Compiler gaps
 
-muro 0.20.42. Both books check, and both emit. The generated C is not
-edited. The three limits below were real on muro 0.20.36. They are
-closed as of muro 0.20.39. The header record is unboxed as of muro
-0.20.42. `classify` allocates the one `Classified` result.
+muro 0.21.6. The books check, and the runs emit. The generated C is
+not edited. The three limits below were real on muro 0.20.36. They
+are closed as of muro 0.20.39. The header record is unboxed as of
+muro 0.20.42. On 0.21.6, `classify` still allocates the one
+`Classified` result, and the C driver still prints `view-allocs 0`,
+`health-allocs 1`, `post-allocs 1`.
 
 ## Closed on muro 0.20.39
 
@@ -77,3 +79,32 @@ Those constructors are host facts for `decide`.
 
 JSON body class is not this step. That is scope. `classify` returns
 `body-none` and the raw body `Slice`. No muro issue was opened.
+
+## Step 2, still open on muro 0.21.6
+
+C, Rust, and Zig do not emit a session stepper. `--backend fsm` and
+`--backend js` do. `--backend c` on `session.muro` writes the `Piece`
+and `Reply` payloads and no `step`. A run whose type names a session
+does not check: `ping is a session, not a definition`. JavaScript
+refuses that use as `c:session`. `conn.muro` is the image, a sibling
+book, so `step` does not name `conn`. The fsm trace test is what
+keeps the protocol and the image together.
+
+An unboxed field has to be a machine word, a `WBool`, a `Slice`, an
+`Opt` of those, or more unboxed data. `Verb`, `PathShape`, and
+`IdClass` are ordinary data, so `Conn` stores their tags as `U64`.
+
+A session payload of `Bytes` or `Slice` is refused. `Piece` and
+`Reply` are fieldless data. The buffer stays on the `Ev` of the image.
+
+`Classified` and `Decision` are ordinary data. Each constructor call
+allocates one object. A control step allocates 0. A step that
+classifies allocates 1. A step that calls `decide` allocates 1.
+
+ExUnit skips a closed equation when an argument's normal form is a
+machine term (`argument 1 normal form is a machine term`). `step`
+takes the unboxed `Conn`, so `after-close` and `after-close-tick`
+are proved by the checker and skipped by `test/conn_eq_test.exs`.
+The host suite runs nullary wrappers (`sawAfterDo`, `sawAfterMode`)
+whose results are declared data. Those two `Conn` equations are the
+ones the wrapper does not cover.
