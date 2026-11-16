@@ -4,4 +4,5 @@
 *.ez
 /tmp/
 c/test_classify
+c/test_conn
 *.o

@@ -8,7 +8,8 @@ defmodule MuroHttp.MixProject do
       elixir: "~> 1.15",
       start_permanent: Mix.env() == :prod,
       deps: deps(),
-      description: "A Muro HTTP library. The first piece is a zero-copy request classifier.",
+      description:
+        "A Muro HTTP library. A zero-copy request classifier and one step of an HTTP/1 connection.",
       package: package()
     ]
   end
@@ -21,7 +22,7 @@ defmodule MuroHttp.MixProject do
 
   defp deps do
     [
-      {:muro, "~> 0.20.42"}
+      {:muro, "~> 0.21.6"}
     ]
   end
 

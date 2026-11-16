@@ -1,11 +1,17 @@
 [
-  muro: "0.20.42",
+  muro: "0.21.6",
   fuel: 5_000_000,
   modules: [
     {"priv/muro/http/request.muro", "c/generated/request.c", [kind: :c]},
     {"priv/muro/http/request.muro", MuroHttp.Request, "lib/muro_http/request.ex"},
     {"priv/muro/http/request.muro", MuroHttp.RequestTest, "test/request_test.exs",
      [kind: :exunit, impl: MuroHttp.Request, imports: false]},
+    {"priv/muro/http/session.muro", MuroHttp.SessionFsm, "lib/muro_http/session_fsm.ex",
+     [kind: :fsm]},
+    {"priv/muro/http/conn.muro", "c/generated/conn.c", [kind: :c]},
+    {"priv/muro/http/conn.muro", MuroHttp.Conn, "lib/muro_http/conn.ex"},
+    {"priv/muro/http/conn.muro", MuroHttp.ConnEqTest, "test/conn_eq_test.exs",
+     [kind: :exunit, impl: MuroHttp.Conn, imports: false]},
     {"priv/muro/challenge/decide.muro", "c/generated/decide.c", [kind: :c]},
     {"priv/muro/challenge/decide.muro", MuroHttp.Decide, "lib/muro_http/decide.ex"},
     {"priv/muro/challenge/decide.muro", MuroHttp.DecideTest, "test/decide_test.exs",

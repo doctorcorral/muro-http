@@ -2,6 +2,18 @@
 
 ## 0.1.0-dev — unreleased
 
+- Pin muro 0.21.6. The classifier counts stay where 0.20.42 left them:
+  views 0, `GET /health` 1, a two-byte `POST /posts` 1. The library
+  version stays `0.1.0-dev`. There is no Hex publish.
+- One finite step of an HTTP/1 connection. `Conn` and `Ev` are unboxed.
+  `step` classifies, asks the shim to call `decide`, writes a fixed
+  range, and then keeps the connection, closes it, or arms the idle
+  timer. Half-close is a flag. Pipelined bytes are an offset the shim
+  re-steps. C still emits no session stepper, so `session.muro` is
+  evidence: conforms, meets, an fsm trace beside `step`, and three
+  negative books that `mix muro.check` refuses. A control step
+  allocates 0. Classify allocates the one `Classified`. Decide
+  allocates the one `Decision`.
 - Pin muro 0.20.42. The header scan is an unboxed product of machine
   words, passed by value. `GET /health` is 1 allocation and a two-byte
   `POST /posts` is 1, down from 4 and 6. The leftover is `Classified`.
