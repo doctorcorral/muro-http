@@ -176,11 +176,13 @@ sockets and exit 0.
 
 `c/test_e2e` starts that binary on an ephemeral port and checks
 `GET /health`, a malformed request, two requests on one connection, a
-pipelined pair, `Connection: close`, an idle timeout, and a peer FIN
-mid-request. Those are tests. The reduction equations in `render.muro`
-are the byte proofs for the strings they name. `c/test_render` checks
-the emitted C against the keep-alive health string, the close health
-string, and the malformed string, and checks
+pipelined pair, `Connection: close`, an idle timeout, a peer FIN
+mid-request, a body that arrives after the headers, a response the
+socket takes in more than one write, the connection cap, and a
+receive buffer that fills before the image consumes it. Those are
+tests. The reduction equations in `render.muro` are the reduction
+evidence (refl) for the strings they name. `c/test_render` checks
+the emitted C against all eight of those strings, and checks
 that `Content-Length` matches the body for every tag combination it
 sweeps (1664 renders). That sweep is a test.
 

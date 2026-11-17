@@ -198,9 +198,15 @@ mean a query failed. If the image asks again, the host closes.
 `c/generated/render.c`. Do not hand-edit that file. The book does
 not import `decide.muro`. Gap 6 is why: a `def` is a global C symbol
 with no book prefix, and `conn.muro` already emits `decide`. The
-tags are `U64`s in `decide.muro` constructor order, the same numbers
-as `c/decision_tags.h`. `c/test_render.c` `_Static_assert`s those
-numbers. The feature that would remove the copy is still gap 6.
+tags are `U64`s in `priv/muro/challenge/decide.muro` constructor
+order. `c/decision_tags.h` copies those numbers. The
+`_Static_assert`s in `c/test_render.c` only compare that header with
+itself. The same driver calls the emitted `verbFrom`, `pathFrom`,
+`idFrom`, `authFrom`, `bodyFrom`, `likeFrom`, and `dbFrom` helpers
+and checks that each constructor tag equals the header constant.
+That is a test. Status, error, and act have no `*From` helper, so
+those header numbers are not checked against the emitter. The
+feature that would remove the copy is still gap 6.
 
 `httpRender` is total. Codes 0 through 6 are 200, 201, 400, 401, 404,
 500, and 503. Any other code, including `st-observe`, is
@@ -217,14 +223,15 @@ muro checks eight equations by reduction (`refl`): health with
 keep-alive, health with close, malformed, missing-bearer, not-found,
 db, an empty feed body, and code 7 with the health act. That last
 one is the total arm: status 500 and body `ok`. Evidence is not a
-run. `c/test_render` checks the health and malformed strings in the
+run. `c/test_render` checks all eight reduction strings in the
 emitted C, and checks that `Content-Length` matches the body for
 codes 0..7, errors 0..12, acts 0..7, and both keep values (1664
 renders). That sweep is a test.
 
 `render.h` defines the same prelude as `conn.h`. `c/host.c` does not
-include it. It declares `httpRender` and copies the slice out of the
-arena before `muro_http_reset`.
+include it. `c/host_render.c` includes the emitted header and copies
+the slice into the host buffer, so the `httpRender` signature cannot
+drift. The host then calls `muro_http_reset`.
 
 muro 0.21.15 and muro 0.21.16 do not change this. 0.21.15 is a
 temporal check over a keyed family. 0.21.16 ranks a recursive `State`

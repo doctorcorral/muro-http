@@ -42,3 +42,24 @@ jobs:
 
       - name: Build and run the C drivers and muro-httpd
         run: make c-check
+
+  sanitize:
+    name: asan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: C drivers and muro-httpd under ASan and UBSan
+        run: make c-sanitize
+
+  # doctorcorral/muro-http is public. Standard macos-latest is not
+  # billed. Larger macOS runners are billed, so this job does not use
+  # them. Self-hosted muro-mac-1 and muro-mac-2 are not used.
+  kqueue:
+    name: kqueue
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: C drivers and muro-httpd with kqueue
+        run: make c-check

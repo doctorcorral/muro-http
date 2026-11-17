@@ -5,9 +5,11 @@
 - `priv/muro/http/render.muro` is the HTTP/1.1 response bytes.
   `--backend c` emits `httpRender`. The host copies that slice and
   writes it. It does not choose the status or the body. Eight
-  equations are reduction evidence. `c/test_render` checks the
-  emitted bytes and `Content-Length` for 1664 tag combinations.
-  That sweep is a test. The book does not import `decide.muro`
+  equations are reduction evidence (`refl`). `c/test_render` checks
+  all eight strings, the emitted `*From` tag helpers, and
+  `Content-Length` for 1664 tag combinations. That sweep is a test.
+  The `_Static_assert`s in that driver only pin `c/decision_tags.h`
+  to itself. The book does not import `decide.muro`
   (see `GAPS.md`, gap 6). Acts that would be rows render an empty
   body.
 - `c/muro-httpd` is a hand-written loop. It binds `127.0.0.1`, waits
@@ -18,7 +20,10 @@
   absent, the body is unclassified, and the id is the classifier
   tag. There is no database. `c/test_e2e` checks health, a malformed
   request, keep-alive, a pipeline, `Connection: close`, the idle
-  timeout, and a peer FIN mid-request. Those are tests. muro 0.21.15
+  timeout, a peer FIN mid-request, a split body, a short write, the
+  connection cap, and a full receive buffer. Those are tests. A failed
+  connection watch closes that socket. A failed listen watch stops
+  the process. muro 0.21.15
   and 0.21.16 are not useful here. The pin stays 0.21.14.
 - `priv/muro/http/admit.muro` is the event-to-move map. `--backend c`
   emits it as `admitChoice`. `c/proto.c` applies that offer and calls

@@ -1,14 +1,19 @@
 /* Check the emitted response bytes. The equations in render.muro are
-   the proof for the cases they name. This driver checks those bytes
-   in the C image and checks Content-Length for every tag combination. */
+   reduction evidence (refl) for the strings they name. This driver
+   checks those eight strings in the C image and checks Content-Length
+   for every tag combination. The _Static_asserts below only pin
+   decision_tags.h to itself. emitted_tags_match calls the generated
+   *From helpers. */
 
 #include "shim.h"
 #include "render.h"
 #include "decision_tags.h"
+#include "tag_pin.h"
 
 #include <stdio.h>
 #include <string.h>
 
+/* Header against itself. Not a check of the emitted constructors. */
 _Static_assert(ST_200 == 0 && ST_201 == 1 && ST_400 == 2 && ST_401 == 3, "status tags");
 _Static_assert(ST_404 == 4 && ST_500 == 5 && ST_503 == 6 && ST_OBSERVE == 7, "status tags");
 _Static_assert(ERR_NONE == 0 && ERR_NOT_FOUND == 1 && ERR_MALFORMED == 7, "err tags");
@@ -90,6 +95,7 @@ static const char *line_of(unsigned code) {
 
 int main(void) {
   unsigned code, err, act, keep;
+  if (!emitted_tags_match()) return 1;
   expect_eq("health-keep", 0, 0, 0, 0,
             "HTTP/1.1 200 OK\r\nConnection: keep-alive\r\nContent-Length: 2\r\n"
             "Content-Type: text/plain; charset=utf-8\r\n\r\nok");
@@ -99,6 +105,21 @@ int main(void) {
   expect_eq("malformed", 2, 7, 6, 1,
             "HTTP/1.1 400 Bad Request\r\nConnection: close\r\nContent-Length: 9\r\n"
             "Content-Type: text/plain; charset=utf-8\r\n\r\nmalformed");
+  expect_eq("missing-bearer", 3, 4, 6, 0,
+            "HTTP/1.1 401 Unauthorized\r\nConnection: keep-alive\r\nContent-Length: 14\r\n"
+            "Content-Type: text/plain; charset=utf-8\r\n\r\nmissing-bearer");
+  expect_eq("not-found", 4, 1, 6, 0,
+            "HTTP/1.1 404 Not Found\r\nConnection: keep-alive\r\nContent-Length: 9\r\n"
+            "Content-Type: text/plain; charset=utf-8\r\n\r\nnot-found");
+  expect_eq("db", 6, 11, 6, 1,
+            "HTTP/1.1 503 Service Unavailable\r\nConnection: close\r\nContent-Length: 2\r\n"
+            "Content-Type: text/plain; charset=utf-8\r\n\r\ndb");
+  expect_eq("empty-feed", 0, 0, 1, 0,
+            "HTTP/1.1 200 OK\r\nConnection: keep-alive\r\nContent-Length: 0\r\n"
+            "Content-Type: text/plain; charset=utf-8\r\n\r\n");
+  expect_eq("code-out-of-range", 7, 0, 0, 0,
+            "HTTP/1.1 500 Internal Server Error\r\nConnection: keep-alive\r\nContent-Length: 2\r\n"
+            "Content-Type: text/plain; charset=utf-8\r\n\r\nok");
   for (code = 0; code < 8; code++) {
     for (err = 0; err < 13; err++) {
       for (act = 0; act < 8; act++) {

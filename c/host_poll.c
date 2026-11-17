@@ -199,9 +199,22 @@ int host_poll_wait(HostPoll *p, HostEv *out, int max) {
       memset(e, 0, sizeof *e);
       e->fd = evs[i].data.fd;
       if (e->fd == p->timer_fd) {
-        uint64_t expirations = 0;
-        ssize_t got = read(p->timer_fd, &expirations, sizeof expirations);
-        if (got < 0 && errno != EAGAIN) return -1;
+        /* One expiration is 8 bytes. A short read leaves the fd
+           readable, and level-triggered epoll returns at once.
+           Read until 8 bytes or EAGAIN. A hard error stops the wait
+           so the process does not spin. */
+        uint8_t raw[8];
+        size_t have = 0;
+        while (have < sizeof raw) {
+          ssize_t got = read(p->timer_fd, raw + have, sizeof raw - have);
+          if (got < 0) {
+            if (errno == EINTR) continue;
+            if (errno == EAGAIN || errno == EWOULDBLOCK) break;
+            return -1;
+          }
+          if (got == 0) return -1;
+          have += (size_t)got;
+        }
         e->fd = -1;
         e->timer = 1;
         continue;

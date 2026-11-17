@@ -2,7 +2,8 @@
 #define DECISION_TAGS_H
 
 /* Finite request-decision tags.
-   Constructor order is the Muro data declaration order in src/decide.muro.
+   Constructor order is the Muro data declaration order in
+   priv/muro/challenge/decide.muro.
    The C emitter numbers constructors from 0 in that order.
    decide_hand.c and the generated core must use these same numbers.
    Reorder a data type only by editing decide.muro and this header together. */

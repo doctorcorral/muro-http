@@ -6,8 +6,8 @@
    It performs the action the image returns.
 
    c/generated/render.h cannot sit in this file. It and conn.h both
-   define the muro prelude. httpRender matches that header. The C
-   value is a pointer and a length. */
+   define the muro prelude. c/host_render.c includes render.h and
+   copies the slice. This file does not declare httpRender. */
 
 #include "shim.h"
 #include "conn.h"
@@ -15,6 +15,7 @@
 #include "decision_tags.h"
 #include "host.h"
 #include "host_poll.h"
+#include "host_render.h"
 
 #include <arpa/inet.h>
 #include <errno.h>
@@ -28,8 +29,6 @@
 #include <sys/socket.h>
 #include <time.h>
 #include <unistd.h>
-
-muro__slice httpRender(uint64_t code, uint64_t err, uint64_t act, uint64_t keep);
 
 enum {
   PH_READ = 0,
@@ -109,6 +108,10 @@ typedef struct Server {
   int nconn;
   int listen_fd;
   int idle_ms;
+  int fatal;
+  size_t write_limit;
+  const char *write_log;
+  size_t in_cap;
   uint64_t armed_deadline;
 } Server;
 
@@ -122,18 +125,84 @@ static int set_nb_cloexec(int fd) {
   return fcntl(fd, F_SETFD, fdfl | FD_CLOEXEC);
 }
 
-static void sync_watch(Server *sv, Slot *s) {
-  if (!s->used) return;
-  if (host_poll_watch(sv->pq, s->fd, s->want_read, s->want_write) < 0)
-    fprintf(stderr, "muro-httpd: watch %d failed: %s\n", s->fd, strerror(errno));
+static int set_int(int fd, int level, int opt, int value) {
+  return setsockopt(fd, level, opt, &value, sizeof value);
 }
 
-static void sync_listen(Server *sv) {
+/* MURO_TEST_WRITE_LOG is a test hook. It records how many bytes each
+   socket write accepted. It does not choose a response. */
+static void note_write(const Server *sv, size_t n) {
+  char line[32];
+  int len;
+  int fd;
+  int saved;
+  size_t off = 0;
+  if (!sv->write_log) return;
+  len = snprintf(line, sizeof line, "%zu\n", n);
+  if (len <= 0) return;
+  saved = errno;
+  fd = open(sv->write_log, O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC, 0644);
+  if (fd >= 0) {
+    while (off < (size_t)len) {
+      ssize_t w = write(fd, line + off, (size_t)len - off);
+      if (w < 0 && errno == EINTR) continue;
+      if (w <= 0) break;
+      off += (size_t)w;
+    }
+    close(fd);
+  }
+  errno = saved;
+}
+
+/* MURO_TEST_IN_CAP lowers the receive buffer under the image's
+   16384-byte malformed scan. Absent, the cap is IN_CAP. A full
+   buffer the image did not consume still closes with no status. */
+static size_t env_in_cap(void) {
+  const char *e = getenv("MURO_TEST_IN_CAP");
+  char *end = NULL;
+  unsigned long cap;
+  if (!e || !*e) return (size_t)IN_CAP;
+  errno = 0;
+  cap = strtoul(e, &end, 10);
+  if (errno || end == e || *end || cap < 128ul || cap > (unsigned long)IN_CAP) return (size_t)IN_CAP;
+  return (size_t)cap;
+}
+
+static size_t env_write_limit(void) {
+  const char *e = getenv("MURO_TEST_WRITE_LIMIT");
+  char *end = NULL;
+  unsigned long cap;
+  if (!e || !*e) return 0;
+  errno = 0;
+  cap = strtoul(e, &end, 10);
+  if (errno || end == e || *end || cap == 0 || cap > 1024ul * 1024ul) return 0;
+  return (size_t)cap;
+}
+
+static int sync_listen(Server *sv) {
   int on;
-  if (sv->listen_fd < 0) return;
+  int err;
+  if (sv->listen_fd < 0) return 0;
   on = sv->nconn < sv->max_conn;
-  if (host_poll_watch(sv->pq, sv->listen_fd, on, 0) < 0)
-    fprintf(stderr, "muro-httpd: listen watch failed: %s\n", strerror(errno));
+  if (host_poll_watch(sv->pq, sv->listen_fd, on, 0) < 0) {
+    err = errno;
+    fprintf(stderr, "muro-httpd: listen watch failed: %s\n", strerror(err));
+    sv->fatal = 1;
+    return -1;
+  }
+  return 0;
+}
+
+static void close_slot(Server *sv, Slot *s);
+
+static void sync_watch(Server *sv, Slot *s) {
+  int err;
+  if (!s->used) return;
+  if (host_poll_watch(sv->pq, s->fd, s->want_read, s->want_write) < 0) {
+    err = errno;
+    fprintf(stderr, "muro-httpd: watch %d failed: %s\n", s->fd, strerror(err));
+    close_slot(sv, s);
+  }
 }
 
 static void close_slot(Server *sv, Slot *s) {
@@ -145,7 +214,7 @@ static void close_slot(Server *sv, Slot *s) {
   memset(s, 0, sizeof *s);
   s->fd = -1;
   if (sv->nconn > 0) sv->nconn -= 1;
-  sync_listen(sv);
+  (void)sync_listen(sv);
 }
 
 /* Stub facts. Not a decision and not a database.
@@ -209,14 +278,15 @@ static int step_ev(Slot *s, Ev ev) {
 }
 
 static int render_out(Slot *s) {
-  muro__slice msg = httpRender(field(s->st, 8), field(s->st, 9), field(s->st, 10), field(s->st, 2));
-  if (msg.n == 0 || msg.n > OUT_CAP || msg.p == NULL) {
+  size_t got = 0;
+  size_t n = host_copy_render(s->out, OUT_CAP, field(s->st, 8), field(s->st, 9), field(s->st, 10),
+                              field(s->st, 2), &got);
+  if (n == 0) {
     muro_http_reset();
-    fprintf(stderr, "muro-httpd: response is %zu bytes\n", msg.n);
+    fprintf(stderr, "muro-httpd: response is %zu bytes\n", got);
     return 0;
   }
-  memcpy(s->out, msg.p, msg.n);
-  s->out_len = msg.n;
+  s->out_len = n;
   s->out_off = 0;
   s->rendered = 1;
   muro_http_reset();
@@ -263,6 +333,7 @@ static int pump(Server *sv, Slot *s) {
     }
     if (action == HOST_ACT_WRITE) {
       ssize_t n;
+      size_t chunk;
       if (!s->rendered) {
         if (!render_out(s)) {
           close_slot(sv, s);
@@ -271,7 +342,10 @@ static int pump(Server *sv, Slot *s) {
       }
       s->want_read = 0;
       if (s->out_off < s->out_len) {
-        n = write(s->fd, s->out + s->out_off, s->out_len - s->out_off);
+        chunk = s->out_len - s->out_off;
+        if (sv->write_limit > 0 && chunk > sv->write_limit) chunk = sv->write_limit;
+        n = write(s->fd, s->out + s->out_off, chunk);
+        if (n < 0 && errno == EINTR) continue;
         if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
           s->want_write = 1;
           return 0;
@@ -285,6 +359,7 @@ static int pump(Server *sv, Slot *s) {
         }
         s->out_off += (size_t)n;
         s->want_write = 0;
+        note_write(sv, (size_t)n);
         if (!step_ev(s, evProgress((uint64_t)n))) {
           close_slot(sv, s);
           return 0;
@@ -340,8 +415,8 @@ static void after_io(Server *sv, Slot *s) {
 static void on_readable(Server *sv, Slot *s, int hangup) {
   int got = 0;
   int hit_eof = 0;
-  while (s->in_len < IN_CAP) {
-    ssize_t n = read(s->fd, s->in + s->in_len, IN_CAP - s->in_len);
+  while (s->in_len < sv->in_cap) {
+    ssize_t n = read(s->fd, s->in + s->in_len, sv->in_cap - s->in_len);
     if (n > 0) {
       s->in_len += (size_t)n;
       got = 1;
@@ -359,7 +434,7 @@ static void on_readable(Server *sv, Slot *s, int hangup) {
   if (!got && !hit_eof && !hangup) {
     /* A full buffer that the image did not consume cannot take another
        byte. Closing is a host limit. It is not a status. */
-    if (s->in_len >= IN_CAP) close_slot(sv, s);
+    if (s->in_len >= sv->in_cap) close_slot(sv, s);
     return;
   }
   s->deadline = 0;
@@ -388,14 +463,21 @@ static void on_tick(Server *sv, Slot *s, uint64_t now) {
   after_io(sv, s);
 }
 
+static int take_conn(int lfd, struct sockaddr_in *peer, socklen_t *len) {
+#if defined(SOCK_CLOEXEC) && defined(SOCK_NONBLOCK)
+  int fd = accept4(lfd, (struct sockaddr *)peer, len, SOCK_CLOEXEC | SOCK_NONBLOCK);
+  if (fd >= 0 || errno != ENOSYS) return fd;
+#endif
+  return accept(lfd, (struct sockaddr *)peer, len);
+}
+
 static void accept_some(Server *sv) {
-  while (sv->nconn < sv->max_conn) {
+  while (sv->nconn < sv->max_conn && !sv->fatal) {
     struct sockaddr_in peer;
     socklen_t len = sizeof peer;
-    int fd = accept(sv->listen_fd, (struct sockaddr *)&peer, &len);
+    int fd = take_conn(sv->listen_fd, &peer, &len);
     Slot *s;
     int i;
-    int one = 1;
     if (fd < 0) {
       if (errno == EINTR) continue;
       if (errno == EAGAIN || errno == EWOULDBLOCK) return;
@@ -406,9 +488,15 @@ static void accept_some(Server *sv) {
       close(fd);
       continue;
     }
-    setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof one);
+    if (set_int(fd, IPPROTO_TCP, TCP_NODELAY, 1) < 0) {
+      close(fd);
+      continue;
+    }
 #ifdef SO_NOSIGPIPE
-    setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &one, sizeof one);
+    if (set_int(fd, SOL_SOCKET, SO_NOSIGPIPE, 1) < 0) {
+      close(fd);
+      continue;
+    }
 #endif
     s = NULL;
     for (i = 0; i < sv->max_conn; i++) {
@@ -423,7 +511,7 @@ static void accept_some(Server *sv) {
     }
     memset(s, 0, sizeof *s);
     s->fd = fd;
-    s->in = malloc(IN_CAP);
+    s->in = malloc(sv->in_cap);
     s->proto = proto_begin();
     if (!s->in || !s->proto) {
       proto_free(s->proto);
@@ -440,8 +528,9 @@ static void accept_some(Server *sv) {
     s->deadline = mono_ms() + (uint64_t)sv->idle_ms;
     sv->nconn += 1;
     sync_watch(sv, s);
+    if (sv->fatal) return;
   }
-  sync_listen(sv);
+  (void)sync_listen(sv);
 }
 
 static Slot *find_slot(Server *sv, int fd) {
@@ -487,11 +576,14 @@ static void arm_soonest(Server *sv) {
 }
 
 static int listen_on(int port) {
+#if defined(SOCK_CLOEXEC)
+  int fd = socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0);
+#else
   int fd = socket(AF_INET, SOCK_STREAM, 0);
-  int one = 1;
+#endif
   struct sockaddr_in addr;
   if (fd < 0) return -1;
-  if (setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof one) < 0) {
+  if (set_int(fd, SOL_SOCKET, SO_REUSEADDR, 1) < 0) {
     close(fd);
     return -1;
   }
@@ -536,6 +628,10 @@ int host_run(const HostConfig *cfg) {
   sv.listen_fd = -1;
   sv.idle_ms = cfg->idle_ms;
   sv.max_conn = cfg->max_conn;
+  sv.in_cap = env_in_cap();
+  sv.write_limit = env_write_limit();
+  sv.write_log = getenv("MURO_TEST_WRITE_LOG");
+  if (sv.write_log && !sv.write_log[0]) sv.write_log = NULL;
   sv.slots = calloc((size_t)cfg->max_conn, sizeof(Slot));
   sv.pq = host_poll_open();
   if (sv.slots) {
@@ -566,10 +662,13 @@ int host_run(const HostConfig *cfg) {
   sigaction(SIGINT, &sa, NULL);
   sigaction(SIGTERM, &sa, NULL);
   signal(SIGPIPE, SIG_IGN);
-  sync_listen(&sv);
+  if (sync_listen(&sv) < 0) {
+    rc = -1;
+    goto out;
+  }
   printf("listening 127.0.0.1 %d\n", port);
   fflush(stdout);
-  while (!stop_flag) {
+  while (!stop_flag && !sv.fatal) {
     HostEv evs[32];
     int n;
     int i;
@@ -580,9 +679,10 @@ int host_run(const HostConfig *cfg) {
       rc = -1;
       break;
     }
-    if (stop_flag) break;
+    if (stop_flag || sv.fatal) break;
     for (i = 0; i < n; i++) {
       Slot *s;
+      if (sv.fatal) break;
       if (evs[i].timer) {
         uint64_t now = mono_ms();
         int k;
@@ -604,15 +704,25 @@ int host_run(const HostConfig *cfg) {
       if (s->used && evs[i].readable && s->want_read) on_readable(&sv, s, evs[i].hangup);
       else if (s->used && evs[i].hangup && s->want_read) on_readable(&sv, s, 1);
     }
+    if (sv.fatal) {
+      rc = -1;
+      break;
+    }
   }
+  if (sv.fatal) rc = -1;
 out:
+  if (sv.listen_fd >= 0) {
+    int lfd = sv.listen_fd;
+    sv.listen_fd = -1;
+    if (sv.pq) (void)host_poll_watch(sv.pq, lfd, 0, 0);
+    close(lfd);
+  }
   if (sv.slots) {
     int i;
     for (i = 0; i < sv.max_conn; i++) {
       if (sv.slots[i].used) close_slot(&sv, &sv.slots[i]);
     }
   }
-  if (sv.listen_fd >= 0) close(sv.listen_fd);
   host_poll_close(sv.pq);
   free(sv.slots);
   return rc;
