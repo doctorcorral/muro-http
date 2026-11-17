@@ -46,7 +46,7 @@ like, and db facts from the host.
 ## What step 2 covers
 
 `priv/muro/http/conn.muro` is one finite step of an HTTP/1 connection.
-The C shim owns the socket, the buffer, and the clock. It calls `step`
+The host owns the socket, the buffer, and the clock. It calls `step`
 and performs the action. The book does not loop.
 
 `Conn` is unboxed data: fifteen machine words, passed by value. `Ev`
@@ -61,8 +61,8 @@ write error, an idle tick, and a db result. The db event carries the
 host facts `decide` still needs: auth, body, like, db, and id class,
 as tags in `decide`'s constructor order. Actions back are hold, want
 read, write, close, and call decide. A write carries the status, error,
-and act tags, plus a range of length 16. The shim owns the response
-bytes. `endOff` is the first byte after the request. `more` is set
+and act tags, plus a range of length 16. That range is not the
+message. The host owns the response bytes. `endOff` is the first byte after the request. `more` is set
 when the buffer holds bytes past that, so the shim can re-step a
 pipelined tail. The step does not slice the buffer.
 
@@ -131,6 +131,62 @@ in `muro.exs`, so `mix muro.gen` does not emit them. After close, the
 image returns the same closed state for every event. `shut` is that
 terminal image and has no live session.
 
+## The host loop
+
+`c/muro-httpd` listens on `127.0.0.1` and runs that image. `make`
+builds it. `make c-check` compiles the C drivers and this binary with
+`-Wall -Wextra -Werror -std=c11`, then runs them. The loop is
+hand-written. It owns the sockets, the buffers, and the clock. It
+does not choose a move, a status, or a body.
+
+`c/host_poll.c` waits with kqueue on macOS and with epoll on Linux.
+The idle tick is a one-shot timer (`EVFILT_TIMER`, or `timerfd` on
+Linux). The host arms it for the soonest connection deadline. The
+image's timer field says whether that phase is waiting. A tick during
+decide or write is not delivered.
+
+Each accepted socket is one `Conn` and one session. Bytes, peer FIN,
+write progress, write done, write error, and the idle tick go through
+`proto_admit` and then `step`, the same order as `c/test_conn`. A
+refusal closes the socket. The image does not run. A read error
+closes the socket and is not `evError`: that event holds while the
+phase is read. A write error is `evError`, and the image shuts.
+
+The write range in the image stays length 16. `priv/muro/http/render.muro`
+turns the write tags into the HTTP/1.1 bytes. `--backend c` emits
+`httpRender`. The host copies that slice into its own buffer and
+writes it, reports `evProgress` for the bytes the socket took, then
+`evDone`. Pipelined bytes stay in the receive buffer. `endOff` and
+`more` say where the next request starts. The host does not read the
+socket while a response is in progress.
+
+Host facts are fixed stubs. They are not a database. `GET /health`
+is `db-ok`. Health does not read a row. Every other route is
+`db-down`, which means there is no database. It does not mean a query
+failed. Auth is `auth-absent`. The body is `body-none`. Like is
+`like-none`. The id tag is the classifier's tag. `id-present` and
+`id-missing` are not supplied. If decide asks a second time, the host
+closes. It does not invent another fact.
+
+Flags `--port`, `--idle-ms`, and `--max-connections` override
+`MURO_HTTP_PORT`, `MURO_HTTP_IDLE_MS`, and `MURO_HTTP_MAX_CONNECTIONS`.
+The defaults are port 8080, 5000 ms, and 128 connections. Port 0
+prints `listening 127.0.0.1 <port>`. SIGINT and SIGTERM close the
+sockets and exit 0.
+
+`c/test_e2e` starts that binary on an ephemeral port and checks
+`GET /health`, a malformed request, two requests on one connection, a
+pipelined pair, `Connection: close`, an idle timeout, and a peer FIN
+mid-request. Those are tests. The reduction equations in `render.muro`
+are the byte proofs for the strings they name. `c/test_render` checks
+the emitted C against the keep-alive health string, the close health
+string, and the malformed string, and checks
+that `Content-Length` matches the body for every tag combination it
+sweeps (1664 renders). That sweep is a test.
+
+muro 0.21.15 and 0.21.16 add a temporal check and a synthesis cover.
+They do not change response bytes or this loop. The pin stays 0.21.14.
+
 The server end is `conn`. The client end `peer` is `dual conn`.
 
 ```
@@ -168,11 +224,11 @@ timeout, a bad request, half-close, bare FIN, and a chunk.
 - JSON body class. A POST body is the raw `Slice` plus the length.
   `BodyClass` from `classify` is `body-none`. The db event carries the
   host's body class.
-- The id integer, and SQLite. The db event carries those facts.
-- Response bytes. Every response range has length 16. The shim writes
-  the bytes.
-- The socket and the event loop. `c/shim.c` is a bump arena and a
-  slice wrap. `step` handles one event and does not call itself.
+- The id integer, and SQLite. The stubs above are `db-down` for every
+  route except `GET /health`. They are not stored rows.
+- Row bytes. `act-feed`, `act-read`, `act-create`, and the like acts
+  render an empty body. `httpRender` does not invent a row.
+- A bind address other than `127.0.0.1`.
 - A wrapped `U64` in `addCap`. The driver reports a delta of 8.
 
 ## Check
@@ -191,6 +247,11 @@ from that copy. It writes nothing.
 scanner, and the default fuel of 2000 is not enough.
 
 ## C driver
+
+`make c-check` compiles the drivers and `c/muro-httpd` with
+`-Wall -Wextra -Werror -std=c11` and runs them. `c/test_admit` is not
+in that target. It reads a trace on stdin. It is not a pass/fail
+driver.
 
 `c/shim.c` defines `muro__ALLOC` as a bump arena. The driver links
 `c/generated/request.c` and the shim. It does not link `decide.c`:

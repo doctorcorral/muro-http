@@ -175,8 +175,61 @@ It is not the choice.
 
 `c/shim.c` is the arena. The C test drivers call the image. Classify,
 decide, the write range, keep-alive, the idle timer, the half-close
-flag, and the pipelined offset stay in `conn.muro`. The socket and
-the event loop are not in this step.
+flag, and the pipelined offset stay in `conn.muro`.
+
+`c/host.c` is the socket loop. `c/host_poll.c` is kqueue or epoll.
+`c/httpd.c` is `main`. They own the file descriptors, the buffers,
+and the clock. They perform the action `step` returns. They do not
+choose it. A read error closes the fd. It is not `evError`. That
+event holds in the read phase. A full receive buffer that the image
+did not consume is a host limit. Closing it is not a status.
+
+The db event is a stub. `GET /health` sends `db-ok`. Every other
+route sends `db-down`. Auth is `auth-absent`, the body is
+`body-none`, like is `like-none`, and the id is the classifier tag
+already on the connection. `db-unknown` would leave the image
+observing, and this host has no second fact, so it does not send
+`db-unknown`. `db-down` here means there is no database. It does not
+mean a query failed. If the image asks again, the host closes.
+
+## The response bytes are emitted
+
+`priv/muro/http/render.muro` is `httpRender`. `--backend c` writes
+`c/generated/render.c`. Do not hand-edit that file. The book does
+not import `decide.muro`. Gap 6 is why: a `def` is a global C symbol
+with no book prefix, and `conn.muro` already emits `decide`. The
+tags are `U64`s in `decide.muro` constructor order, the same numbers
+as `c/decision_tags.h`. `c/test_render.c` `_Static_assert`s those
+numbers. The feature that would remove the copy is still gap 6.
+
+`httpRender` is total. Codes 0 through 6 are 200, 201, 400, 401, 404,
+500, and 503. Any other code, including `st-observe`, is
+`500 Internal Server Error`. The image does not write `st-observe`.
+That arm exists so the function has no hole. `act-health` is the body
+`ok`. `act-error` is the error token (`not-found`, `malformed`,
+`missing-bearer`, `db`, and the rest). `act-observe` is the body
+`observe`. Any other act is an empty body. Those acts would be rows.
+The book does not invent them. `keep` of 1 is `Connection: close`.
+Any other keep is `Connection: keep-alive`. Each suffix literal
+carries its own `Content-Length`.
+
+muro checks eight equations by reduction (`refl`): health with
+keep-alive, health with close, malformed, missing-bearer, not-found,
+db, an empty feed body, and code 7 with the health act. That last
+one is the total arm: status 500 and body `ok`. Evidence is not a
+run. `c/test_render` checks the health and malformed strings in the
+emitted C, and checks that `Content-Length` matches the body for
+codes 0..7, errors 0..12, acts 0..7, and both keep values (1664
+renders). That sweep is a test.
+
+`render.h` defines the same prelude as `conn.h`. `c/host.c` does not
+include it. It declares `httpRender` and copies the slice out of the
+arena before `muro_http_reset`.
+
+muro 0.21.15 and muro 0.21.16 do not change this. 0.21.15 is a
+temporal check over a keyed family. 0.21.16 ranks a recursive `State`
+that does not declare `all-states`. Neither emits response bytes or
+a socket loop. The pin stays 0.21.14.
 
 ## Emitter gaps this book hit
 

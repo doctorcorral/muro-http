@@ -2,6 +2,24 @@
 
 ## 0.1.0-dev — unreleased
 
+- `priv/muro/http/render.muro` is the HTTP/1.1 response bytes.
+  `--backend c` emits `httpRender`. The host copies that slice and
+  writes it. It does not choose the status or the body. Eight
+  equations are reduction evidence. `c/test_render` checks the
+  emitted bytes and `Content-Length` for 1664 tag combinations.
+  That sweep is a test. The book does not import `decide.muro`
+  (see `GAPS.md`, gap 6). Acts that would be rows render an empty
+  body.
+- `c/muro-httpd` is a hand-written loop. It binds `127.0.0.1`, waits
+  with kqueue or epoll, and feeds bytes, peer eof, write progress,
+  write done, write error, and an idle tick through `proto_admit`
+  and `step`. A refusal closes the socket. Host facts are stubs:
+  `GET /health` is `db-ok`, every other route is `db-down`, auth is
+  absent, the body is unclassified, and the id is the classifier
+  tag. There is no database. `c/test_e2e` checks health, a malformed
+  request, keep-alive, a pipeline, `Connection: close`, the idle
+  timeout, and a peer FIN mid-request. Those are tests. muro 0.21.15
+  and 0.21.16 are not useful here. The pin stays 0.21.14.
 - `priv/muro/http/admit.muro` is the event-to-move map. `--backend c`
   emits it as `admitChoice`. `c/proto.c` applies that offer and calls
   the stepper. It does not choose the moves. `c/admit_glue.c` unpacks
