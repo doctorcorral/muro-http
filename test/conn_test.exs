@@ -1,8 +1,9 @@
 defmodule MuroHttp.ConnTraceTest do
   use ExUnit.Case, async: false
 
-  # The session stepper is evidence. C does not emit it. These traces are
-  # the same exchanges the step image runs, so a drift fails here.
+  # These traces are the same exchanges the HTTP image runs. The image
+  # does not name the session. The emitted C stepper is checked against
+  # this machine in test/sess_agree_test.exs. That check is conformance.
 
   alias MuroHttp.SessionFsm.Conn
 

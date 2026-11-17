@@ -1,9 +1,9 @@
 # Compiler gaps
 
-muro 0.21.6. The books check, and the runs emit. The generated C is
+muro 0.21.14. The books check, and the runs emit. The generated C is
 not edited. The three limits below were real on muro 0.20.36. They
 are closed as of muro 0.20.39. The header record is unboxed as of
-muro 0.20.42. On 0.21.6, `classify` still allocates the one
+muro 0.20.42. On 0.21.14, `classify` still allocates the one
 `Classified` result, and the C driver still prints `view-allocs 0`,
 `health-allocs 1`, `post-allocs 1`.
 
@@ -80,15 +80,36 @@ Those constructors are host facts for `decide`.
 JSON body class is not this step. That is scope. `classify` returns
 `body-none` and the raw body `Slice`. No muro issue was opened.
 
-## Step 2, still open on muro 0.21.6
+## The connection stepper, on muro 0.21.14
 
-C, Rust, and Zig do not emit a session stepper. `--backend fsm` and
-`--backend js` do. `--backend c` on `session.muro` writes the `Piece`
-and `Reply` payloads and no `step`. A run whose type names a session
-does not check: `ping is a session, not a definition`. JavaScript
-refuses that use as `c:session`. `conn.muro` is the image, a sibling
-book, so `step` does not name `conn`. The fsm trace test is what
-keeps the protocol and the image together.
+`--backend c` emits `priv/muro/http/session.muro` as a stepper.
+`c/proto.c` is what the connection driver calls before the HTTP image.
+An event the protocol does not allow is refused, and the image does
+not run. The actions are the ones `MuroHttp.SessionFsm` takes. muro
+checks the emitter by a walk of at most 14 states and depth at most 6,
+including events the protocol does not allow. That walk is not a proof.
+`test/sess_agree_test.exs` checks this book's emitted stepper against
+that machine, including a two-request trace. The check is conformance.
+
+This session is fieldless `Piece` and `Reply`. It has no nested unboxed
+payload, no direct nat `case`, no `case` that calls a run with two live
+arguments, and no `down`. The emitter accepted the whole protocol.
+
+`conn.muro` is still the HTTP image. It does not name the session.
+Classify, decide, the write range, keep-alive, the idle timer, the
+half-close flag, and the pipelined offset stay there. A FIN during
+decide or write is that flag: the session's half-close is the peer's
+choice before the piece. The later keep-or-close choice is a stepper
+move. `shut` is the terminal image and has no live session, so a byte
+on it is not a new request.
+
+Init of this session takes no nat. A stepper that does takes `uint64_t`,
+so a negative cannot be supplied. A wrong key, a bad position, or an
+unknown session name returns `MURO_SESS_UNEXPECTED` from the step.
+Init of an unknown name returns `MURO_SESS_INIT`.
+
+The three books under `priv/muro/http/neg/` are still refused by
+`mix muro.check`. They are not in `muro.exs`.
 
 An unboxed field has to be a machine word, a `WBool`, a `Slice`, an
 `Opt` of those, or more unboxed data. `Verb`, `PathShape`, and
