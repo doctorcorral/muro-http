@@ -21,9 +21,11 @@
 #error "muro-httpd needs kqueue or epoll"
 #endif
 
+#if HOST_POLL_KQUEUE
 /* Not a socket fd. kqueue timer idents are their own space, but a
    high value keeps a glance at the event from looking like stdin. */
 static const uintptr_t host_timer_ident = (uintptr_t)0x4d55524f;
+#endif
 
 struct HostPoll {
   int q;
