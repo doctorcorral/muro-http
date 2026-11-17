@@ -1,11 +1,12 @@
 [
-  muro: "0.21.6",
+  muro: "0.21.14",
   fuel: 5_000_000,
   modules: [
     {"priv/muro/http/request.muro", "c/generated/request.c", [kind: :c]},
     {"priv/muro/http/request.muro", MuroHttp.Request, "lib/muro_http/request.ex"},
     {"priv/muro/http/request.muro", MuroHttp.RequestTest, "test/request_test.exs",
      [kind: :exunit, impl: MuroHttp.Request, imports: false]},
+    {"priv/muro/http/session.muro", "c/generated/session.c", [kind: :c]},
     {"priv/muro/http/session.muro", MuroHttp.SessionFsm, "lib/muro_http/session_fsm.ex",
      [kind: :fsm]},
     {"priv/muro/http/conn.muro", "c/generated/conn.c", [kind: :c]},
