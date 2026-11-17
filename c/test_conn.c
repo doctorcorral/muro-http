@@ -1,7 +1,7 @@
 /* Drive the generated connection step. The shim only builds slices
    and counts muro__ALLOC. Parsing and the HTTP image are muro.
-   Protocol moves go through c/proto.c, a hand-written map, which
-   calls the emitted stepper before the image runs. A refused move
+   Protocol moves go through c/proto.c, which applies the emitted
+   admit choice and calls the stepper before the image runs. A refused move
    does not run the image. proto_begin and proto_shut return NULL
    on allocation or init failure. That NULL is a failed test, and
    the image is not stepped. */

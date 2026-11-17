@@ -2,10 +2,15 @@
 
 ## 0.1.0-dev — unreleased
 
+- `priv/muro/http/admit.muro` is the event-to-move map. `--backend c`
+  emits it as `admitChoice`. `c/proto.c` applies that offer and calls
+  the stepper. It does not choose the moves. `c/admit_glue.c` unpacks
+  the offer. muro checks the map by reduction. It does not check that
+  an offer is a legal prefix of `conn` from `st.at`.
+  `test/sess_agree_test.exs` does that check by conformance, against
+  the move list the previous hand-written map produced.
 - Pin muro 0.21.14. `--backend c` emits `priv/muro/http/session.muro`
-  as a stepper. `c/proto.c` is a hand-written host mapping from an
-  HTTP event to a sequence of protocol moves. It is not emitted.
-  Each move is one `muro__sess_conn_step` call. The HTTP image in
+  as a stepper. Each move is one `muro__sess_conn_step` call. The HTTP image in
   `conn.muro` stays:
   classify, decide, write ranges, keep-alive, the idle timer, the
   half-close flag, and a pipelined offset. That image does not name

@@ -95,10 +95,8 @@ JSON body class is not this step. That is scope. `classify` returns
 ## The connection stepper, on muro 0.21.14
 
 `--backend c` emits `priv/muro/http/session.muro` as a stepper
-(`c/generated/session.c`). That file is generated. `c/proto.c` is not.
-It is a hand-written host mapping from one HTTP event to a sequence
-of protocol moves. The emitted stepper enforces each move. It does
-not choose the sequence.
+(`c/generated/session.c`). That file is generated. The emitted stepper
+enforces each move. It does not choose the sequence.
 
 An event the protocol does not allow is refused, and the image does
 not run. The actions are the ones `MuroHttp.SessionFsm` takes. muro
@@ -110,12 +108,26 @@ that machine, including a two-request trace, and checks that
 for each HTTP scenario. The check is conformance.
 
 The host may offer several moves for one image event. Each move is
-one call of `muro__sess_conn_step`. The map in `c/proto.c` is what
-picks them:
+one call of `muro__sess_conn_step`.
 
-- talk (`send` pick 0) or an idle timeout (`send` pick 1)
-- open (`recv` pick 0) or a half-close (`recv` pick 1), and on a
-  half-close a piece versus a bare FIN
+## The event-to-move map is emitted
+
+`priv/muro/http/admit.muro` is that map. `--backend c` emits it as
+`admitChoice` in `c/generated/admit.c`. Do not hand-edit that file.
+The book is a total function over machine words. The inputs are the
+host event (phase, event tag, buffer length, classifier tag, decide
+code, observe bit, close-after bit) and the current session position
+(`st.at`, `st.stuck`, `st.key`, and whether the stepper reports done).
+The output is an unboxed offer: a refusal, no moves, or up to five
+moves. Each move is five words (present, direction, value tag, pick
+bit, constructor tag).
+
+The choices that used to be the case split in `c/proto.c` are that
+function:
+
+- talk (`send` pick 0) or an idle timeout (`send` pick 1) on a tick
+- open (`recv` pick 0) or a half-close (`recv` pick 1), from bytes
+  versus EOF, and on a half-close a piece versus a bare FIN
 - `piece-req`, `piece-bad`, or `piece-chunk` from the classifier tag
 - an immediate `reply-bad` for an open malformed request, or for a
   half-closed need-more or malformed request
@@ -123,29 +135,97 @@ picks them:
   image is still observing
 - keep (`send` pick 0) or close (`send` pick 1) after an open reply,
   including a write error
+- the `st.at` numbers those predicates use (1, 4, 5, 7, 10, 11, 12)
 
-Those choices are host policy. They are not in the emitted stepper.
+muro checks the equations in `admit.muro` by reduction. That is not a
+check that an offer is a legal prefix of `conn` from `st.at`. A `run`
+is not a `conform`. The grammar has no judgment that a list of
+directed moves is legal from a position, where the position is a named
+continuation or the numeric `at` the C stepper assigns. Until that
+judgment exists, `test/sess_agree_test.exs` is the prefix check: it
+steps each offer on the emitted stepper and compares the move list
+with the previous hand-written map and with
+`SessionFsm.Conn.check_trace`. That is conformance. The bounded
+emitter walk is not a proof. `session.muro` already records the full
+traces those offers concatenate as `conform` (keep, close, timeout,
+half-close, a bad request, a chunk). The checker does not connect
+`admitChoice` to those conforms. Importing `session.muro` into the
+emitted admit book would emit the stepper a second time into the same
+C file.
 
-A follow-up could put that case split in a muro book and emit the C.
-`session.muro` already records the legal sequences as `conform`
-(keep, close, timeout, half-close, a bad request, a chunk). It does
-not see the image event, the classifier tag, or the decide code.
-`conn.muro` is the image and does not name the session. A third book
-could take those host facts and name the moves. muro 0.21.14 does not
-emit that book, and this repository does not contain it. `c/proto.c`
-stays hand-written until that exists. Do not read it as generated.
+The call returns unboxed data, so `admitChoice` does not call
+`muro__ALLOC`. The generated file still contains unused nat helpers
+that do. The counted image path does not call them.
+
+## What stays hand-written, and why
+
+`c/proto.c` applies the offer. It owns the session state, calls
+`muro__sess_conn_step` once per move, records the trace, and rolls
+the session back when the stepper refuses. It translates the host's
+signed sentinels (`status < 0`, `reply < 0`) into the book's `hasCls`
+and `hasRep` words, and it passes `st.at`, `st.stuck`, `st.key`, and
+whether the stepper reports done. It does not choose which move to
+offer. A shut connection returns before the book is called.
+
+`c/admit_glue.c` unpacks the unboxed offer into a flat list and maps
+the constructor tag to the name string the stepper compares
+(`piece-chunk`, `piece-req`, `piece-bad`, `reply-ok`, `reply-bad`).
+It is not the choice.
+
+`c/shim.c` is the arena. The C test drivers call the image. Classify,
+decide, the write range, keep-alive, the idle timer, the half-close
+flag, and the pipelined offset stay in `conn.muro`. The socket and
+the event loop are not in this step.
+
+## Emitter gaps this book hit
+
+These are missing muro emitter features. This repository does not
+patch murolang/muro for them.
+
+1. No checker judgment that a list of directed moves is a legal prefix
+   of a session from a position (a named continuation, or the numeric
+   `at` the C stepper assigns). The book's evidence is reduction only.
+   The prefix check is the conformance test above.
+
+2. The C prelude structs (`struct muro__nat`, `struct muro__unit`)
+   are not under a shared include guard. One translation unit cannot
+   include both `c/generated/admit.h` and `c/generated/session.h`.
+   The host uses a second translation unit for the unpack. The feature
+   needed is one include guard around that prelude.
+
+3. A book cannot name the stepper's C enum. `dir` and `tag` in
+   `admit.muro` are copied literals (send 1, recv 2, pick 4, data 8).
+   The feature needed is a way for a `run` to name those enums, or for
+   the emitter to share them.
+
+4. `muro__sess_conn_step` takes a constructor name string, not the
+   data value the book built. The tag-to-string map lives in
+   `c/admit_glue.c`. That is stepper ABI glue.
+
+5. `U64` cannot represent the host's signed sentinel `-1`. The book
+   takes `hasCls` and `hasRep`. The comparisons `status < 0` and
+   `reply < 0` stay in `c/proto.c`. Those comparisons are glue.
+
+6. Each `def` is emitted as a global C symbol with the source name
+   and no book prefix. `conn.muro` and `admit.muro` both need the
+   event names and the bytes, decide, and write handlers. Linked
+   together, those symbols collide. The admit book spells its copies
+   `aEv*` and `aOn*`. The feature needed is a per-book prefix, or
+   `static` for a `def` the host does not call.
 
 This session is fieldless `Piece` and `Reply`. It has no nested unboxed
 payload, no direct nat `case`, no `case` that calls a run with two live
 arguments, and no `down`. The emitter accepted the whole protocol.
+`admit.muro` does nest unboxed data: an `Offer` holds five unboxed
+`Move`s, and `--backend c` returns that offer by value.
 
 `conn.muro` is still the HTTP image. It does not name the session.
 Classify, decide, the write range, keep-alive, the idle timer, the
 half-close flag, and the pipelined offset stay there. A FIN during
 decide or write is that flag: the session's half-close is the peer's
 choice before the piece. The later keep-or-close choice is a stepper
-move. `shut` is the terminal image and has no live session, so a byte
-on it is not a new request.
+move, chosen by `admitChoice`. `shut` is the terminal image and has
+no live session, so a byte on it is not a new request.
 
 Init of this session takes no nat. A stepper that does takes `uint64_t`,
 so a negative cannot be supplied. A wrong key, a bad position, or an

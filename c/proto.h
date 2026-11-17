@@ -11,8 +11,9 @@
 #define PROTO_DATA 2
 
 /* One end of the emitted `conn` session. The HTTP image stays in the
-   caller. This object is only the protocol stepper plus the
-   hand-written map in proto.c. That map is not emitted. */
+   caller. This object is the protocol stepper plus the offer from
+   `admitChoice` (c/generated/admit.c). proto.c applies that offer.
+   It does not choose the moves. */
 typedef struct Proto Proto;
 
 /* One move proto_admit committed on its last call. ctor aliases a
@@ -47,8 +48,9 @@ int proto_done(const Proto *p);
    close after the response.
 
    The host may offer several moves for this one event. Each move is
-   one stepper call. Which moves are offered is the hand-written map
-   in proto.c. The emitted stepper accepts or refuses each one.
+   one stepper call. Which moves are offered is `admitChoice`, emitted
+   from priv/muro/http/admit.muro. The emitted stepper accepts or
+   refuses each one.
 
    Returns 1 when every move was accepted, or when the event is host
    state and moves nothing. Returns 0 when the stepper refuses. On 0

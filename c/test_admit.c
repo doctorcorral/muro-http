@@ -1,4 +1,4 @@
-/* Drive the hand-written admit map in proto.c.
+/* Drive proto_admit. The moves come from the emitted admitChoice.
 
    The script is HTTP events, not protocol moves. Each `admit` line is
    one image event. This driver prints the moves proto_admit offered.
