@@ -6,4 +6,5 @@
 c/test_classify
 c/test_conn
 c/test_sess
+c/test_admit
 *.o

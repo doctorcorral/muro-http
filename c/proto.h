@@ -11,8 +11,9 @@
 #define PROTO_DATA 2
 
 /* One end of the emitted `conn` session. The HTTP image stays in the
-   caller. This object is only the protocol stepper plus the
-   hand-written map in proto.c. That map is not emitted. */
+   caller. This object is the protocol stepper plus the offer from
+   `admitChoice` (c/generated/admit.c). proto.c applies that offer.
+   It does not choose the moves. */
 typedef struct Proto Proto;
 
 /* One move proto_admit committed on its last call. ctor aliases a
@@ -47,15 +48,23 @@ int proto_done(const Proto *p);
    close after the response.
 
    The host may offer several moves for this one event. Each move is
-   one stepper call. Which moves are offered is the hand-written map
-   in proto.c. The emitted stepper accepts or refuses each one.
+   one stepper call. Which moves are offered is `admitChoice`, emitted
+   from priv/muro/http/admit.muro. The emitted stepper accepts or
+   refuses each one.
 
    Returns 1 when every move was accepted, or when the event is host
-   state and moves nothing. Returns 0 when the stepper refuses. On 0
-   the session is unchanged and the caller must not run the image.
-   A NULL session is not a refusal: shut has no session. */
+   state and moves nothing. Returns 0 when the book refuses. Returns
+   -1 when the book offered a move and the stepper refused it. On 0
+   and on -1 the session is unchanged and the caller must not run the
+   image. A NULL session is not a refusal: shut has no session. */
 int proto_admit(Proto *p, int phase, int ev_tag, size_t buf_n, int status,
                 int reply, int observe, int close_after);
+
+/* The image does not call these. The admit test places the session in
+   a state the stepper can already report, then shows that the book
+   refuses a move. stuck is 0 or 1. key is the stepper's uint16_t. */
+void proto_force_stuck(Proto *p, int stuck);
+void proto_force_key(Proto *p, unsigned key);
 
 /* Moves committed by the last proto_admit. Empty when it refused,
    when the event moved nothing, or when the session was already done.

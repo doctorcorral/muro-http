@@ -1,0 +1,455 @@
+-- Event to protocol moves for one HTTP event.
+--
+-- `c/generated/session.c` is the stepper for `session conn`. This book
+-- does not step it. It chooses the moves the host offers. The host
+-- calls `admitChoice`, then `muro__sess_conn_step` once per move.
+-- A refused offer is `ok` 0 and no moves. An event that is host state
+-- is `ok` 1 and no moves. The image (classify, decide, the socket,
+-- the buffer, the clock) stays in the caller.
+--
+-- Inputs are machine words, the same numbers the image and this emit
+-- of the stepper already use.
+--   phase:     0 read, 1 decide, 2 write, 3 idle. Anything else refuses
+--              when the session is not done. Closed is 4.
+--   ev:        0 bytes, 1 eof, 2 progress, 3 done, 4 error, 5 tick, 6 db.
+--   n:         buffer length. Only zero against nonzero matters.
+--   hasCls:    0 when the host has no classifier tag (the C `int` was
+--              negative). 1 when `cls` is that tag.
+--   cls:       0 status-ok, 1 status-malformed, anything else a chunk.
+--   hasRep:    0 when the host has no decide code. 1 when `rep` is it.
+--   rep:       0 reply-ok. Any other word is reply-bad.
+--   observe:   0 send the reply. Any other word: the image is observing.
+--   closeAfter: 0 keep. Any other word, or a write error: close.
+--              That offer is only at at 5. A write end at talk is a
+--              refusal: pick 1 there is the idle timeout, not close.
+--   at:        `st.at` on the muro 0.21.14 conn stepper.
+--              1 talk or timeout, 4 open reply, 5 keep or close,
+--              7 open bad reply, 10 half chunk reply, 11 half request
+--              reply, 12 half bad reply.
+--   stuck:     `st.stuck`. A stuck session is not at a reply or a choice.
+--   key:       `st.key`. The conn end is 1.
+--   sessDone:  1 when the stepper reports done. Any event is then quiet.
+--
+-- A move is five words. `present` is 1 when the slot is a move.
+-- `dir` is the stepper direction: 1 send, 2 recv.
+-- `tag` is the stepper value tag: 4 pick, 8 data.
+-- `bit` is the pick. `ctor` is the data tag:
+--   0 piece-chunk, 1 piece-req, 2 piece-bad, 3 reply-ok, 4 reply-bad.
+-- Those dir and tag numbers are the C stepper's enums. This book
+-- cannot name that enum. The host turns `ctor` into the constructor
+-- string the stepper compares.
+--
+-- The C backend emits each `def` as a global symbol with no book
+-- prefix. `conn.muro` emits the event builders and the bytes, decide,
+-- and write handlers under the short names a host would also pick.
+-- Those defs are spelled `aEv*` and `aOn*` here so the two objects
+-- link. The host calls only `admitChoice`.
+--
+-- The result is unboxed, so the call does not use `muro__ALLOC`.
+--
+-- muro checks these equations by reduction. It does not check that an
+-- offer is a legal prefix of `session conn` from `at`. A `run` is not
+-- a `conform`, and there is no judgment that takes a position and a
+-- list of directed moves. `test/sess_agree_test.exs` steps each offer
+-- on the machine emitted from `session.muro`. That check is
+-- conformance. The full traces those offers concatenate are the
+-- conforms already in that book.
+
+unboxed data Move : Type where
+  mv : Π (+ present : U64) → Π (+ dir : U64) → Π (+ tag : U64) → Π (+ bit : U64) → Π (+ ctor : U64) → Move
+
+unboxed data Offer : Type where
+  offer : Π (+ ok : U64) → Π (+ n : U64) → Π (+ m0 : Move) → Π (+ m1 : Move) → Π (+ m2 : Move) → Π (+ m3 : Move) → Π (+ m4 : Move) → Offer
+
+def phRead : run U64 := toU64 0
+def phDecide : run U64 := toU64 1
+def phWrite : run U64 := toU64 2
+def phIdle : run U64 := toU64 3
+def phClosed : run U64 := toU64 4
+
+def aEvBytes : run U64 := toU64 0
+def aEvEof : run U64 := toU64 1
+def aEvProgress : run U64 := toU64 2
+def aEvDone : run U64 := toU64 3
+def aEvError : run U64 := toU64 4
+def aEvTick : run U64 := toU64 5
+def aEvDb : run U64 := toU64 6
+
+def clsOk : run U64 := toU64 0
+def clsBad : run U64 := toU64 1
+
+def ctorChunk : run U64 := toU64 0
+def ctorReq : run U64 := toU64 1
+def ctorBadPiece : run U64 := toU64 2
+def ctorReplyOk : run U64 := toU64 3
+def ctorReplyBad : run U64 := toU64 4
+
+def dirSend : run U64 := toU64 1
+def dirRecv : run U64 := toU64 2
+def tagPick : run U64 := toU64 4
+def tagData : run U64 := toU64 8
+
+def atTalk : run U64 := toU64 1
+def atReplyOpen : run U64 := toU64 4
+def atKeep : run U64 := toU64 5
+def atReplyBad : run U64 := toU64 7
+def atReplyHalfChunk : run U64 := toU64 10
+def atReplyHalfReq : run U64 := toU64 11
+def atReplyHalfBad : run U64 := toU64 12
+
+def connKey : run U64 := toU64 1
+
+def isZero : run Π (+ n : U64) → WBool :=
+  λ (+ n : U64) → eqi n (toU64 0)
+
+def same : run Π (+ n : U64) → Π (+ k : U64) → WBool :=
+  λ (+ n : U64) → λ (+ k : U64) → eqi n k
+
+def noMove : run Move :=
+  mv (toU64 0) (toU64 0) (toU64 0) (toU64 0) (toU64 0)
+
+def sendPick : run Π (+ bit : U64) → Move :=
+  λ (+ bit : U64) → mv (toU64 1) dirSend tagPick bit (toU64 0)
+
+def recvPick : run Π (+ bit : U64) → Move :=
+  λ (+ bit : U64) → mv (toU64 1) dirRecv tagPick bit (toU64 0)
+
+def sendData : run Π (+ ctor : U64) → Move :=
+  λ (+ ctor : U64) → mv (toU64 1) dirSend tagData (toU64 0) ctor
+
+def recvData : run Π (+ ctor : U64) → Move :=
+  λ (+ ctor : U64) → mv (toU64 1) dirRecv tagData (toU64 0) ctor
+
+def refuse : run Offer :=
+  offer (toU64 0) (toU64 0) noMove noMove noMove noMove noMove
+
+def quiet : run Offer :=
+  offer (toU64 1) (toU64 0) noMove noMove noMove noMove noMove
+
+def offer1 : run Π (+ m0 : Move) → Offer :=
+  λ (+ m0 : Move) → offer (toU64 1) (toU64 1) m0 noMove noMove noMove noMove
+
+def offer3 : run Π (+ m0 : Move) → Π (+ m1 : Move) → Π (+ m2 : Move) → Offer :=
+  λ (+ m0 : Move) → λ (+ m1 : Move) → λ (+ m2 : Move) →
+    offer (toU64 1) (toU64 3) m0 m1 m2 noMove noMove
+
+def offer4 : run Π (+ m0 : Move) → Π (+ m1 : Move) → Π (+ m2 : Move) → Π (+ m3 : Move) → Offer :=
+  λ (+ m0 : Move) → λ (+ m1 : Move) → λ (+ m2 : Move) → λ (+ m3 : Move) →
+    offer (toU64 1) (toU64 4) m0 m1 m2 m3 noMove
+
+def offer5 : run Π (+ m0 : Move) → Π (+ m1 : Move) → Π (+ m2 : Move) → Π (+ m3 : Move) → Π (+ m4 : Move) → Offer :=
+  λ (+ m0 : Move) → λ (+ m1 : Move) → λ (+ m2 : Move) → λ (+ m3 : Move) → λ (+ m4 : Move) →
+    offer (toU64 1) (toU64 5) m0 m1 m2 m3 m4
+
+def pieceCtor : run Π (+ cls : U64) → U64 :=
+  λ (+ cls : U64) →
+    match (same cls clsOk) motive (λ _ → U64)
+      | wtrue => ctorReq
+      | wfalse =>
+          (match (same cls clsBad) motive (λ _ → U64)
+            | wtrue => ctorBadPiece
+            | wfalse => ctorChunk)
+
+def replyNow : run Π (+ fin : U64) → Π (+ cls : U64) → WBool :=
+  λ (+ fin : U64) → λ (+ cls : U64) →
+    match (isZero fin) motive (λ _ → WBool)
+      | wtrue => same cls clsBad
+      | wfalse =>
+          (match (same cls clsOk) motive (λ _ → WBool)
+            | wtrue => wfalse
+            | wfalse => wtrue)
+
+def replyCtor : run Π (+ rep : U64) → U64 :=
+  λ (+ rep : U64) →
+    match (isZero rep) motive (λ _ → U64)
+      | wtrue => ctorReplyOk
+      | wfalse => ctorReplyBad
+
+def openPiece : run Π (+ cls : U64) → Offer :=
+  λ (+ cls : U64) →
+    match (replyNow (toU64 0) cls) motive (λ _ → Offer)
+      | wtrue =>
+          offer4 (sendPick (toU64 0)) (recvPick (toU64 0)) (recvData (pieceCtor cls)) (sendData ctorReplyBad)
+      | wfalse =>
+          offer3 (sendPick (toU64 0)) (recvPick (toU64 0)) (recvData (pieceCtor cls))
+
+def halfPiece : run Π (+ cls : U64) → Offer :=
+  λ (+ cls : U64) →
+    match (replyNow (toU64 1) cls) motive (λ _ → Offer)
+      | wtrue =>
+          offer5 (sendPick (toU64 0)) (recvPick (toU64 1)) (recvPick (toU64 0)) (recvData (pieceCtor cls)) (sendData ctorReplyBad)
+      | wfalse =>
+          offer4 (sendPick (toU64 0)) (recvPick (toU64 1)) (recvPick (toU64 0)) (recvData (pieceCtor cls))
+
+def aOnBytes : run Π (+ fin : U64) → Π (+ hasCls : U64) → Π (+ cls : U64) → Offer :=
+  λ (+ fin : U64) → λ (+ hasCls : U64) → λ (+ cls : U64) →
+    match (isZero hasCls) motive (λ _ → Offer)
+      | wtrue => refuse
+      | wfalse =>
+          (match (isZero fin) motive (λ _ → Offer)
+            | wtrue => openPiece cls
+            | wfalse => halfPiece cls)
+
+def bareFin : run Offer :=
+  offer3 (sendPick (toU64 0)) (recvPick (toU64 1)) (recvPick (toU64 1))
+
+def onTurn : run Π (+ ev : U64) → Π (+ n : U64) → Π (+ hasCls : U64) → Π (+ cls : U64) → Offer :=
+  λ (+ ev : U64) → λ (+ n : U64) → λ (+ hasCls : U64) → λ (+ cls : U64) →
+    match (same ev aEvTick) motive (λ _ → Offer)
+      | wtrue => offer1 (sendPick (toU64 1))
+      | wfalse =>
+          (match (same ev aEvEof) motive (λ _ → Offer)
+            | wtrue =>
+                (match (isZero n) motive (λ _ → Offer)
+                  | wtrue => bareFin
+                  | wfalse => aOnBytes (toU64 1) hasCls cls)
+            | wfalse =>
+                (match (same ev aEvBytes) motive (λ _ → Offer)
+                  | wtrue => aOnBytes (toU64 0) hasCls cls
+                  | wfalse => quiet))
+
+def atReplyPos : run Π (+ at : U64) → WBool :=
+  λ (+ at : U64) →
+    match (same at atReplyOpen) motive (λ _ → WBool)
+      | wtrue => wtrue
+      | wfalse =>
+          (match (same at atReplyBad) motive (λ _ → WBool)
+            | wtrue => wtrue
+            | wfalse =>
+                (match (same at atReplyHalfChunk) motive (λ _ → WBool)
+                  | wtrue => wtrue
+                  | wfalse =>
+                      (match (same at atReplyHalfReq) motive (λ _ → WBool)
+                        | wtrue => wtrue
+                        | wfalse => same at atReplyHalfBad)))
+
+def liveConn : run Π (+ stuck : U64) → Π (+ key : U64) → WBool :=
+  λ (+ stuck : U64) → λ (+ key : U64) →
+    match (isZero stuck) motive (λ _ → WBool)
+      | wtrue => same key connKey
+      | wfalse => wfalse
+
+def waitingReply : run Π (+ at : U64) → Π (+ stuck : U64) → Π (+ key : U64) → WBool :=
+  λ (+ at : U64) → λ (+ stuck : U64) → λ (+ key : U64) →
+    match (liveConn stuck key) motive (λ _ → WBool)
+      | wtrue => atReplyPos at
+      | wfalse => wfalse
+
+-- A write end is the keep-or-close choice, and that position is
+-- `atKeep` only. `atTalk` is talk or timeout. Pick 1 there is the
+-- idle timeout, not close, so a write end at talk is a refusal.
+def waitingChoice : run Π (+ at : U64) → Π (+ stuck : U64) → Π (+ key : U64) → WBool :=
+  λ (+ at : U64) → λ (+ stuck : U64) → λ (+ key : U64) →
+    match (liveConn stuck key) motive (λ _ → WBool)
+      | wtrue => same at atKeep
+      | wfalse => wfalse
+
+def aOnDecide : run Π (+ ev : U64) → Π (+ hasRep : U64) → Π (+ rep : U64) → Π (+ observe : U64) → Π (+ at : U64) → Π (+ stuck : U64) → Π (+ key : U64) → Offer :=
+  λ (+ ev : U64) → λ (+ hasRep : U64) → λ (+ rep : U64) → λ (+ observe : U64) → λ (+ at : U64) → λ (+ stuck : U64) → λ (+ key : U64) →
+    match (same ev aEvDb) motive (λ _ → Offer)
+      | wtrue =>
+          (match (waitingReply at stuck key) motive (λ _ → Offer)
+            | wtrue =>
+                (match (isZero observe) motive (λ _ → Offer)
+                  | wtrue =>
+                      (match (isZero hasRep) motive (λ _ → Offer)
+                        | wtrue => refuse
+                        | wfalse => offer1 (sendData (replyCtor rep)))
+                  | wfalse => quiet)
+            | wfalse => refuse)
+      | wfalse => quiet
+
+def isWriteEnd : run Π (+ ev : U64) → WBool :=
+  λ (+ ev : U64) →
+    match (same ev aEvDone) motive (λ _ → WBool)
+      | wtrue => wtrue
+      | wfalse => same ev aEvError
+
+def closeBit : run Π (+ ev : U64) → Π (+ closeAfter : U64) → U64 :=
+  λ (+ ev : U64) → λ (+ closeAfter : U64) →
+    match (same ev aEvError) motive (λ _ → U64)
+      | wtrue => toU64 1
+      | wfalse =>
+          (match (isZero closeAfter) motive (λ _ → U64)
+            | wtrue => toU64 0
+            | wfalse => toU64 1)
+
+def aOnWrite : run Π (+ ev : U64) → Π (+ closeAfter : U64) → Π (+ at : U64) → Π (+ stuck : U64) → Π (+ key : U64) → Offer :=
+  λ (+ ev : U64) → λ (+ closeAfter : U64) → λ (+ at : U64) → λ (+ stuck : U64) → λ (+ key : U64) →
+    match (isWriteEnd ev) motive (λ _ → Offer)
+      | wtrue =>
+          (match (waitingChoice at stuck key) motive (λ _ → Offer)
+            | wtrue => offer1 (sendPick (closeBit ev closeAfter))
+            | wfalse => refuse)
+      | wfalse => quiet
+
+def isReadPhase : run Π (+ phase : U64) → WBool :=
+  λ (+ phase : U64) →
+    match (same phase phRead) motive (λ _ → WBool)
+      | wtrue => wtrue
+      | wfalse => same phase phIdle
+
+def admitChoice : run Π (+ phase : U64) → Π (+ ev : U64) → Π (+ n : U64) → Π (+ hasCls : U64) → Π (+ cls : U64) → Π (+ hasRep : U64) → Π (+ rep : U64) → Π (+ observe : U64) → Π (+ closeAfter : U64) → Π (+ at : U64) → Π (+ stuck : U64) → Π (+ key : U64) → Π (+ sessDone : U64) → Offer :=
+  λ (+ phase : U64) → λ (+ ev : U64) → λ (+ n : U64) → λ (+ hasCls : U64) → λ (+ cls : U64) → λ (+ hasRep : U64) → λ (+ rep : U64) → λ (+ observe : U64) → λ (+ closeAfter : U64) → λ (+ at : U64) → λ (+ stuck : U64) → λ (+ key : U64) → λ (+ sessDone : U64) →
+    match (isZero sessDone) motive (λ _ → Offer)
+      | wtrue =>
+          (match (isReadPhase phase) motive (λ _ → Offer)
+            | wtrue => onTurn ev n hasCls cls
+            | wfalse =>
+                (match (same phase phDecide) motive (λ _ → Offer)
+                  | wtrue => aOnDecide ev hasRep rep observe at stuck key
+                  | wfalse =>
+                      (match (same phase phWrite) motive (λ _ → Offer)
+                        | wtrue => aOnWrite ev closeAfter at stuck key
+                        | wfalse => refuse)))
+      | wfalse => quiet
+
+def pick-encoding : evidence
+  {sendPick (toU64 1) ≡ mv (toU64 1) (toU64 1) (toU64 4) (toU64 1) (toU64 0) : Move} := refl
+
+def data-encoding : evidence
+  {recvData ctorReq ≡ mv (toU64 1) (toU64 2) (toU64 8) (toU64 0) (toU64 1) : Move} := refl
+
+def tick-at-talk : evidence
+  {admitChoice phRead aEvTick (toU64 0) (toU64 0) (toU64 0) (toU64 0) (toU64 0) (toU64 0) (toU64 0) atTalk (toU64 0) connKey (toU64 0)
+    ≡ offer1 (sendPick (toU64 1)) : Offer} := refl
+
+def idle-tick : evidence
+  {admitChoice phIdle aEvTick (toU64 0) (toU64 0) (toU64 0) (toU64 0) (toU64 0) (toU64 0) (toU64 0) atTalk (toU64 0) connKey (toU64 0)
+    ≡ offer1 (sendPick (toU64 1)) : Offer} := refl
+
+def bare-fin : evidence
+  {admitChoice phRead aEvEof (toU64 0) (toU64 0) (toU64 0) (toU64 0) (toU64 0) (toU64 0) (toU64 0) atTalk (toU64 0) connKey (toU64 0)
+    ≡ bareFin : Offer} := refl
+
+def open-req : evidence
+  {admitChoice phRead aEvBytes (toU64 24) (toU64 1) clsOk (toU64 0) (toU64 0) (toU64 0) (toU64 0) atTalk (toU64 0) connKey (toU64 0)
+    ≡ offer3 (sendPick (toU64 0)) (recvPick (toU64 0)) (recvData ctorReq) : Offer} := refl
+
+def open-chunk : evidence
+  {admitChoice phRead aEvBytes (toU64 18) (toU64 1) (toU64 2) (toU64 0) (toU64 0) (toU64 0) (toU64 0) atTalk (toU64 0) connKey (toU64 0)
+    ≡ offer3 (sendPick (toU64 0)) (recvPick (toU64 0)) (recvData ctorChunk) : Offer} := refl
+
+def open-bad : evidence
+  {admitChoice phRead aEvBytes (toU64 20) (toU64 1) clsBad (toU64 0) (toU64 0) (toU64 0) (toU64 0) atTalk (toU64 0) connKey (toU64 0)
+    ≡ offer4 (sendPick (toU64 0)) (recvPick (toU64 0)) (recvData ctorBadPiece) (sendData ctorReplyBad) : Offer} := refl
+
+def open-other-tag : evidence
+  {admitChoice phRead aEvBytes (toU64 8) (toU64 1) (toU64 9) (toU64 0) (toU64 0) (toU64 0) (toU64 0) atTalk (toU64 0) connKey (toU64 0)
+    ≡ offer3 (sendPick (toU64 0)) (recvPick (toU64 0)) (recvData ctorChunk) : Offer} := refl
+
+def no-class : evidence
+  {admitChoice phRead aEvBytes (toU64 4) (toU64 0) (toU64 0) (toU64 0) (toU64 0) (toU64 0) (toU64 0) atTalk (toU64 0) connKey (toU64 0)
+    ≡ refuse : Offer} := refl
+
+def half-req : evidence
+  {admitChoice phRead aEvEof (toU64 24) (toU64 1) clsOk (toU64 0) (toU64 0) (toU64 0) (toU64 0) atTalk (toU64 0) connKey (toU64 0)
+    ≡ offer4 (sendPick (toU64 0)) (recvPick (toU64 1)) (recvPick (toU64 0)) (recvData ctorReq) : Offer} := refl
+
+def half-chunk : evidence
+  {admitChoice phRead aEvEof (toU64 8) (toU64 1) (toU64 2) (toU64 0) (toU64 0) (toU64 0) (toU64 0) atTalk (toU64 0) connKey (toU64 0)
+    ≡ offer5 (sendPick (toU64 0)) (recvPick (toU64 1)) (recvPick (toU64 0)) (recvData ctorChunk) (sendData ctorReplyBad) : Offer} := refl
+
+def half-bad : evidence
+  {admitChoice phRead aEvEof (toU64 8) (toU64 1) clsBad (toU64 0) (toU64 0) (toU64 0) (toU64 0) atTalk (toU64 0) connKey (toU64 0)
+    ≡ offer5 (sendPick (toU64 0)) (recvPick (toU64 1)) (recvPick (toU64 0)) (recvData ctorBadPiece) (sendData ctorReplyBad) : Offer} := refl
+
+def read-progress : evidence
+  {admitChoice phRead aEvProgress (toU64 8) (toU64 0) (toU64 0) (toU64 0) (toU64 0) (toU64 0) (toU64 0) atTalk (toU64 0) connKey (toU64 0)
+    ≡ quiet : Offer} := refl
+
+def reply-ok-open : evidence
+  {admitChoice phDecide aEvDb (toU64 0) (toU64 0) (toU64 0) (toU64 1) (toU64 0) (toU64 0) (toU64 0) atReplyOpen (toU64 0) connKey (toU64 0)
+    ≡ offer1 (sendData ctorReplyOk) : Offer} := refl
+
+def reply-bad-open : evidence
+  {admitChoice phDecide aEvDb (toU64 0) (toU64 0) (toU64 0) (toU64 1) (toU64 1) (toU64 0) (toU64 0) atReplyOpen (toU64 0) connKey (toU64 0)
+    ≡ offer1 (sendData ctorReplyBad) : Offer} := refl
+
+def reply-other-code : evidence
+  {admitChoice phDecide aEvDb (toU64 0) (toU64 0) (toU64 0) (toU64 1) (toU64 5) (toU64 0) (toU64 0) atReplyOpen (toU64 0) connKey (toU64 0)
+    ≡ offer1 (sendData ctorReplyBad) : Offer} := refl
+
+def reply-at-bad : evidence
+  {admitChoice phDecide aEvDb (toU64 0) (toU64 0) (toU64 0) (toU64 1) (toU64 1) (toU64 0) (toU64 0) atReplyBad (toU64 0) connKey (toU64 0)
+    ≡ offer1 (sendData ctorReplyBad) : Offer} := refl
+
+def reply-at-half-chunk : evidence
+  {admitChoice phDecide aEvDb (toU64 0) (toU64 0) (toU64 0) (toU64 1) (toU64 1) (toU64 0) (toU64 0) atReplyHalfChunk (toU64 0) connKey (toU64 0)
+    ≡ offer1 (sendData ctorReplyBad) : Offer} := refl
+
+def reply-at-half-req : evidence
+  {admitChoice phDecide aEvDb (toU64 0) (toU64 0) (toU64 0) (toU64 1) (toU64 0) (toU64 0) (toU64 0) atReplyHalfReq (toU64 0) connKey (toU64 0)
+    ≡ offer1 (sendData ctorReplyOk) : Offer} := refl
+
+def reply-at-half-bad : evidence
+  {admitChoice phDecide aEvDb (toU64 0) (toU64 0) (toU64 0) (toU64 1) (toU64 1) (toU64 0) (toU64 0) atReplyHalfBad (toU64 0) connKey (toU64 0)
+    ≡ offer1 (sendData ctorReplyBad) : Offer} := refl
+
+def observe-skips : evidence
+  {admitChoice phDecide aEvDb (toU64 0) (toU64 0) (toU64 0) (toU64 0) (toU64 0) (toU64 1) (toU64 0) atReplyOpen (toU64 0) connKey (toU64 0)
+    ≡ quiet : Offer} := refl
+
+def decide-without-code : evidence
+  {admitChoice phDecide aEvDb (toU64 0) (toU64 0) (toU64 0) (toU64 0) (toU64 0) (toU64 0) (toU64 0) atReplyOpen (toU64 0) connKey (toU64 0)
+    ≡ refuse : Offer} := refl
+
+def db-before-piece : evidence
+  {admitChoice phDecide aEvDb (toU64 0) (toU64 0) (toU64 0) (toU64 1) (toU64 0) (toU64 0) (toU64 0) atTalk (toU64 0) connKey (toU64 0)
+    ≡ refuse : Offer} := refl
+
+def db-at-keep : evidence
+  {admitChoice phDecide aEvDb (toU64 0) (toU64 0) (toU64 0) (toU64 1) (toU64 0) (toU64 0) (toU64 0) atKeep (toU64 0) connKey (toU64 0)
+    ≡ refuse : Offer} := refl
+
+def db-while-stuck : evidence
+  {admitChoice phDecide aEvDb (toU64 0) (toU64 0) (toU64 0) (toU64 1) (toU64 0) (toU64 0) (toU64 0) atReplyOpen (toU64 1) connKey (toU64 0)
+    ≡ refuse : Offer} := refl
+
+def db-wrong-key : evidence
+  {admitChoice phDecide aEvDb (toU64 0) (toU64 0) (toU64 0) (toU64 1) (toU64 0) (toU64 0) (toU64 0) atReplyOpen (toU64 0) (toU64 2) (toU64 0)
+    ≡ refuse : Offer} := refl
+
+def decide-eof-quiet : evidence
+  {admitChoice phDecide aEvEof (toU64 0) (toU64 0) (toU64 0) (toU64 0) (toU64 0) (toU64 0) (toU64 0) atReplyOpen (toU64 0) connKey (toU64 0)
+    ≡ quiet : Offer} := refl
+
+def keep-after-reply : evidence
+  {admitChoice phWrite aEvDone (toU64 0) (toU64 0) (toU64 0) (toU64 0) (toU64 0) (toU64 0) (toU64 0) atKeep (toU64 0) connKey (toU64 0)
+    ≡ offer1 (sendPick (toU64 0)) : Offer} := refl
+
+def close-after-reply : evidence
+  {admitChoice phWrite aEvDone (toU64 0) (toU64 0) (toU64 0) (toU64 0) (toU64 0) (toU64 0) (toU64 1) atKeep (toU64 0) connKey (toU64 0)
+    ≡ offer1 (sendPick (toU64 1)) : Offer} := refl
+
+def write-error-closes : evidence
+  {admitChoice phWrite aEvError (toU64 0) (toU64 0) (toU64 0) (toU64 0) (toU64 0) (toU64 0) (toU64 0) atKeep (toU64 0) connKey (toU64 0)
+    ≡ offer1 (sendPick (toU64 1)) : Offer} := refl
+
+def write-before-reply : evidence
+  {admitChoice phWrite aEvDone (toU64 0) (toU64 0) (toU64 0) (toU64 0) (toU64 0) (toU64 0) (toU64 0) atReplyOpen (toU64 0) connKey (toU64 0)
+    ≡ refuse : Offer} := refl
+
+def write-tick-quiet : evidence
+  {admitChoice phWrite aEvTick (toU64 0) (toU64 0) (toU64 0) (toU64 0) (toU64 0) (toU64 0) (toU64 0) atKeep (toU64 0) connKey (toU64 0)
+    ≡ quiet : Offer} := refl
+
+def write-at-talk : evidence
+  {admitChoice phWrite aEvDone (toU64 0) (toU64 0) (toU64 0) (toU64 0) (toU64 0) (toU64 0) (toU64 1) atTalk (toU64 0) connKey (toU64 0)
+    ≡ refuse : Offer} := refl
+
+def write-while-stuck : evidence
+  {admitChoice phWrite aEvDone (toU64 0) (toU64 0) (toU64 0) (toU64 0) (toU64 0) (toU64 0) (toU64 0) atKeep (toU64 1) connKey (toU64 0)
+    ≡ refuse : Offer} := refl
+
+def done-is-quiet : evidence
+  {admitChoice phRead aEvTick (toU64 0) (toU64 0) (toU64 0) (toU64 0) (toU64 0) (toU64 0) (toU64 0) atTalk (toU64 0) connKey (toU64 1)
+    ≡ quiet : Offer} := refl
+
+def closed-refuses : evidence
+  {admitChoice phClosed aEvTick (toU64 0) (toU64 0) (toU64 0) (toU64 0) (toU64 0) (toU64 0) (toU64 0) atTalk (toU64 0) connKey (toU64 0)
+    ≡ refuse : Offer} := refl
+
+def idle-bytes : evidence
+  {admitChoice phIdle aEvBytes (toU64 22) (toU64 1) clsOk (toU64 0) (toU64 0) (toU64 0) (toU64 0) atTalk (toU64 0) connKey (toU64 0)
+    ≡ offer3 (sendPick (toU64 0)) (recvPick (toU64 0)) (recvData ctorReq) : Offer} := refl

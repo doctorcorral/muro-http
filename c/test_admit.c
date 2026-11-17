@@ -1,4 +1,4 @@
-/* Drive the hand-written admit map in proto.c.
+/* Drive proto_admit. The moves come from the emitted admitChoice.
 
    The script is HTTP events, not protocol moves. Each `admit` line is
    one image event. This driver prints the moves proto_admit offered.
@@ -8,19 +8,31 @@
 
      begin
      shut
+     set stuck <0|1>
+     set key <n>
      admit <phase> <ev> <n> <status> <reply> <observe> <close>
 
    phase: read decide write idle closed
    ev: bytes eof progress done error tick db
-   status: ok bad chunk none
+   status: ok (0), bad (1), chunk (2), none (no tag), or a number.
+           A tag other than 0 or 1 is a chunk, including one outside
+           {0, 1, 2}.
    reply: ok bad none
    observe and close: 0 or 1
 
+   `set` changes the live session before the next admit. The image
+   does not. stuck and a key other than the conn end are states the
+   stepper can already report.
+
    One block per admit:
 
-     status <0|1>
+     status <0|1|2>
      done <0|1>
      moves <k>
+
+   status 0: the book refused. status 1: the offer was accepted.
+   status 2: the book offered a move and the stepper refused it.
+   The committed moves are empty in both refusal cases.
      send pick <bit>
      recv data <ctor>
      .
@@ -64,10 +76,12 @@ static int parse_ev(const char *s, int *out) {
 }
 
 static int parse_status(const char *s, int *out) {
+  unsigned long n;
   if (strcmp(s, "ok") == 0) *out = 0;
   else if (strcmp(s, "bad") == 0) *out = 1;
   else if (strcmp(s, "chunk") == 0) *out = 2;
   else if (strcmp(s, "none") == 0) *out = -1;
+  else if (parse_u(s, &n) && n <= 65535) *out = (int)n;
   else return 0;
   return 1;
 }
@@ -90,7 +104,7 @@ static int parse_bit(const char *s, int *out) {
 static void print_admit(const Proto *p, int ok) {
   int i;
   int n = proto_move_count(p);
-  printf("status %d\n", ok ? 1 : 0);
+  printf("status %d\n", ok > 0 ? 1 : (ok < 0 ? 2 : 0));
   printf("done %d\n", proto_done(p) ? 1 : 0);
   printf("moves %d\n", n);
   for (i = 0; i < n; i++) {
@@ -173,6 +187,34 @@ static int run_script(const char *path) {
       proto = proto_shut();
       if (!proto) {
         fprintf(stderr, "FAIL shut returned NULL\n");
+        rc = 1;
+        break;
+      }
+    } else if (strcmp(tok, "set") == 0) {
+      char *kind = strtok(NULL, " \t");
+      char *arg = strtok(NULL, " \t");
+      unsigned long n;
+      if (!proto || !kind || !arg || strtok(NULL, " \t")) {
+        rc = 1;
+        break;
+      }
+      if (!parse_u(arg, &n)) {
+        rc = 1;
+        break;
+      }
+      if (strcmp(kind, "stuck") == 0) {
+        if (n > 1) {
+          rc = 1;
+          break;
+        }
+        proto_force_stuck(proto, (int)n);
+      } else if (strcmp(kind, "key") == 0) {
+        if (n > 65535) {
+          rc = 1;
+          break;
+        }
+        proto_force_key(proto, (unsigned)n);
+      } else {
         rc = 1;
         break;
       }

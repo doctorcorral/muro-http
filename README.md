@@ -93,17 +93,28 @@ a negative cannot be supplied. A wrong key, a bad position, or an
 unknown session name returns `MURO_SESS_UNEXPECTED` from the step.
 Init of an unknown name returns `MURO_SESS_INIT`.
 
-`c/proto.c` is a hand-written host mapping from an HTTP event to that
-sequence of moves. It is not emitted. The emitted stepper accepts or
-refuses each move. It does not choose talk versus timeout, open
-versus FIN, the piece constructor, an immediate reply, the decide
-reply, or the keep-or-close bit. `c/test_conn` calls `proto_admit`
-before the HTTP image. A refused move does not run the image.
-`test/sess_agree_test.exs` runs the emitted stepper and
-`MuroHttp.SessionFsm` on the same traces, including off-protocol
-events, and checks that `proto_admit` offers the same move list as
-`SessionFsm.Conn.check_trace` for each HTTP scenario. That check is
-conformance. A two-request keep-alive is deeper than the walk above.
+`priv/muro/http/admit.muro` is the event-to-move map. `--backend c`
+emits it as `admitChoice` (`c/generated/admit.c`). The inputs are the
+host event and `st.at` on this stepper. The output is the sequence of
+moves to offer, or a refusal, or no move. muro checks that function
+by reduction. It does not check that an offer is a legal prefix of
+`conn` from that position: a `run` is not a `conform`, and there is
+no judgment that takes a position and a list of directed moves.
+`test/sess_agree_test.exs` steps each offer on the machine emitted
+from `session.muro` and checks it against frozen scenario traces and
+`Conn.check_trace`. That check is conformance. A two-request
+keep-alive is deeper than the walk above.
+
+`c/proto.c` applies the offer. It calls `muro__sess_conn_step` once
+per move, rolls back when the stepper refuses, and passes `st.at`.
+It does not choose talk versus timeout, open versus FIN, the piece
+constructor, an immediate reply, the decide reply, or the
+keep-or-close bit. `c/admit_glue.c` unpacks the unboxed offer and
+turns the book's constructor tag into the name string the stepper
+compares. Those two generated headers both define `struct muro__nat`,
+so they cannot be included from one translation unit.
+`c/test_conn` calls `proto_admit` before the HTTP image. A refused
+move does not run the image.
 
 `priv/muro/http/conn.muro` is the HTTP image: classify, decide, a
 write range, keep-alive, the idle timer, the half-close flag, and a
@@ -211,11 +222,12 @@ Method, path, authorization, and body views still point at the
 original buffer, or at the out-of-range empty when the span is absent.
 
 `c/test_conn` drives the HTTP image. Protocol moves go through
-`c/proto.c`, the hand-written map, which calls the stepper in
-`c/generated/session.c`. The link does not include `request.o` or
-`decide.o`: `conn.muro` already imports those books. `session.c` is a
-separate translation unit, so its header is not included next to
-`conn.h`.
+`c/proto.c`, which applies `admitChoice` from `c/generated/admit.c`
+and calls the stepper in `c/generated/session.c`. The link does not
+include `request.o` or `decide.o`: `conn.muro` already imports those
+books. `session.c` and `admit.c` are separate translation units.
+Their headers both define `struct muro__nat`, so `c/admit_glue.c`
+is the only file that includes `admit.h`.
 
 ```sh
 cc -Wall -Wextra -Werror -std=c11 -I c -I c/generated -include c/shim.h \
@@ -227,9 +239,14 @@ cc -Wall -Wextra -Werror -std=c11 \
 cc -Wall -Wextra -Werror -std=c11 \
   -I c -I c/generated -include c/shim.h \
   -c -o c/session.o c/generated/session.c
+cc -Wall -Wextra -Werror -std=c11 \
+  -I c -I c/generated -include c/shim.h \
+  -c -o c/admit.o c/generated/admit.c
+cc -Wall -Wextra -Werror -std=c11 -I c -I c/generated \
+  -c -o c/admit_glue.o c/admit_glue.c
 cc -Wall -Wextra -Werror -std=c11 -I c -I c/generated \
   -c -o c/proto.o c/proto.c
-cc -o c/test_conn c/test_conn.o c/conn.o c/session.o c/proto.o c/shim.o
+cc -o c/test_conn c/test_conn.o c/conn.o c/session.o c/admit.o c/admit_glue.o c/proto.o c/shim.o
 ./c/test_conn
 ```
 
