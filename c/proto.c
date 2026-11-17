@@ -160,10 +160,20 @@ int proto_admit(Proto *p, int phase, int ev_tag, size_t buf_n, int status, int r
   for (i = 0; i < o.n; i++) {
     if (!step_move(p, &o.m[i])) {
       restore(p, saved);
-      return 0;
+      return -1;
     }
   }
   return 1;
+}
+
+void proto_force_stuck(Proto *p, int stuck) {
+  if (!p || !p->live) return;
+  p->st.stuck = stuck ? 1 : 0;
+}
+
+void proto_force_key(Proto *p, unsigned key) {
+  if (!p || !p->live) return;
+  p->st.key = (uint16_t)key;
 }
 
 int proto_refuses(Proto *p, int dir, int kind, unsigned bit, const char *ctor) {

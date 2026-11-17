@@ -101,8 +101,8 @@ by reduction. It does not check that an offer is a legal prefix of
 `conn` from that position: a `run` is not a `conform`, and there is
 no judgment that takes a position and a list of directed moves.
 `test/sess_agree_test.exs` steps each offer on the machine emitted
-from `session.muro` and checks it against the move list the previous
-hand-written map produced. That check is conformance. A two-request
+from `session.muro` and checks it against frozen scenario traces and
+`Conn.check_trace`. That check is conformance. A two-request
 keep-alive is deeper than the walk above.
 
 `c/proto.c` applies the offer. It calls `muro__sess_conn_step` once

@@ -20,6 +20,8 @@
 --   rep:       0 reply-ok. Any other word is reply-bad.
 --   observe:   0 send the reply. Any other word: the image is observing.
 --   closeAfter: 0 keep. Any other word, or a write error: close.
+--              That offer is only at at 5. A write end at talk is a
+--              refusal: pick 1 there is the idle timeout, not close.
 --   at:        `st.at` on the muro 0.21.14 conn stepper.
 --              1 talk or timeout, 4 open reply, 5 keep or close,
 --              7 open bad reply, 10 half chunk reply, 11 half request
@@ -233,13 +235,13 @@ def waitingReply : run Π (+ at : U64) → Π (+ stuck : U64) → Π (+ key : U6
       | wtrue => atReplyPos at
       | wfalse => wfalse
 
+-- A write end is the keep-or-close choice, and that position is
+-- `atKeep` only. `atTalk` is talk or timeout. Pick 1 there is the
+-- idle timeout, not close, so a write end at talk is a refusal.
 def waitingChoice : run Π (+ at : U64) → Π (+ stuck : U64) → Π (+ key : U64) → WBool :=
   λ (+ at : U64) → λ (+ stuck : U64) → λ (+ key : U64) →
     match (liveConn stuck key) motive (λ _ → WBool)
-      | wtrue =>
-          (match (same at atTalk) motive (λ _ → WBool)
-            | wtrue => wtrue
-            | wfalse => same at atKeep)
+      | wtrue => same at atKeep
       | wfalse => wfalse
 
 def aOnDecide : run Π (+ ev : U64) → Π (+ hasRep : U64) → Π (+ rep : U64) → Π (+ observe : U64) → Π (+ at : U64) → Π (+ stuck : U64) → Π (+ key : U64) → Offer :=
@@ -434,7 +436,7 @@ def write-tick-quiet : evidence
 
 def write-at-talk : evidence
   {admitChoice phWrite aEvDone (toU64 0) (toU64 0) (toU64 0) (toU64 0) (toU64 0) (toU64 0) (toU64 1) atTalk (toU64 0) connKey (toU64 0)
-    ≡ offer1 (sendPick (toU64 1)) : Offer} := refl
+    ≡ refuse : Offer} := refl
 
 def write-while-stuck : evidence
   {admitChoice phWrite aEvDone (toU64 0) (toU64 0) (toU64 0) (toU64 0) (toU64 0) (toU64 0) (toU64 0) atKeep (toU64 1) connKey (toU64 0)

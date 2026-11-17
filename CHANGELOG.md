@@ -7,8 +7,8 @@
   the stepper. It does not choose the moves. `c/admit_glue.c` unpacks
   the offer. muro checks the map by reduction. It does not check that
   an offer is a legal prefix of `conn` from `st.at`.
-  `test/sess_agree_test.exs` does that check by conformance, against
-  the move list the previous hand-written map produced.
+  `test/sess_agree_test.exs` does that check by conformance: frozen
+  scenario traces and `Conn.check_trace`.
 - Pin muro 0.21.14. `--backend c` emits `priv/muro/http/session.muro`
   as a stepper. Each move is one `muro__sess_conn_step` call. The HTTP image in
   `conn.muro` stays:

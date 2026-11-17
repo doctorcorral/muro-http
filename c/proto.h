@@ -53,11 +53,18 @@ int proto_done(const Proto *p);
    refuses each one.
 
    Returns 1 when every move was accepted, or when the event is host
-   state and moves nothing. Returns 0 when the stepper refuses. On 0
-   the session is unchanged and the caller must not run the image.
-   A NULL session is not a refusal: shut has no session. */
+   state and moves nothing. Returns 0 when the book refuses. Returns
+   -1 when the book offered a move and the stepper refused it. On 0
+   and on -1 the session is unchanged and the caller must not run the
+   image. A NULL session is not a refusal: shut has no session. */
 int proto_admit(Proto *p, int phase, int ev_tag, size_t buf_n, int status,
                 int reply, int observe, int close_after);
+
+/* The image does not call these. The admit test places the session in
+   a state the stepper can already report, then shows that the book
+   refuses a move. stuck is 0 or 1. key is the stepper's uint16_t. */
+void proto_force_stuck(Proto *p, int stuck);
+void proto_force_key(Proto *p, unsigned key);
 
 /* Moves committed by the last proto_admit. Empty when it refused,
    when the event moved nothing, or when the session was already done.

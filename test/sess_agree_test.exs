@@ -2,7 +2,8 @@ defmodule MuroHttp.SessAgreeTest do
   use ExUnit.Case, async: false
 
   # Conformance of the emitted C stepper against MuroHttp.SessionFsm,
-  # and of the emitted admit choice against Conn.check_trace.
+  # and of the emitted admit choice against frozen scenario traces
+  # and Conn.check_trace.
   # muro's own check of the emitter is a walk of at most 14 states and
   # depth at most 6. This test is not that walk, and it is not a proof.
   # The choice is admitChoice, emitted from priv/muro/http/admit.muro.
@@ -282,7 +283,7 @@ defmodule MuroHttp.SessAgreeTest do
              Peer.check_trace(prefix, complete: true)
   end
 
-  test "emitted admit choice agrees with the hand-written map on every scenario", %{admit: admit} do
+  test "emitted admit choice matches the frozen scenario traces", %{admit: admit} do
     Enum.each(admit_scenarios(), fn scenario ->
       {statuses, moves, done} = admit!(admit, scenario.script)
 
@@ -421,9 +422,11 @@ defmodule MuroHttp.SessAgreeTest do
   end
 
   # HTTP events in, protocol moves out. The scripts are the image
-  # scenarios. The traces are the lists Conn.check_trace accepts,
-  # including the ones test/conn_test.exs replays. proto_admit is the
-  # only thing that produces `moves`.
+  # scenarios. The traces are frozen, and they are the lists
+  # Conn.check_trace accepts, including the ones test/conn_test.exs
+  # replays. proto_admit is the only thing that produces `moves`.
+  # status 0 is a book refusal. status 2 would mean the book offered
+  # a move the stepper refused.
   defp admit_scenarios do
     req = [
       {:send, {:pick, :b0}},
@@ -717,6 +720,79 @@ defmodule MuroHttp.SessAgreeTest do
         statuses: [1, 1, 1, 1],
         done: 0,
         trace: keep ++ req
+      },
+      %{
+        name: "write done at talk is refused",
+        script: """
+        begin
+        admit write done 0 none none 1 1
+        admit read tick 0 none none 0 0
+        """,
+        statuses: [0, 1],
+        done: 1,
+        trace: [{:send, {:pick, :b1}}]
+      },
+      %{
+        name: "decide while stuck is refused",
+        script: """
+        begin
+        admit read bytes 24 ok none 0 0
+        set stuck 1
+        admit decide db 0 none ok 0 0
+        """,
+        statuses: [1, 0],
+        done: 0,
+        trace: req
+      },
+      %{
+        name: "write done while stuck is refused",
+        script: """
+        begin
+        admit read bytes 24 ok none 0 0
+        admit decide db 0 none ok 0 0
+        set stuck 1
+        admit write done 0 none none 0 0
+        """,
+        statuses: [1, 1, 0],
+        done: 0,
+        trace: req ++ [{:send, :reply_ok}]
+      },
+      %{
+        name: "decide with the wrong session key is refused",
+        script: """
+        begin
+        admit read bytes 24 ok none 0 0
+        set key 2
+        admit decide db 0 none ok 0 0
+        """,
+        statuses: [1, 0],
+        done: 0,
+        trace: req
+      },
+      %{
+        name: "closed phase on a live session is refused",
+        script: """
+        begin
+        admit closed tick 0 none none 0 0
+        admit read tick 0 none none 0 0
+        """,
+        statuses: [0, 1],
+        done: 1,
+        trace: [{:send, {:pick, :b1}}]
+      },
+      %{
+        name: "classifier tag outside 0, 1, and 2 is a chunk",
+        script: """
+        begin
+        admit read bytes 8 9 none 0 0
+        """,
+        statuses: [1],
+        done: 0,
+        trace: [
+          {:send, {:pick, :b0}},
+          {:recv, {:pick, :b0}},
+          {:recv, :piece_chunk}
+        ]
       }
     ]
   end

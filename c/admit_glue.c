@@ -3,15 +3,37 @@
    the unboxed result into a flat list and turns the book's ctor word
    into the constructor name the stepper compares.
 
-   ctor words, from priv/muro/http/admit.muro:
-     0 piece-chunk, 1 piece-req, 2 piece-bad, 3 reply-ok, 4 reply-bad.
-   dir 1 and 2 are send and recv. tag 4 is a pick and tag 8 is data.
-   Those are the stepper enums this emit uses. */
+   dir and tag are the stepper enums in session.h (MURO_SESS_SEND,
+   MURO_SESS_RECV, MURO_SESS_PICK, MURO_SESS_DATA). admit.muro cannot
+   name that enum, so it copies the numbers. The asserts below fail
+   if this emit's enums move away from those copies.
+
+   admit.h and session.h both define struct muro__nat, and the emitter
+   does not put that prelude under one include guard (GAPS.md). The
+   session prelude is renamed for this translation unit so the enums
+   are visible beside admit.h.
+
+   Constructor words are not stepper enums. session.h only comments
+   the Piece tags (0, 1, 2) and the Reply tags (0, 1). The book uses
+   one numbering for both, so reply-ok is 3 and reply-bad is 4.
+   There is no session.h constant to assert those against. */
 
 #include "admit_glue.h"
+
+#define muro__nat muro__sess_nat_hide
+#define muro__unit muro__sess_unit_hide
+#include "session.h"
+#undef muro__nat
+#undef muro__unit
+
 #include "admit.h"
 
 #include <stddef.h>
+
+_Static_assert(MURO_SESS_SEND == 1, "admit.muro dirSend");
+_Static_assert(MURO_SESS_RECV == 2, "admit.muro dirRecv");
+_Static_assert(MURO_SESS_PICK == 4, "admit.muro tagPick");
+_Static_assert(MURO_SESS_DATA == 8, "admit.muro tagData");
 
 static const char *ctor_name(uint64_t ctor) {
   if (ctor == 0) return "piece-chunk";
@@ -71,10 +93,10 @@ AdmitOffer admit_offer(uint64_t phase, uint64_t ev, uint64_t n, uint64_t has_cls
     tag = m.muro__as.mv.muro__f_2;
     bit = m.muro__as.mv.muro__f_3;
     ctor = m.muro__as.mv.muro__f_4;
-    if (present != 1 || (dir != 1 && dir != 2)) return none();
-    if (tag == 4) {
+    if (present != 1 || (dir != MURO_SESS_SEND && dir != MURO_SESS_RECV)) return none();
+    if (tag == MURO_SESS_PICK) {
       if (bit > 1) return none();
-    } else if (tag == 8) {
+    } else if (tag == MURO_SESS_DATA) {
       name = ctor_name(ctor);
       if (!name) return none();
     } else {

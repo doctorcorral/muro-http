@@ -134,7 +134,8 @@ function:
 - `reply-ok` or `reply-bad` from a decide code, or no reply while the
   image is still observing
 - keep (`send` pick 0) or close (`send` pick 1) after an open reply,
-  including a write error
+  including a write error, and only at the keep-or-close position.
+  A write end at talk is a refusal: pick 1 there is the idle timeout
 - the `st.at` numbers those predicates use (1, 4, 5, 7, 10, 11, 12)
 
 muro checks the equations in `admit.muro` by reduction. That is not a
@@ -144,8 +145,8 @@ directed moves is legal from a position, where the position is a named
 continuation or the numeric `at` the C stepper assigns. Until that
 judgment exists, `test/sess_agree_test.exs` is the prefix check: it
 steps each offer on the emitted stepper and compares the move list
-with the previous hand-written map and with
-`SessionFsm.Conn.check_trace`. That is conformance. The bounded
+with the frozen scenario traces and with
+`Conn.check_trace`. That is conformance. The bounded
 emitter walk is not a proof. `session.muro` already records the full
 traces those offers concatenate as `conform` (keep, close, timeout,
 half-close, a bad request, a chunk). The checker does not connect
@@ -188,15 +189,24 @@ patch murolang/muro for them.
    The prefix check is the conformance test above.
 
 2. The C prelude structs (`struct muro__nat`, `struct muro__unit`)
-   are not under a shared include guard. One translation unit cannot
-   include both `c/generated/admit.h` and `c/generated/session.h`.
-   The host uses a second translation unit for the unpack. The feature
-   needed is one include guard around that prelude.
+   are not under a shared include guard. A direct include of both
+   `c/generated/admit.h` and `c/generated/session.h` fails. The unpack
+   stays in its own translation unit, and that file renames the
+   session prelude before including it. The feature needed is one
+   include guard around that prelude.
 
 3. A book cannot name the stepper's C enum. `dir` and `tag` in
    `admit.muro` are copied literals (send 1, recv 2, pick 4, data 8).
    The feature needed is a way for a `run` to name those enums, or for
-   the emitter to share them.
+   the emitter to share them. `c/admit_glue.c` cannot include
+   `session.h` beside `admit.h` (gap 2). It renames the session
+   prelude, compares `dir` and `tag` with `MURO_SESS_SEND`,
+   `MURO_SESS_RECV`, `MURO_SESS_PICK`, and `MURO_SESS_DATA`, and
+   `_Static_assert`s those enums against the book's copied numbers.
+   Constructor words are not stepper enums. `session.h` only comments
+   the `Piece` tags (0, 1, 2) and the `Reply` tags (0, 1). The book's
+   ctor word numbers both (reply-ok is 3, reply-bad is 4), so there is
+   no constant to assert. The name strings in the glue stay literals.
 
 4. `muro__sess_conn_step` takes a constructor name string, not the
    data value the book built. The tag-to-string map lives in
@@ -249,7 +259,7 @@ classifies allocates 1. A step that calls `decide` allocates 1.
 ExUnit skips a closed equation when an argument's normal form is a
 machine term (`argument 1 normal form is a machine term`). `step`
 takes the unboxed `Conn`, so `after-close` and `after-close-tick`
-are proved by the checker and skipped by `test/conn_eq_test.exs`.
+are reduction evidence and skipped by `test/conn_eq_test.exs`.
 The host suite runs nullary wrappers (`sawAfterDo`, `sawAfterMode`)
 whose results are declared data. Those two `Conn` equations are the
 ones the wrapper does not cover.
