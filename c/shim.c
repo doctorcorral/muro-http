@@ -3,11 +3,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 
-/* Step 1 stub. The classifier is generated Muro, not this file.
-   Later steps own the syscall surface, which is not here:
-   socket, bind, listen, accept, close, fcntl,
-   epoll, kqueue, poll, read, write, and SQLite.
-   No request parsing and no sockets. */
+/* Bump arena for the generated books. The socket loop is c/host.c.
+   This file does not parse a request or choose a response. */
 
 #define ARENA_BYTES (64u * 1024u * 1024u)
 

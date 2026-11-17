@@ -40,45 +40,5 @@ jobs:
       - name: Test
         run: mix test
 
-      - name: Build and run the C classify driver
-        run: |
-          cc -Wall -Wextra -Werror -std=c11 -I c -I c/generated -include c/shim.h \
-            -c -o c/test_classify.o c/test_classify.c
-          cc -Wall -Wextra -Werror -std=c11 -I c -c -o c/shim.o c/shim.c
-          cc -Wall -Wextra -Werror -std=c11 \
-            -I c -I c/generated -include c/shim.h \
-            -c -o c/request.o c/generated/request.c
-          cc -o c/test_classify c/test_classify.o c/request.o c/shim.o
-          ./c/test_classify
-
-      - name: Build and run the C connection driver
-        run: |
-          cc -Wall -Wextra -Werror -std=c11 -I c -I c/generated -include c/shim.h \
-            -c -o c/test_conn.o c/test_conn.c
-          cc -Wall -Wextra -Werror -std=c11 -I c -c -o c/shim.o c/shim.c
-          cc -Wall -Wextra -Werror -std=c11 \
-            -I c -I c/generated -include c/shim.h \
-            -c -o c/conn.o c/generated/conn.c
-          cc -Wall -Wextra -Werror -std=c11 \
-            -I c -I c/generated -include c/shim.h \
-            -c -o c/session.o c/generated/session.c
-          cc -Wall -Wextra -Werror -std=c11 \
-            -I c -I c/generated -include c/shim.h \
-            -c -o c/admit.o c/generated/admit.c
-          cc -Wall -Wextra -Werror -std=c11 -I c -I c/generated \
-            -c -o c/admit_glue.o c/admit_glue.c
-          cc -Wall -Wextra -Werror -std=c11 -I c -I c/generated \
-            -c -o c/proto.o c/proto.c
-          cc -o c/test_conn c/test_conn.o c/conn.o c/session.o c/admit.o c/admit_glue.o c/proto.o c/shim.o
-          ./c/test_conn
-
-      - name: Build and run the C session stepper
-        run: |
-          cc -Wall -Wextra -Werror -std=c11 \
-            -I c -I c/generated -include c/shim.h \
-            -c -o c/session.o c/generated/session.c
-          cc -Wall -Wextra -Werror -std=c11 -I c -I c/generated \
-            -c -o c/test_sess.o c/test_sess.c
-          cc -Wall -Wextra -Werror -std=c11 -I c -c -o c/shim.o c/shim.c
-          cc -o c/test_sess c/test_sess.o c/session.o c/shim.o
-          ./c/test_sess
+      - name: Build and run the C drivers and muro-httpd
+        run: make c-check

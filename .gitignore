@@ -7,4 +7,7 @@ c/test_classify
 c/test_conn
 c/test_sess
 c/test_admit
+c/test_render
+c/test_e2e
+c/muro-httpd
 *.o
