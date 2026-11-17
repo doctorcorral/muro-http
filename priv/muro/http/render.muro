@@ -1,0 +1,154 @@
+-- HTTP/1.1 response bytes for one write action.
+--
+-- The image stores status, error, and act as tags. This book turns
+-- those tags, and the keep bit, into the response bytes. It does not
+-- choose the status. The host copies the slice and writes it.
+--
+-- Tags are decide.muro constructor order, the same numbers as
+-- c/decision_tags.h. This book does not import decide.muro. A def is
+-- a global C symbol, and conn.muro already emits that book.
+--
+-- code: 0 200, 1 201, 2 400, 3 401, 4 404, 5 500, 6 503.
+-- A code outside that list is 500. st-observe is not a write. The
+-- image leaves it in decide. The 500 arm makes this function total.
+-- err: 0 none, 1 not-found, 2 invalid-id, 3 post-missing,
+-- 4 missing-bearer, 5 bad-token, 6 bad-payload, 7 malformed,
+-- 8 body-required, 9 body-long, 10 internal, 11 db, 12 observe.
+-- act: 0 health, 6 error, 7 observe. Any other act has an empty body.
+-- Those acts would be rows. This book does not invent them.
+-- keep: 1 sends Connection: close. Any other value sends keep-alive.
+--
+-- Each suffix literal carries its own Content-Length. The length is
+-- the byte count of the body in that same literal.
+
+def httpLine : run Π (+ code : U64) → Bytes :=
+  λ (+ code : U64) →
+    match (eqi code (toU64 0)) motive (λ _ → Bytes)
+      | wtrue => b"HTTP/1.1 200 OK\r\n"
+      | wfalse =>
+          (match (eqi code (toU64 1)) motive (λ _ → Bytes)
+            | wtrue => b"HTTP/1.1 201 Created\r\n"
+            | wfalse =>
+                (match (eqi code (toU64 2)) motive (λ _ → Bytes)
+                  | wtrue => b"HTTP/1.1 400 Bad Request\r\n"
+                  | wfalse =>
+                      (match (eqi code (toU64 3)) motive (λ _ → Bytes)
+                        | wtrue => b"HTTP/1.1 401 Unauthorized\r\n"
+                        | wfalse =>
+                            (match (eqi code (toU64 4)) motive (λ _ → Bytes)
+                              | wtrue => b"HTTP/1.1 404 Not Found\r\n"
+                              | wfalse =>
+                                  (match (eqi code (toU64 5)) motive (λ _ → Bytes)
+                                    | wtrue => b"HTTP/1.1 500 Internal Server Error\r\n"
+                                    | wfalse =>
+                                        (match (eqi code (toU64 6)) motive (λ _ → Bytes)
+                                          | wtrue => b"HTTP/1.1 503 Service Unavailable\r\n"
+                                          | wfalse => b"HTTP/1.1 500 Internal Server Error\r\n"))))))
+
+def httpConn : run Π (+ keep : U64) → Bytes :=
+  λ (+ keep : U64) →
+    match (eqi keep (toU64 1)) motive (λ _ → Bytes)
+      | wtrue => b"Connection: close\r\n"
+      | wfalse => b"Connection: keep-alive\r\n"
+
+def httpErrSuffix : run Π (+ err : U64) → Bytes :=
+  λ (+ err : U64) →
+    match (eqi err (toU64 0)) motive (λ _ → Bytes)
+      | wtrue => b"Content-Length: 0\r\nContent-Type: text/plain; charset=utf-8\r\n\r\n"
+      | wfalse =>
+          (match (eqi err (toU64 1)) motive (λ _ → Bytes)
+            | wtrue => b"Content-Length: 9\r\nContent-Type: text/plain; charset=utf-8\r\n\r\nnot-found"
+            | wfalse =>
+                (match (eqi err (toU64 2)) motive (λ _ → Bytes)
+                  | wtrue => b"Content-Length: 10\r\nContent-Type: text/plain; charset=utf-8\r\n\r\ninvalid-id"
+                  | wfalse =>
+                      (match (eqi err (toU64 3)) motive (λ _ → Bytes)
+                        | wtrue => b"Content-Length: 12\r\nContent-Type: text/plain; charset=utf-8\r\n\r\npost-missing"
+                        | wfalse =>
+                            (match (eqi err (toU64 4)) motive (λ _ → Bytes)
+                              | wtrue => b"Content-Length: 14\r\nContent-Type: text/plain; charset=utf-8\r\n\r\nmissing-bearer"
+                              | wfalse =>
+                                  (match (eqi err (toU64 5)) motive (λ _ → Bytes)
+                                    | wtrue => b"Content-Length: 9\r\nContent-Type: text/plain; charset=utf-8\r\n\r\nbad-token"
+                                    | wfalse =>
+                                        (match (eqi err (toU64 6)) motive (λ _ → Bytes)
+                                          | wtrue => b"Content-Length: 11\r\nContent-Type: text/plain; charset=utf-8\r\n\r\nbad-payload"
+                                          | wfalse =>
+                                              (match (eqi err (toU64 7)) motive (λ _ → Bytes)
+                                                | wtrue => b"Content-Length: 9\r\nContent-Type: text/plain; charset=utf-8\r\n\r\nmalformed"
+                                                | wfalse =>
+                                                    (match (eqi err (toU64 8)) motive (λ _ → Bytes)
+                                                      | wtrue => b"Content-Length: 13\r\nContent-Type: text/plain; charset=utf-8\r\n\r\nbody-required"
+                                                      | wfalse =>
+                                                          (match (eqi err (toU64 9)) motive (λ _ → Bytes)
+                                                            | wtrue => b"Content-Length: 9\r\nContent-Type: text/plain; charset=utf-8\r\n\r\nbody-long"
+                                                            | wfalse =>
+                                                                (match (eqi err (toU64 10)) motive (λ _ → Bytes)
+                                                                  | wtrue => b"Content-Length: 8\r\nContent-Type: text/plain; charset=utf-8\r\n\r\ninternal"
+                                                                  | wfalse =>
+                                                                      (match (eqi err (toU64 11)) motive (λ _ → Bytes)
+                                                                        | wtrue => b"Content-Length: 2\r\nContent-Type: text/plain; charset=utf-8\r\n\r\ndb"
+                                                                        | wfalse =>
+                                                                            (match (eqi err (toU64 12)) motive (λ _ → Bytes)
+                                                                              | wtrue => b"Content-Length: 7\r\nContent-Type: text/plain; charset=utf-8\r\n\r\nobserve"
+                                                                              | wfalse => b"Content-Length: 5\r\nContent-Type: text/plain; charset=utf-8\r\n\r\nerror"))))))))))))
+
+def httpSuffix : run Π (+ act : U64) → Π (+ err : U64) → Bytes :=
+  λ (+ act : U64) → λ (+ err : U64) →
+    match (eqi act (toU64 0)) motive (λ _ → Bytes)
+      | wtrue => b"Content-Length: 2\r\nContent-Type: text/plain; charset=utf-8\r\n\r\nok"
+      | wfalse =>
+          (match (eqi act (toU64 6)) motive (λ _ → Bytes)
+            | wtrue => httpErrSuffix err
+            | wfalse =>
+                (match (eqi act (toU64 7)) motive (λ _ → Bytes)
+                  | wtrue => b"Content-Length: 7\r\nContent-Type: text/plain; charset=utf-8\r\n\r\nobserve"
+                  | wfalse => b"Content-Length: 0\r\nContent-Type: text/plain; charset=utf-8\r\n\r\n"))
+
+def httpJoin : run Π (+ line : Bytes) → Π (+ conn : Bytes) → Π (+ suffix : Bytes) → Bytes :=
+  λ (+ line : Bytes) → λ (+ conn : Bytes) → λ (+ suffix : Bytes) →
+    bytesCat (bytesCat line conn) suffix
+
+def httpRender : run Π (+ code : U64) → Π (+ err : U64) → Π (+ act : U64) → Π (+ keep : U64) → Bytes :=
+  λ (+ code : U64) → λ (+ err : U64) → λ (+ act : U64) → λ (+ keep : U64) →
+    httpJoin (httpLine code) (httpConn keep) (httpSuffix act err)
+
+def render-health-keep : evidence
+  {httpRender (toU64 0) (toU64 0) (toU64 0) (toU64 0)
+    ≡ b"HTTP/1.1 200 OK\r\nConnection: keep-alive\r\nContent-Length: 2\r\nContent-Type: text/plain; charset=utf-8\r\n\r\nok"
+    : Bytes} := refl
+
+def render-health-close : evidence
+  {httpRender (toU64 0) (toU64 0) (toU64 0) (toU64 1)
+    ≡ b"HTTP/1.1 200 OK\r\nConnection: close\r\nContent-Length: 2\r\nContent-Type: text/plain; charset=utf-8\r\n\r\nok"
+    : Bytes} := refl
+
+def render-malformed : evidence
+  {httpRender (toU64 2) (toU64 7) (toU64 6) (toU64 1)
+    ≡ b"HTTP/1.1 400 Bad Request\r\nConnection: close\r\nContent-Length: 9\r\nContent-Type: text/plain; charset=utf-8\r\n\r\nmalformed"
+    : Bytes} := refl
+
+def render-unauthorized : evidence
+  {httpRender (toU64 3) (toU64 4) (toU64 6) (toU64 0)
+    ≡ b"HTTP/1.1 401 Unauthorized\r\nConnection: keep-alive\r\nContent-Length: 14\r\nContent-Type: text/plain; charset=utf-8\r\n\r\nmissing-bearer"
+    : Bytes} := refl
+
+def render-not-found : evidence
+  {httpRender (toU64 4) (toU64 1) (toU64 6) (toU64 0)
+    ≡ b"HTTP/1.1 404 Not Found\r\nConnection: keep-alive\r\nContent-Length: 9\r\nContent-Type: text/plain; charset=utf-8\r\n\r\nnot-found"
+    : Bytes} := refl
+
+def render-db-down : evidence
+  {httpRender (toU64 6) (toU64 11) (toU64 6) (toU64 1)
+    ≡ b"HTTP/1.1 503 Service Unavailable\r\nConnection: close\r\nContent-Length: 2\r\nContent-Type: text/plain; charset=utf-8\r\n\r\ndb"
+    : Bytes} := refl
+
+def render-empty-row : evidence
+  {httpRender (toU64 0) (toU64 0) (toU64 1) (toU64 0)
+    ≡ b"HTTP/1.1 200 OK\r\nConnection: keep-alive\r\nContent-Length: 0\r\nContent-Type: text/plain; charset=utf-8\r\n\r\n"
+    : Bytes} := refl
+
+def render-code-out-of-range : evidence
+  {httpRender (toU64 7) (toU64 0) (toU64 0) (toU64 0)
+    ≡ b"HTTP/1.1 500 Internal Server Error\r\nConnection: keep-alive\r\nContent-Length: 2\r\nContent-Type: text/plain; charset=utf-8\r\n\r\nok"
+    : Bytes} := refl
