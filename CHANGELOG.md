@@ -3,8 +3,10 @@
 ## 0.1.0-dev — unreleased
 
 - Pin muro 0.21.14. `--backend c` emits `priv/muro/http/session.muro`
-  as a stepper. Protocol moves of the connection go through
-  `muro__sess_conn_step`. The HTTP image in `conn.muro` stays:
+  as a stepper. `c/proto.c` is a hand-written host mapping from an
+  HTTP event to a sequence of protocol moves. It is not emitted.
+  Each move is one `muro__sess_conn_step` call. The HTTP image in
+  `conn.muro` stays:
   classify, decide, write ranges, keep-alive, the idle timer, the
   half-close flag, and a pipelined offset. That image does not name
   the session. A FIN while a reply is already in progress is the

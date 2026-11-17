@@ -77,19 +77,63 @@ returns only `id-none`, `id-bad`, or `id-unknown`, so compiling the
 generated Elixir warns that those two clauses never match. They stay.
 Those constructors are host facts for `decide`.
 
+`mix compile --warnings-as-errors` fails on that generated code.
+`MuroHttp.Request.idNumber/1` (`lib/muro_http/request.ex`) and
+`MuroHttp.Conn.idNumber/1` (`lib/muro_http/conn.ex`) each warn that
+the `:id_missing` and `:id_present` clauses will never match, because
+`idClassOf` has type `id-bad or id-none or id-unknown`. This is
+pre-existing. It is a muro codegen follow-up: the emitter should not
+write a clause for a constructor the function cannot return, or the
+book should stop matching constructors `idClassOf` never produces.
+This PR does not edit those generated clauses. CI does not pass
+`--warnings-as-errors`. `mix test` and `mix muro.gen --check` do not
+either.
+
 JSON body class is not this step. That is scope. `classify` returns
 `body-none` and the raw body `Slice`. No muro issue was opened.
 
 ## The connection stepper, on muro 0.21.14
 
-`--backend c` emits `priv/muro/http/session.muro` as a stepper.
-`c/proto.c` is what the connection driver calls before the HTTP image.
+`--backend c` emits `priv/muro/http/session.muro` as a stepper
+(`c/generated/session.c`). That file is generated. `c/proto.c` is not.
+It is a hand-written host mapping from one HTTP event to a sequence
+of protocol moves. The emitted stepper enforces each move. It does
+not choose the sequence.
+
 An event the protocol does not allow is refused, and the image does
 not run. The actions are the ones `MuroHttp.SessionFsm` takes. muro
 checks the emitter by a walk of at most 14 states and depth at most 6,
 including events the protocol does not allow. That walk is not a proof.
 `test/sess_agree_test.exs` checks this book's emitted stepper against
-that machine, including a two-request trace. The check is conformance.
+that machine, including a two-request trace, and checks that
+`proto_admit` offers the same move list as `SessionFsm.Conn.check_trace`
+for each HTTP scenario. The check is conformance.
+
+The host may offer several moves for one image event. Each move is
+one call of `muro__sess_conn_step`. The map in `c/proto.c` is what
+picks them:
+
+- talk (`send` pick 0) or an idle timeout (`send` pick 1)
+- open (`recv` pick 0) or a half-close (`recv` pick 1), and on a
+  half-close a piece versus a bare FIN
+- `piece-req`, `piece-bad`, or `piece-chunk` from the classifier tag
+- an immediate `reply-bad` for an open malformed request, or for a
+  half-closed need-more or malformed request
+- `reply-ok` or `reply-bad` from a decide code, or no reply while the
+  image is still observing
+- keep (`send` pick 0) or close (`send` pick 1) after an open reply,
+  including a write error
+
+Those choices are host policy. They are not in the emitted stepper.
+
+A follow-up could put that case split in a muro book and emit the C.
+`session.muro` already records the legal sequences as `conform`
+(keep, close, timeout, half-close, a bad request, a chunk). It does
+not see the image event, the classifier tag, or the decide code.
+`conn.muro` is the image and does not name the session. A third book
+could take those host facts and name the moves. muro 0.21.14 does not
+emit that book, and this repository does not contain it. `c/proto.c`
+stays hand-written until that exists. Do not read it as generated.
 
 This session is fieldless `Piece` and `Reply`. It has no nested unboxed
 payload, no direct nat `case`, no `case` that calls a run with two live

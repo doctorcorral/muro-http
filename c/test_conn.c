@@ -1,7 +1,10 @@
 /* Drive the generated connection step. The shim only builds slices
    and counts muro__ALLOC. Parsing and the HTTP image are muro.
-   Protocol moves go through the emitted session stepper in proto.c
-   before the image runs. A refused move does not run the image. */
+   Protocol moves go through c/proto.c, a hand-written map, which
+   calls the emitted stepper before the image runs. A refused move
+   does not run the image. proto_begin and proto_shut return NULL
+   on allocation or init failure. That NULL is a failed test, and
+   the image is not stepped. */
 
 #include "shim.h"
 #include "conn.h"
@@ -71,14 +74,30 @@ static void want(const char *name, Conn st, int i, uint64_t expect) {
   }
 }
 
-static void restart(Conn *st, Proto **proto) {
+static int restart(Conn *st, Proto **proto) {
   proto_free(*proto);
+  *proto = NULL;
   *st = begin();
   *proto = proto_begin();
+  if (!*proto) {
+    bad("restart", "session init");
+    return 0;
+  }
+  return 1;
 }
 
-/* Classify or decide outside the alloc window, admit the protocol
-   moves, then count only the image step. */
+static Proto *open_proto(const char *name) {
+  Proto *p = proto_begin();
+  if (!p) bad(name, "session init");
+  return p;
+}
+
+/* Probe, then reset. classify and decide run here only so proto_admit
+   can see the status, reply, and observe tags. Those calls allocate.
+   The tags are plain integers copied out before muro_http_reset, which
+   drops the probe. step classifies or decides again, and that second
+   call is what the printed count measures. A control step stays 0, a
+   classify stays 1, and a decide stays 1. */
 static unsigned long take(const char *name, Conn *st, Proto *proto, Ev ev) {
   unsigned long built;
   unsigned long n;
@@ -92,6 +111,11 @@ static unsigned long take(const char *name, Conn *st, Proto *proto, Ev ev) {
   int observe = 0;
   int close_after = half != 0 || keep != 0;
   char why[64];
+
+  if (!proto) {
+    bad(name, "no session");
+    return 0;
+  }
 
   if (proto_live(proto) && !proto_done(proto) && (phase == PH_READ || phase == PH_IDLE) &&
       (tag == 0 || (tag == 1 && buf.n > 0))) {
@@ -152,17 +176,27 @@ static void check_begin(void) {
   n = muro_http_allocs();
   printf("session-init-allocs %lu\n", n);
   if (n != 0) bad("session-init", "allocs");
+  if (!proto) {
+    bad("session-init", "init");
+    return;
+  }
   if (!proto_refuses(proto, PROTO_SEND, PROTO_DATA, 0, "reply-ok"))
     bad("session-init", "reply accepted before a piece");
   if (!proto_refuses(proto, PROTO_RECV, PROTO_PICK, 0, 0))
     bad("session-init", "recv pick accepted at the first choice");
+  if (!proto_refuses(proto, PROTO_SEND, PROTO_PICK, 2, 0))
+    bad("session-init", "pick 2 accepted");
+  if (!proto_refuses(proto, PROTO_SEND, PROTO_PICK, 256, 0))
+    bad("session-init", "pick 256 accepted");
   proto_free(proto);
 }
 
 static void check_need(void) {
-  Proto *proto = proto_begin();
+  Proto *proto = open_proto("need");
   Conn st = begin();
-  unsigned long n = take("need-allocs", &st, proto, evBytes(of(partial)));
+  unsigned long n;
+  if (!proto) return;
+  n = take("need-allocs", &st, proto, evBytes(of(partial)));
   if (n != 1) bad("need", "allocs");
   want("need", st, 0, PH_READ);
   want("need", st, 6, ACT_READ);
@@ -176,9 +210,11 @@ static void check_need(void) {
 }
 
 static void check_keepalive(void) {
-  Proto *proto = proto_begin();
+  Proto *proto = open_proto("health");
   Conn st = begin();
-  unsigned long n = take("health-allocs", &st, proto, evBytes(of(health)));
+  unsigned long n;
+  if (!proto) return;
+  n = take("health-allocs", &st, proto, evBytes(of(health)));
   if (n != 1) bad("health", "allocs");
   want("health", st, 0, PH_DECIDE);
   want("health", st, 1, 0);
@@ -234,10 +270,11 @@ static void check_keepalive(void) {
 }
 
 static void check_close_header(const char *name, const char *raw) {
-  Proto *proto = proto_begin();
+  Proto *proto = open_proto(name);
   Conn st = begin();
   char label[64];
   unsigned long n;
+  if (!proto) return;
   snprintf(label, sizeof label, "%s-bytes", name);
   n = take(label, &st, proto, evBytes(of(raw)));
   if (n != 1) bad(name, "bytes allocs");
@@ -256,9 +293,11 @@ static void check_close_header(const char *name, const char *raw) {
 }
 
 static void check_malformed(void) {
-  Proto *proto = proto_begin();
+  Proto *proto = open_proto("malformed");
   Conn st = begin();
-  unsigned long n = take("malformed-allocs", &st, proto, evBytes(of(bad_req)));
+  unsigned long n;
+  if (!proto) return;
+  n = take("malformed-allocs", &st, proto, evBytes(of(bad_req)));
   if (n != 1) bad("malformed", "allocs");
   want("malformed", st, 0, PH_WRITE);
   want("malformed", st, 2, 1);
@@ -277,10 +316,12 @@ static void check_malformed(void) {
 }
 
 static void check_half(void) {
-  Proto *proto = proto_begin();
+  Proto *proto = open_proto("half-bytes");
   Conn st = begin();
   Conn fin;
-  unsigned long n = take("half-bytes-allocs", &st, proto, evBytes(of(health)));
+  unsigned long n;
+  if (!proto) return;
+  n = take("half-bytes-allocs", &st, proto, evBytes(of(health)));
   if (n != 1) bad("half-bytes", "allocs");
   if (proto_done(proto)) bad("half-bytes", "session ended before the reply");
   /* The FIN arrives while the reply is already in progress. That is the
@@ -304,7 +345,7 @@ static void check_half(void) {
   if (n != 0) bad("half-done", "allocs");
   want("half-done", st, 0, PH_CLOSED);
   if (!proto_done(proto)) bad("half-done", "session open");
-  restart(&fin, &proto);
+  if (!restart(&fin, &proto)) return;
   n = take("fin-req-allocs", &fin, proto, evEof(of(health)));
   if (n != 1) bad("fin-req", "allocs");
   want("fin-req", fin, 0, PH_DECIDE);
@@ -315,7 +356,7 @@ static void check_half(void) {
   if (n != 0) bad("trunc-ignored", "allocs");
   want("trunc-ignored", fin, 0, PH_DECIDE);
   if (proto_done(proto)) bad("trunc-ignored", "session ended");
-  restart(&fin, &proto);
+  if (!restart(&fin, &proto)) return;
   n = take("trunc-allocs", &fin, proto, evEof(of(partial)));
   if (n != 1) bad("trunc", "allocs");
   want("trunc", fin, 0, PH_WRITE);
@@ -326,9 +367,11 @@ static void check_half(void) {
 }
 
 static void check_pipe(void) {
-  Proto *proto = proto_begin();
+  Proto *proto = open_proto("pipe");
   Conn st = begin();
-  unsigned long n = take("pipe-allocs", &st, proto, evBytes(of(piped)));
+  unsigned long n;
+  if (!proto) return;
+  n = take("pipe-allocs", &st, proto, evBytes(of(piped)));
   if (n != 1) bad("pipe", "allocs");
   want("pipe", st, 0, PH_DECIDE);
   want("pipe", st, 4, 0);
@@ -359,6 +402,10 @@ static void check_closed(void) {
   muro_http_reset();
   st = shut();
   if (muro_http_allocs() != 0) bad("shut", "allocs");
+  if (!proto) {
+    bad("shut", "alloc");
+    return;
+  }
   if (proto_live(proto)) bad("shut", "session live");
   n = take("closed-bytes-allocs", &st, proto, evBytes(of(health)));
   if (n != 0) bad("closed-bytes", "allocs");
@@ -381,9 +428,10 @@ static void check_closed(void) {
 }
 
 static void check_write_error(void) {
-  Proto *proto = proto_begin();
+  Proto *proto = open_proto("werr");
   Conn st = begin();
   unsigned long n;
+  if (!proto) return;
   (void)take("werr-bytes-allocs", &st, proto, evBytes(of(health)));
   (void)take("werr-db-allocs", &st, proto, evDbOk());
   n = take("werr-allocs", &st, proto, evError());
@@ -394,9 +442,10 @@ static void check_write_error(void) {
 }
 
 static void check_ignore_tick_while_writing(void) {
-  Proto *proto = proto_begin();
+  Proto *proto = open_proto("wtick");
   Conn st = begin();
   unsigned long n;
+  if (!proto) return;
   (void)take("wtick-bytes-allocs", &st, proto, evBytes(of(health)));
   (void)take("wtick-db-allocs", &st, proto, evDbOk());
   n = take("wtick-allocs", &st, proto, evTick());
@@ -410,10 +459,11 @@ static void check_ignore_tick_while_writing(void) {
 /* A refused admit leaves the session where it was and does not run the
    image. A later idle tick is still a legal protocol move. */
 static void check_gate(void) {
-  Proto *proto = proto_begin();
+  Proto *proto = open_proto("gate");
   Conn st = begin();
   Conn again = st;
   unsigned long n;
+  if (!proto) return;
   if (proto_admit(proto, PH_READ, 0, 4, -1, -1, 0, 0))
     bad("gate", "unclassified bytes admitted");
   if (!same(st, again)) bad("gate", "image moved on a refusal");
@@ -432,9 +482,11 @@ static void check_gate(void) {
 }
 
 static void check_fin(void) {
-  Proto *proto = proto_begin();
+  Proto *proto = open_proto("bare-fin");
   Conn st = begin();
-  unsigned long n = take("bare-fin-allocs", &st, proto, evEof(of("")));
+  unsigned long n;
+  if (!proto) return;
+  n = take("bare-fin-allocs", &st, proto, evEof(of("")));
   if (n != 0) bad("bare-fin", "allocs");
   want("bare-fin", st, 0, PH_CLOSED);
   want("bare-fin", st, 6, ACT_CLOSE);

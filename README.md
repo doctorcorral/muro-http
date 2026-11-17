@@ -78,10 +78,11 @@ copy them.
 ### The session stepper
 
 `priv/muro/http/session.muro` is the protocol. `--backend c` emits it
-as a stepper. The host calls `muro__sess_conn_step` with the current
-state and one event. The function returns the next state and the
-action, or refuses an event the protocol does not allow. The host
-keeps the socket. The stepper does not loop.
+as a stepper (`c/generated/session.c`). The host may offer a sequence
+of moves for one image event. Each move is one call to
+`muro__sess_conn_step` with the current state. The function returns
+the next state, or refuses a move the protocol does not allow. The
+host keeps the socket. The stepper does not loop.
 
 The actions are the ones `MuroHttp.SessionFsm` takes. muro checks the
 emitter by a walk of at most 14 states and depth at most 6, including
@@ -92,12 +93,17 @@ a negative cannot be supplied. A wrong key, a bad position, or an
 unknown session name returns `MURO_SESS_UNEXPECTED` from the step.
 Init of an unknown name returns `MURO_SESS_INIT`.
 
-`c/proto.c` is the only place the connection driver offers a protocol
-move. `c/test_conn` calls it before the HTTP image. A refused move
-does not run the image. `test/sess_agree_test.exs` runs the emitted
-stepper and `MuroHttp.SessionFsm` on the same traces, including
-off-protocol events. That check is conformance. A two-request
-keep-alive is deeper than the walk above.
+`c/proto.c` is a hand-written host mapping from an HTTP event to that
+sequence of moves. It is not emitted. The emitted stepper accepts or
+refuses each move. It does not choose talk versus timeout, open
+versus FIN, the piece constructor, an immediate reply, the decide
+reply, or the keep-or-close bit. `c/test_conn` calls `proto_admit`
+before the HTTP image. A refused move does not run the image.
+`test/sess_agree_test.exs` runs the emitted stepper and
+`MuroHttp.SessionFsm` on the same traces, including off-protocol
+events, and checks that `proto_admit` offers the same move list as
+`SessionFsm.Conn.check_trace` for each HTTP scenario. That check is
+conformance. A two-request keep-alive is deeper than the walk above.
 
 `priv/muro/http/conn.muro` is the HTTP image: classify, decide, a
 write range, keep-alive, the idle timer, the half-close flag, and a
@@ -205,10 +211,11 @@ Method, path, authorization, and body views still point at the
 original buffer, or at the out-of-range empty when the span is absent.
 
 `c/test_conn` drives the HTTP image. Protocol moves go through
-`c/proto.c`, which calls the stepper in `c/generated/session.c`. The
-link does not include `request.o` or `decide.o`: `conn.muro` already
-imports those books. `session.c` is a separate translation unit, so
-its header is not included next to `conn.h`.
+`c/proto.c`, the hand-written map, which calls the stepper in
+`c/generated/session.c`. The link does not include `request.o` or
+`decide.o`: `conn.muro` already imports those books. `session.c` is a
+separate translation unit, so its header is not included next to
+`conn.h`.
 
 ```sh
 cc -Wall -Wextra -Werror -std=c11 -I c -I c/generated -include c/shim.h \

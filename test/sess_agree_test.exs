@@ -1,10 +1,14 @@
 defmodule MuroHttp.SessAgreeTest do
   use ExUnit.Case, async: false
 
-  # Conformance of the emitted C stepper against MuroHttp.SessionFsm.
+  # Conformance of the emitted C stepper against MuroHttp.SessionFsm,
+  # and of the hand-written proto_admit map against Conn.check_trace.
   # muro's own check of the emitter is a walk of at most 14 states and
   # depth at most 6. This test is not that walk, and it is not a proof.
-  # The step label is the string both steppers print for the action.
+  # proto.c is not emitted. The step label is the string both steppers
+  # print for the action.
+
+  alias MuroHttp.SessionFsm.{Conn, Peer}
 
   setup_all do
     root = File.cwd!()
@@ -13,7 +17,10 @@ defmodule MuroHttp.SessAgreeTest do
     session_o = Path.join(out, "session.o")
     test_o = Path.join(out, "test_sess.o")
     shim_o = Path.join(out, "shim.o")
+    proto_o = Path.join(out, "proto.o")
+    admit_o = Path.join(out, "test_admit.o")
     bin = Path.join(out, "test_sess")
+    admit = Path.join(out, "test_admit")
 
     cc!(
       ~w[-Wall -Wextra -Werror -std=c11 -I c -I c/generated -include c/shim.h -c -o] ++
@@ -24,7 +31,16 @@ defmodule MuroHttp.SessAgreeTest do
 
     cc!(~w[-Wall -Wextra -Werror -std=c11 -I c -c -o] ++ [shim_o, "c/shim.c"])
     cc!(["-o", bin, test_o, session_o, shim_o])
-    {:ok, bin: bin, root: root}
+
+    cc!(~w[-Wall -Wextra -Werror -std=c11 -I c -I c/generated -c -o] ++ [proto_o, "c/proto.c"])
+
+    cc!(
+      ~w[-Wall -Wextra -Werror -std=c11 -I c -I c/generated -c -o] ++
+        [admit_o, "c/test_admit.c"]
+    )
+
+    cc!(["-o", admit, admit_o, proto_o, session_o, shim_o])
+    {:ok, bin: bin, admit: admit, root: root}
   end
 
   test "two keep-alive requests agree, past the emitter walk depth", %{bin: bin} do
@@ -195,6 +211,92 @@ defmodule MuroHttp.SessAgreeTest do
     end
   end
 
+  test "half-closed piece-chunk is reply-bad and then refuses another piece", %{bin: bin} do
+    agree!(bin, """
+    name conn
+    init
+    send pick 0
+    recv pick 1
+    recv pick 0
+    recv data piece-chunk
+    send data reply-bad
+    recv data piece-chunk
+    """)
+
+    trace = [
+      {:send, {:pick, :b0}},
+      {:recv, {:pick, :b1}},
+      {:recv, {:pick, :b0}},
+      {:recv, :piece_chunk},
+      {:send, :reply_bad}
+    ]
+
+    assert :ok = Conn.check_trace(trace, complete: true)
+
+    assert {:error, {5, {:unexpected, _step, :done, :piece_chunk}}} =
+             Conn.check_trace(trace ++ [{:recv, :piece_chunk}])
+  end
+
+  test "the peer refuses another piece after a half-closed chunk", %{bin: bin} do
+    agree!(bin, """
+    name peer
+    init
+    recv pick 0
+    send pick 1
+    send pick 0
+    send data piece-chunk
+    recv data reply-bad
+    send data piece-chunk
+    """)
+
+    sent = [
+      {:recv, {:pick, :b0}},
+      {:send, {:pick, :b1}},
+      {:send, {:pick, :b0}},
+      {:send, :piece_chunk},
+      {:recv, :reply_bad}
+    ]
+
+    assert :ok = Peer.check_trace(sent, complete: true)
+
+    assert {:error, {5, {:unexpected, _step, :done, :piece_chunk}}} =
+             Peer.check_trace(sent ++ [{:send, :piece_chunk}])
+
+    prefix = Enum.take(sent, 4)
+
+    assert {:error, {4, {:incomplete, _step, {:recv, {:data, "Reply", []}}}}} =
+             Peer.check_trace(prefix, complete: true)
+  end
+
+  test "proto_admit offers the same moves as Conn.check_trace", %{admit: admit} do
+    Enum.each(admit_scenarios(), fn scenario ->
+      {statuses, moves, done} = admit!(admit, scenario.script)
+
+      assert statuses == scenario.statuses, scenario.name
+      assert moves == scenario.trace, scenario.name
+      assert done == scenario.done, scenario.name
+      assert Conn.check_trace(scenario.trace) == :ok, scenario.name
+
+      case Conn.check_trace(scenario.trace, complete: true) do
+        :ok ->
+          assert scenario.done == 1, scenario.name
+
+        {:error, {_index, {:incomplete, _step, _expected}}} ->
+          assert scenario.done == 0, scenario.name
+
+        other ->
+          flunk("#{scenario.name}: #{inspect(other)}")
+      end
+    end)
+  end
+
+  test "the admit map does not key off the expected-action printer", %{root: root} do
+    src = File.read!(Path.join(root, "c/proto.c"))
+    refute String.contains?(src, "send (data Reply)")
+    refute String.contains?(src, "send_pick")
+    assert String.contains?(src, "st.at")
+  end
+
   test "the emitted header has the step statuses and no down step", %{root: root} do
     header = File.read!(Path.join(root, "c/generated/session.h"))
     assert header =~ "MURO_SESS_UNEXPECTED"
@@ -283,6 +385,341 @@ defmodule MuroHttp.SessAgreeTest do
   defp pick_bit("1"), do: :b1
   defp pick_bit(n), do: String.to_atom("b" <> n)
 
+  defp move_pair(line) do
+    {:move, dir, value} = parse_move(line)
+    {dir, value}
+  end
+
+  # HTTP events in, protocol moves out. The scripts are the image
+  # scenarios. The traces are the lists Conn.check_trace accepts,
+  # including the ones test/conn_test.exs replays. proto_admit is the
+  # only thing that produces `moves`.
+  defp admit_scenarios do
+    req = [
+      {:send, {:pick, :b0}},
+      {:recv, {:pick, :b0}},
+      {:recv, :piece_req}
+    ]
+
+    keep = req ++ [{:send, :reply_ok}, {:send, {:pick, :b0}}]
+
+    [
+      %{
+        name: "two requests then close",
+        script: """
+        begin
+        admit read bytes 24 ok none 0 0
+        admit decide db 0 none ok 0 0
+        admit write done 0 none none 0 0
+        admit idle bytes 22 ok none 0 0
+        admit decide db 0 none ok 0 0
+        admit write done 0 none none 1 1
+        """,
+        statuses: [1, 1, 1, 1, 1, 1],
+        done: 1,
+        trace:
+          keep ++
+            [
+              {:send, {:pick, :b0}},
+              {:recv, {:pick, :b0}},
+              {:recv, :piece_req},
+              {:send, :reply_ok},
+              {:send, {:pick, :b1}}
+            ]
+      },
+      %{
+        name: "chunk then request then close",
+        script: """
+        begin
+        admit read bytes 18 chunk none 0 0
+        admit read bytes 24 ok none 0 0
+        admit decide db 0 none ok 0 0
+        admit write done 0 none none 1 1
+        """,
+        statuses: [1, 1, 1, 1],
+        done: 1,
+        trace:
+          [
+            {:send, {:pick, :b0}},
+            {:recv, {:pick, :b0}},
+            {:recv, :piece_chunk}
+          ] ++ req ++ [{:send, :reply_ok}, {:send, {:pick, :b1}}]
+      },
+      %{
+        name: "malformed request",
+        script: """
+        begin
+        admit read bytes 20 bad none 0 0
+        admit write done 0 none none 1 1
+        """,
+        statuses: [1, 1],
+        done: 1,
+        trace: [
+          {:send, {:pick, :b0}},
+          {:recv, {:pick, :b0}},
+          {:recv, :piece_bad},
+          {:send, :reply_bad}
+        ]
+      },
+      %{
+        name: "half-closed request, then a later byte offers no move",
+        script: """
+        begin
+        admit read eof 24 ok none 0 0
+        admit decide db 0 none ok 0 0
+        admit write done 0 none none 1 1
+        admit read bytes 24 ok none 0 0
+        """,
+        statuses: [1, 1, 1, 1],
+        done: 1,
+        trace: [
+          {:send, {:pick, :b0}},
+          {:recv, {:pick, :b1}},
+          {:recv, {:pick, :b0}},
+          {:recv, :piece_req},
+          {:send, :reply_ok}
+        ]
+      },
+      %{
+        name: "bare fin",
+        script: """
+        begin
+        admit read eof 0 none none 0 0
+        """,
+        statuses: [1],
+        done: 1,
+        trace: [
+          {:send, {:pick, :b0}},
+          {:recv, {:pick, :b1}},
+          {:recv, {:pick, :b1}}
+        ]
+      },
+      %{
+        name: "idle timeout",
+        script: """
+        begin
+        admit read tick 0 none none 0 0
+        """,
+        statuses: [1],
+        done: 1,
+        trace: [{:send, {:pick, :b1}}]
+      },
+      %{
+        name: "connection close",
+        script: """
+        begin
+        admit read bytes 24 ok none 0 0
+        admit decide db 0 none ok 0 0
+        admit write done 0 none none 1 1
+        """,
+        statuses: [1, 1, 1],
+        done: 1,
+        trace: req ++ [{:send, :reply_ok}, {:send, {:pick, :b1}}]
+      },
+      %{
+        name: "two keep-alives then idle timeout",
+        script: """
+        begin
+        admit read bytes 24 ok none 0 0
+        admit decide db 0 none none 1 0
+        admit decide db 0 none ok 0 0
+        admit write progress 8 none none 0 0
+        admit write done 0 none none 0 0
+        admit idle bytes 22 ok none 0 0
+        admit decide db 0 none ok 0 0
+        admit write done 0 none none 0 0
+        admit idle tick 0 none none 0 0
+        """,
+        statuses: [1, 1, 1, 1, 1, 1, 1, 1, 1],
+        done: 1,
+        trace: keep ++ keep ++ [{:send, {:pick, :b1}}]
+      },
+      %{
+        name: "half-closed piece-chunk",
+        script: """
+        begin
+        admit read eof 8 chunk none 0 0
+        """,
+        statuses: [1],
+        done: 1,
+        trace: [
+          {:send, {:pick, :b0}},
+          {:recv, {:pick, :b1}},
+          {:recv, {:pick, :b0}},
+          {:recv, :piece_chunk},
+          {:send, :reply_bad}
+        ]
+      },
+      %{
+        name: "half-closed piece-bad",
+        script: """
+        begin
+        admit read eof 8 bad none 0 0
+        """,
+        statuses: [1],
+        done: 1,
+        trace: [
+          {:send, {:pick, :b0}},
+          {:recv, {:pick, :b1}},
+          {:recv, {:pick, :b0}},
+          {:recv, :piece_bad},
+          {:send, :reply_bad}
+        ]
+      },
+      %{
+        name: "fin during decide is not a move",
+        script: """
+        begin
+        admit read bytes 24 ok none 0 0
+        admit decide eof 0 none none 0 0
+        admit decide db 0 none ok 0 0
+        admit write done 0 none none 1 1
+        """,
+        statuses: [1, 1, 1, 1],
+        done: 1,
+        trace: req ++ [{:send, :reply_ok}, {:send, {:pick, :b1}}]
+      },
+      %{
+        name: "decide reply-bad then keep",
+        script: """
+        begin
+        admit read bytes 24 ok none 0 0
+        admit decide db 0 none bad 0 0
+        admit write done 0 none none 0 0
+        """,
+        statuses: [1, 1, 1],
+        done: 0,
+        trace: req ++ [{:send, :reply_bad}, {:send, {:pick, :b0}}]
+      },
+      %{
+        name: "write error closes",
+        script: """
+        begin
+        admit read bytes 24 ok none 0 0
+        admit decide db 0 none ok 0 0
+        admit write error 0 none none 0 0
+        """,
+        statuses: [1, 1, 1],
+        done: 1,
+        trace: req ++ [{:send, :reply_ok}, {:send, {:pick, :b1}}]
+      },
+      %{
+        name: "tick during write adds no move",
+        script: """
+        begin
+        admit read bytes 24 ok none 0 0
+        admit decide db 0 none ok 0 0
+        admit write tick 0 none none 0 0
+        admit write done 0 none none 0 0
+        """,
+        statuses: [1, 1, 1, 1],
+        done: 0,
+        trace: keep
+      },
+      %{
+        name: "unclassified bytes are refused, then timeout",
+        script: """
+        begin
+        admit read bytes 4 none none 0 0
+        admit read tick 0 none none 0 0
+        """,
+        statuses: [0, 1],
+        done: 1,
+        trace: [{:send, {:pick, :b1}}]
+      },
+      %{
+        name: "db before a piece is refused, then timeout",
+        script: """
+        begin
+        admit decide db 0 none ok 0 0
+        admit read tick 0 none none 0 0
+        """,
+        statuses: [0, 1],
+        done: 1,
+        trace: [{:send, {:pick, :b1}}]
+      },
+      %{
+        name: "write done before the reply is refused",
+        script: """
+        begin
+        admit read bytes 24 ok none 0 0
+        admit write done 0 none none 0 0
+        admit decide db 0 none ok 0 0
+        admit write done 0 none none 0 0
+        """,
+        statuses: [1, 0, 1, 1],
+        done: 0,
+        trace: keep
+      },
+      %{
+        name: "decide without a reply code is refused",
+        script: """
+        begin
+        admit read bytes 24 ok none 0 0
+        admit decide db 0 none none 0 0
+        admit decide db 0 none ok 0 0
+        admit write done 0 none none 0 0
+        """,
+        statuses: [1, 0, 1, 1],
+        done: 0,
+        trace: keep
+      },
+      %{
+        name: "shut offers no moves",
+        script: """
+        shut
+        admit read bytes 24 ok none 0 0
+        admit read tick 0 none none 0 0
+        """,
+        statuses: [1, 1],
+        done: 0,
+        trace: []
+      },
+      %{
+        name: "pipelined tail is a new request",
+        script: """
+        begin
+        admit read bytes 48 ok none 0 0
+        admit decide db 0 none ok 0 0
+        admit write done 0 none none 0 0
+        admit idle bytes 22 ok none 0 0
+        """,
+        statuses: [1, 1, 1, 1],
+        done: 0,
+        trace: keep ++ req
+      }
+    ]
+  end
+
+  defp admit!(bin, script) do
+    blocks = script |> run_raw!(bin) |> parse_admit_blocks()
+    statuses = Enum.map(blocks, & &1.status)
+    moves = Enum.flat_map(blocks, & &1.moves)
+    %{done: done} = List.last(blocks)
+    {statuses, moves, done}
+  end
+
+  defp parse_admit_blocks(out) do
+    out
+    |> String.split("\n", trim: true)
+    |> Enum.chunk_by(&(&1 == "."))
+    |> Enum.reject(&(&1 == ["."]))
+    |> Enum.map(fn
+      ["status " <> status, "done " <> done, "moves " <> n | moves] ->
+        count = String.to_integer(n)
+
+        if length(moves) != count do
+          raise "admit block move count #{count} but #{length(moves)} lines"
+        end
+
+        %{
+          status: String.to_integer(status),
+          done: String.to_integer(done),
+          moves: Enum.map(moves, &move_pair/1)
+        }
+    end)
+  end
+
   defp norm("send_pick"), do: {:send_pick, [:b0, :b1]}
   defp norm("recv_pick"), do: {:recv_pick, [:b0, :b1]}
   defp norm("done"), do: :done
@@ -299,6 +736,10 @@ defmodule MuroHttp.SessAgreeTest do
   defp bool_int(false), do: 0
 
   defp run!(bin, script) do
+    parse_blocks(run_raw!(script, bin))
+  end
+
+  defp run_raw!(script, bin) do
     path =
       Path.join(System.tmp_dir!(), "muro-http-sess-script-#{System.unique_integer([:positive])}")
 
@@ -307,7 +748,7 @@ defmodule MuroHttp.SessAgreeTest do
     try do
       {out, status} = System.cmd(bin, [path], stderr_to_stdout: true)
       assert status == 0, out
-      parse_blocks(out)
+      out
     after
       File.rm(path)
     end
