@@ -1,10 +1,28 @@
--- Connection protocol. This book is evidence. C does not emit it.
+-- Connection protocol. `--backend c` emits this book as a stepper.
+-- The host calls `muro__sess_conn_step`. An event the protocol does
+-- not allow is refused, and the state stays.
 --
--- muro 0.21.6 still emits a session stepper only for --backend fsm and
--- --backend js. A run that names a session is refused (c:session).
--- priv/muro/http/conn.muro is the image: an unboxed Conn, an unboxed
--- Ev, and run step. The two meet in test/conn_test.exs, which replays
--- this session's fsm stepper beside step.
+-- The actions are the ones the state machine takes. muro checks that
+-- by a walk of at most 14 states and depth at most 6, including
+-- events the protocol does not allow. That walk is not a proof, and
+-- this stepper is not "the same step". There is no `down` step. This
+-- session's init takes no nat. A stepper that does takes `uint64_t`,
+-- so a negative cannot be supplied. A wrong key, a bad position, or
+-- an unknown session name is `MURO_SESS_UNEXPECTED` on the step.
+-- Init of an unknown name returns `MURO_SESS_INIT` and does not
+-- start a session.
+--
+-- priv/muro/http/conn.muro is the HTTP image: classify, decide, write
+-- ranges, keep-alive, the idle timer, the half-close flag, and a
+-- pipelined offset. It does not name this session. A FIN that arrives
+-- while a reply is already in progress is that flag. This session
+-- chooses half-close before the piece. The later keep-or-close choice
+-- is still a move on the stepper.
+--
+-- test/conn_test.exs replays the fsm stepper beside the HTTP image.
+-- test/sess_agree_test.exs checks the emitted C stepper against that
+-- same machine. The C check is conformance. It is not the walk above,
+-- and it is not a proof.
 --
 -- Server end `conn`. Client end `peer` is dual conn.
 -- One turn of the loop, the server chooses:

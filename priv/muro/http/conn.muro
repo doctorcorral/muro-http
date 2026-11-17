@@ -1,9 +1,11 @@
 -- One finite step of an HTTP/1 connection.
 --
 -- The C shim owns the socket, the buffer, and the clock. It calls step
--- and performs the action. This book does not loop and does not name
--- the session in session.muro: a run that names a session is refused,
--- and C still emits no session stepper. The link is the trace test.
+-- and performs the action. This book does not loop. It is the HTTP
+-- image: classify, decide, a write range, keep-alive, the idle timer,
+-- the half-close flag, and a pipelined offset. It is not the session
+-- stepper. Protocol moves go through the stepper emitted from
+-- session.muro. A run here does not name that session.
 --
 -- phase: 0 read, 1 decide, 2 write, 3 idle, 4 closed
 -- half:  0 open, 1 peer has shut its write (no further read)

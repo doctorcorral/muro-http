@@ -1,9 +1,9 @@
 # Compiler gaps
 
-muro 0.21.6. The books check, and the runs emit. The generated C is
+muro 0.21.14. The books check, and the runs emit. The generated C is
 not edited. The three limits below were real on muro 0.20.36. They
 are closed as of muro 0.20.39. The header record is unboxed as of
-muro 0.20.42. On 0.21.6, `classify` still allocates the one
+muro 0.20.42. On 0.21.14, `classify` still allocates the one
 `Classified` result, and the C driver still prints `view-allocs 0`,
 `health-allocs 1`, `post-allocs 1`.
 
@@ -77,18 +77,83 @@ returns only `id-none`, `id-bad`, or `id-unknown`, so compiling the
 generated Elixir warns that those two clauses never match. They stay.
 Those constructors are host facts for `decide`.
 
+`mix compile --warnings-as-errors` fails on that generated code.
+`MuroHttp.Request.idNumber/1` (`lib/muro_http/request.ex`) and
+`MuroHttp.Conn.idNumber/1` (`lib/muro_http/conn.ex`) each warn that
+the `:id_missing` and `:id_present` clauses will never match, because
+`idClassOf` has type `id-bad or id-none or id-unknown`. This is
+pre-existing. It is a muro codegen follow-up: the emitter should not
+write a clause for a constructor the function cannot return, or the
+book should stop matching constructors `idClassOf` never produces.
+This PR does not edit those generated clauses. CI does not pass
+`--warnings-as-errors`. `mix test` and `mix muro.gen --check` do not
+either.
+
 JSON body class is not this step. That is scope. `classify` returns
 `body-none` and the raw body `Slice`. No muro issue was opened.
 
-## Step 2, still open on muro 0.21.6
+## The connection stepper, on muro 0.21.14
 
-C, Rust, and Zig do not emit a session stepper. `--backend fsm` and
-`--backend js` do. `--backend c` on `session.muro` writes the `Piece`
-and `Reply` payloads and no `step`. A run whose type names a session
-does not check: `ping is a session, not a definition`. JavaScript
-refuses that use as `c:session`. `conn.muro` is the image, a sibling
-book, so `step` does not name `conn`. The fsm trace test is what
-keeps the protocol and the image together.
+`--backend c` emits `priv/muro/http/session.muro` as a stepper
+(`c/generated/session.c`). That file is generated. `c/proto.c` is not.
+It is a hand-written host mapping from one HTTP event to a sequence
+of protocol moves. The emitted stepper enforces each move. It does
+not choose the sequence.
+
+An event the protocol does not allow is refused, and the image does
+not run. The actions are the ones `MuroHttp.SessionFsm` takes. muro
+checks the emitter by a walk of at most 14 states and depth at most 6,
+including events the protocol does not allow. That walk is not a proof.
+`test/sess_agree_test.exs` checks this book's emitted stepper against
+that machine, including a two-request trace, and checks that
+`proto_admit` offers the same move list as `SessionFsm.Conn.check_trace`
+for each HTTP scenario. The check is conformance.
+
+The host may offer several moves for one image event. Each move is
+one call of `muro__sess_conn_step`. The map in `c/proto.c` is what
+picks them:
+
+- talk (`send` pick 0) or an idle timeout (`send` pick 1)
+- open (`recv` pick 0) or a half-close (`recv` pick 1), and on a
+  half-close a piece versus a bare FIN
+- `piece-req`, `piece-bad`, or `piece-chunk` from the classifier tag
+- an immediate `reply-bad` for an open malformed request, or for a
+  half-closed need-more or malformed request
+- `reply-ok` or `reply-bad` from a decide code, or no reply while the
+  image is still observing
+- keep (`send` pick 0) or close (`send` pick 1) after an open reply,
+  including a write error
+
+Those choices are host policy. They are not in the emitted stepper.
+
+A follow-up could put that case split in a muro book and emit the C.
+`session.muro` already records the legal sequences as `conform`
+(keep, close, timeout, half-close, a bad request, a chunk). It does
+not see the image event, the classifier tag, or the decide code.
+`conn.muro` is the image and does not name the session. A third book
+could take those host facts and name the moves. muro 0.21.14 does not
+emit that book, and this repository does not contain it. `c/proto.c`
+stays hand-written until that exists. Do not read it as generated.
+
+This session is fieldless `Piece` and `Reply`. It has no nested unboxed
+payload, no direct nat `case`, no `case` that calls a run with two live
+arguments, and no `down`. The emitter accepted the whole protocol.
+
+`conn.muro` is still the HTTP image. It does not name the session.
+Classify, decide, the write range, keep-alive, the idle timer, the
+half-close flag, and the pipelined offset stay there. A FIN during
+decide or write is that flag: the session's half-close is the peer's
+choice before the piece. The later keep-or-close choice is a stepper
+move. `shut` is the terminal image and has no live session, so a byte
+on it is not a new request.
+
+Init of this session takes no nat. A stepper that does takes `uint64_t`,
+so a negative cannot be supplied. A wrong key, a bad position, or an
+unknown session name returns `MURO_SESS_UNEXPECTED` from the step.
+Init of an unknown name returns `MURO_SESS_INIT`.
+
+The three books under `priv/muro/http/neg/` are still refused by
+`mix muro.check`. They are not in `muro.exs`.
 
 An unboxed field has to be a machine word, a `WBool`, a `Slice`, an
 `Opt` of those, or more unboxed data. `Verb`, `PathShape`, and

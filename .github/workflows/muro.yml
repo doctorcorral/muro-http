@@ -59,5 +59,21 @@ jobs:
           cc -Wall -Wextra -Werror -std=c11 \
             -I c -I c/generated -include c/shim.h \
             -c -o c/conn.o c/generated/conn.c
-          cc -o c/test_conn c/test_conn.o c/conn.o c/shim.o
+          cc -Wall -Wextra -Werror -std=c11 \
+            -I c -I c/generated -include c/shim.h \
+            -c -o c/session.o c/generated/session.c
+          cc -Wall -Wextra -Werror -std=c11 -I c -I c/generated \
+            -c -o c/proto.o c/proto.c
+          cc -o c/test_conn c/test_conn.o c/conn.o c/session.o c/proto.o c/shim.o
           ./c/test_conn
+
+      - name: Build and run the C session stepper
+        run: |
+          cc -Wall -Wextra -Werror -std=c11 \
+            -I c -I c/generated -include c/shim.h \
+            -c -o c/session.o c/generated/session.c
+          cc -Wall -Wextra -Werror -std=c11 -I c -I c/generated \
+            -c -o c/test_sess.o c/test_sess.c
+          cc -Wall -Wextra -Werror -std=c11 -I c -c -o c/shim.o c/shim.c
+          cc -o c/test_sess c/test_sess.o c/session.o c/shim.o
+          ./c/test_sess

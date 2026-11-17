@@ -4,8 +4,8 @@
 library and it is not a book inside murolang/muro. A muro web server
 will live here. This repository is version `0.1.0-dev`.
 
-It pins the released Hex package muro `0.21.6` (`{:muro, "~> 0.21.6"}`
-in `mix.exs`, `muro: "0.21.6"` in `muro.exs`). It does not depend on a
+It pins the released Hex package muro `0.21.14` (`{:muro, "~> 0.21.14"}`
+in `mix.exs`, `muro: "0.21.14"` in `muro.exs`). It does not depend on a
 compiler checkout.
 
 It is hosted at https://github.com/doctorcorral/muro-http. There is no Hex publish.
@@ -75,23 +75,50 @@ the first request. A tick during decide or write holds. `conn.muro`
 imports `request.muro` and calls `classify` and `decide`. It does not
 copy them.
 
-### The session is evidence
+### The session stepper
 
-`priv/muro/http/session.muro` is the protocol. C does not emit it.
+`priv/muro/http/session.muro` is the protocol. `--backend c` emits it
+as a stepper (`c/generated/session.c`). The host may offer a sequence
+of moves for one image event. Each move is one call to
+`muro__sess_conn_step` with the current state. The function returns
+the next state, or refuses a move the protocol does not allow. The
+host keeps the socket. The stepper does not loop.
 
-muro 0.21.6 emits a session stepper for `--backend fsm` and
-`--backend js`. `--backend c` writes closed runs. Emitting this book
-to C writes the `Piece` and `Reply` payloads and no stepper. A run
-whose type names the session does not check (`ping is a session, not
-a definition`). The image is therefore `Conn`, `Ev`, and `run step`,
-in a sibling book, so `step` does not name the session.
+The actions are the ones `MuroHttp.SessionFsm` takes. muro checks the
+emitter by a walk of at most 14 states and depth at most 6, including
+events the protocol does not allow. That walk is not a proof, and
+this stepper is not "the same step". There is no `down` step. This
+session's init takes no nat. A stepper that does takes `uint64_t`, so
+a negative cannot be supplied. A wrong key, a bad position, or an
+unknown session name returns `MURO_SESS_UNEXPECTED` from the step.
+Init of an unknown name returns `MURO_SESS_INIT`.
+
+`c/proto.c` is a hand-written host mapping from an HTTP event to that
+sequence of moves. It is not emitted. The emitted stepper accepts or
+refuses each move. It does not choose talk versus timeout, open
+versus FIN, the piece constructor, an immediate reply, the decide
+reply, or the keep-or-close bit. `c/test_conn` calls `proto_admit`
+before the HTTP image. A refused move does not run the image.
+`test/sess_agree_test.exs` runs the emitted stepper and
+`MuroHttp.SessionFsm` on the same traces, including off-protocol
+events, and checks that `proto_admit` offers the same move list as
+`SessionFsm.Conn.check_trace` for each HTTP scenario. That check is
+conformance. A two-request keep-alive is deeper than the walk above.
+
+`priv/muro/http/conn.muro` is the HTTP image: classify, decide, a
+write range, keep-alive, the idle timer, the half-close flag, and a
+pipelined offset. It does not name the session. A FIN that arrives
+while a reply is already in progress is that flag. The session
+chooses half-close before the piece. The later keep-or-close choice
+is still a move on the stepper.
 
 `test/conn_test.exs` replays `MuroHttp.SessionFsm.Conn.check_trace`
-on the same exchanges `step` runs. A drift fails that test. Three
-books under `priv/muro/http/neg/` are refused by `mix muro.check`:
-a write after `end`, a read after `end`, and a read after half-close.
-They are not in `muro.exs`, so `mix muro.gen` does not emit them.
-After close, `step` returns the same closed state for every event.
+on the same exchanges the image runs. Three books under
+`priv/muro/http/neg/` are refused by `mix muro.check`: a write after
+`end`, a read after `end`, and a read after half-close. They are not
+in `muro.exs`, so `mix muro.gen` does not emit them. After close, the
+image returns the same closed state for every event. `shut` is that
+terminal image and has no live session.
 
 The server end is `conn`. The client end `peer` is `dual conn`.
 
@@ -177,15 +204,18 @@ The shim, the driver, and the generated file are compiled with
 
 The driver prints `OK` and allocation counts. `methodView`,
 `targetView`, `pathView`, and `versionView` allocate 0. On muro
-0.21.6, as on 0.20.42, `classify` of `GET /health` allocates 1 and
+0.21.14, as on 0.20.42, `classify` of `GET /health` allocates 1 and
 `classify` of `POST /posts` with a two-byte body allocates 1. That
 object is the `Classified` result. See `GAPS.md`.
 Method, path, authorization, and body views still point at the
 original buffer, or at the out-of-range empty when the span is absent.
 
-`c/test_conn` drives `step`. It links `c/generated/conn.c` and the
-shim, and it does not link `request.o` or `decide.o`: `conn.muro`
-already imports those books.
+`c/test_conn` drives the HTTP image. Protocol moves go through
+`c/proto.c`, the hand-written map, which calls the stepper in
+`c/generated/session.c`. The link does not include `request.o` or
+`decide.o`: `conn.muro` already imports those books. `session.c` is a
+separate translation unit, so its header is not included next to
+`conn.h`.
 
 ```sh
 cc -Wall -Wextra -Werror -std=c11 -I c -I c/generated -include c/shim.h \
@@ -194,7 +224,12 @@ cc -Wall -Wextra -Werror -std=c11 -I c -c -o c/shim.o c/shim.c
 cc -Wall -Wextra -Werror -std=c11 \
   -I c -I c/generated -include c/shim.h \
   -c -o c/conn.o c/generated/conn.c
-cc -o c/test_conn c/test_conn.o c/conn.o c/shim.o
+cc -Wall -Wextra -Werror -std=c11 \
+  -I c -I c/generated -include c/shim.h \
+  -c -o c/session.o c/generated/session.c
+cc -Wall -Wextra -Werror -std=c11 -I c -I c/generated \
+  -c -o c/proto.o c/proto.c
+cc -o c/test_conn c/test_conn.o c/conn.o c/session.o c/proto.o c/shim.o
 ./c/test_conn
 ```
 
@@ -203,4 +238,19 @@ includes `begin`, write progress, write done, write error, an idle
 tick, eof of an empty buffer, eof while already deciding or writing,
 and every event after close. A step that classifies allocates 1, the
 `Classified` result. A step that calls `decide` allocates 1, the
-`Decision`.
+`Decision`. The stepper's own moves allocate 0. `proto_begin` is
+outside that count.
+
+`c/test_sess` checks the stepper by itself. With no arguments it
+prints `OK`.
+
+```sh
+cc -Wall -Wextra -Werror -std=c11 \
+  -I c -I c/generated -include c/shim.h \
+  -c -o c/session.o c/generated/session.c
+cc -Wall -Wextra -Werror -std=c11 -I c -I c/generated \
+  -c -o c/test_sess.o c/test_sess.c
+cc -Wall -Wextra -Werror -std=c11 -I c -c -o c/shim.o c/shim.c
+cc -o c/test_sess c/test_sess.o c/session.o c/shim.o
+./c/test_sess
+```

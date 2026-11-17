@@ -22,7 +22,7 @@ defmodule MuroHttp.MixProject do
 
   defp deps do
     [
-      {:muro, "~> 0.21.6"}
+      {:muro, "~> 0.21.14"}
     ]
   end
 
