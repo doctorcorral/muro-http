@@ -1206,7 +1206,8 @@ static void check_empty_db(void) {
 }
 
 /* MURO_TEST_FAIL_DB_ADMIT refuses the evDb admit after the store
-   commit. The client still gets 500, and the row is still there. */
+   commit. The client still gets 500 with Connection: close, and the
+   row is still there. */
 static void check_commit_status(void) {
   char path[] = "/tmp/muro-http-admit-XXXXXX";
   char req[1024];
@@ -1228,9 +1229,9 @@ static void check_commit_status(void) {
     return;
   }
   post_json(req, sizeof req, tok_ada, "{\"text\":\"hi\"}");
-  check_one(port, "commit-create", req, 500, "internal", 0, 1);
+  check_one(port, "commit-create", req, 500, "internal", 1, 1);
   post_like(req, sizeof req, "1", tok_ada);
-  check_one(port, "commit-like", req, 500, "internal", 0, 1);
+  check_one(port, "commit-like", req, 500, "internal", 1, 1);
   check_one(port, "commit-read", "GET /posts/1 HTTP/1.1\r\n\r\n", 200, "{\"id\":1,\"text\":\"hi\"}", 0,
             0);
   post_like(req, sizeof req, "1", tok_ada);

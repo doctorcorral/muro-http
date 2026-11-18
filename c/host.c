@@ -522,7 +522,8 @@ static void write_status(Server *sv, int fd, const char *p, size_t n) {
 
 /* wrote is set only after a committed create or like. If no status
    byte has left the socket, send one before the fd is closed. A
-   rendered buffer is that status. Otherwise the body is internal. */
+   rendered buffer is that status. Otherwise the body is internal,
+   sent with Connection: close because the fd closes next. */
 static void status_before_close(Server *sv, Slot *s) {
   const char *msg;
   size_t n;
@@ -531,7 +532,7 @@ static void status_before_close(Server *sv, Slot *s) {
     msg = (const char *)s->out;
     n = s->out_len;
   } else {
-    msg = field(s->st, 2) == 1 ? k_500_close : k_500_keep;
+    msg = k_500_close;
     n = strlen(msg);
     fprintf(stderr, "muro-httpd: committed write has no status; sending 500\n");
   }
