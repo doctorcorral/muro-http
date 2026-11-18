@@ -645,6 +645,8 @@ static void check_partial_send(void) {
   char line[64];
   size_t sum = 0;
   int nwrite = 0;
+  int tries;
+  int bad_line = 0;
   size_t want;
   tfd = mkstemp(tmpl);
   if (tfd < 0) {
@@ -670,26 +672,35 @@ static void check_partial_send(void) {
   close(fd);
   if (status != 200 || strcmp(body, "ok") != 0 || conn_close) fail("partial-send", "status");
   want = strlen(health_keep);
-  log = fopen(tmpl, "r");
-  if (!log) {
-    fail("partial-send", "no write log");
-  } else {
-    while (fgets(line, sizeof line, log)) {
-      char *end = NULL;
-      long v = strtol(line, &end, 10);
-      if (end == line || v != 1) {
-        fprintf(stderr, "FAIL partial-send: write '%s'\n", line);
-        failures += 1;
-        break;
+  /* note_write runs after write() returns. The response can arrive
+     before that last line is in the log. Re-read until it catches up. */
+  for (tries = 0; tries < 100; tries++) {
+    bad_line = 0;
+    sum = 0;
+    nwrite = 0;
+    log = fopen(tmpl, "r");
+    if (log) {
+      while (fgets(line, sizeof line, log)) {
+        char *end = NULL;
+        long v = strtol(line, &end, 10);
+        if (end == line || v != 1) {
+          fprintf(stderr, "FAIL partial-send: write '%s'\n", line);
+          failures += 1;
+          bad_line = 1;
+          break;
+        }
+        sum += 1;
+        nwrite += 1;
       }
-      sum += 1;
-      nwrite += 1;
+      fclose(log);
+      if (bad_line) break;
+      if (nwrite >= 2 && sum == want) break;
     }
-    fclose(log);
-    if (nwrite < 2 || sum != want) {
-      fprintf(stderr, "FAIL partial-send: writes %d sum %zu want %zu\n", nwrite, sum, want);
-      failures += 1;
-    }
+    poll(NULL, 0, 10);
+  }
+  if (!bad_line && (nwrite < 2 || sum != want)) {
+    fprintf(stderr, "FAIL partial-send: writes %d sum %zu want %zu\n", nwrite, sum, want);
+    failures += 1;
   }
   unlink(tmpl);
   if (stop_server(pid) < 0) return;
