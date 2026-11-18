@@ -2,6 +2,8 @@
 
 ## 0.1.0-dev — unreleased
 
+- A 500 sent because a connection closes after a committed create or
+  like, before any status byte, says `Connection: close`.
 - `priv/muro/http/body.muro` is `bodyClass`, `textOff`, and
   `textLen`. `--backend c` emits them. Four equations reduce: the
   empty body, and a body past 1024 bytes, all of which return before
