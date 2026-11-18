@@ -806,8 +806,14 @@ static void check_routes(int port) {
   check_one(port, "read-zero", "GET /posts/0 HTTP/1.1\r\n\r\n", 400, "invalid-id", 0, 0);
   check_one(port, "read-pad", "GET /posts/01 HTTP/1.1\r\n\r\n", 400, "invalid-id", 0, 0);
   check_one(port, "get-posts", "GET /posts HTTP/1.1\r\n\r\n", 404, "not-found", 0, 0);
+  snprintf(req, sizeof req,
+           "POST /posts HTTP/1.1\r\nAuthorization: Bearer %s\r\nContent-Length: 0\r\n\r\n", tok_ada);
+  check_one(port, "post-empty-body", req, 400, "malformed", 0, 0);
+  check_one(port, "post-on-id", "POST /posts/1 HTTP/1.1\r\n\r\n", 404, "not-found", 0, 0);
   post_like(req, sizeof req, "1", NULL);
   check_one(port, "like-no-auth", req, 401, "missing-bearer", 0, 0);
+  post_like(req, sizeof req, "1", tok_expired);
+  check_one(port, "like-bad-payload", req, 401, "bad-payload", 0, 0);
   post_like(req, sizeof req, "1", tok_bad);
   check_one(port, "like-bad-token", req, 401, "bad-token", 0, 0);
   post_like(req, sizeof req, "0", tok_ada);
