@@ -1,0 +1,791 @@
+-- JSON body class for one POST /posts body.
+--
+-- The result is a U64 in BodyClass constructor order:
+-- 0 body-none, 1 body-malformed, 2 body-required, 3 body-too-long,
+-- 4 body-ok. This book does not import decide.muro. A def is a global
+-- C symbol, and conn.muro already emits that book. Helpers are
+-- run internal, so the C image keeps them static.
+--
+-- body-none is an empty slice. body-too-long is a slice longer than
+-- 1024 bytes. That cap is under the HTTP body cap. Anything else is
+-- one JSON value: optional whitespace, one object, optional
+-- whitespace. The object may contain other keys. The root key text,
+-- spelled with those four bytes, must be a non-empty string.
+-- A well-formed object without that string is body-required.
+-- A syntax error, a trailing comma, a second text key, a surrogate
+-- \u escape, or trailing junk is body-malformed.
+--
+-- The key is the raw bytes t e x t. An escape in the key does not
+-- spell text. \u escapes are four hex digits and must not be a
+-- surrogate. UTF-8 is not checked here. textOff and textLen are the
+-- raw bytes inside the text quotes, escapes included, and only when
+-- the class is body-ok. The host unescapes those bytes.
+
+unboxed data JSt : Type where
+  jst : Π (+ ph : U64) → Π (+ bad : U64) → Π (+ depth : U64) → Π (+ nest : U64) → Π (+ aux : U64) → Π (+ kpos : U64) → Π (+ ink : U64) → Π (+ key : U64) → Π (+ seen : U64) → Π (+ off : U64) → Π (+ len : U64) → Π (+ hex : U64) → Π (+ gap : U64) → JSt
+
+def jbMk : run internal Π (+ ph : U64) → Π (+ bad : U64) → Π (+ depth : U64) → Π (+ nest : U64) → Π (+ aux : U64) → Π (+ kpos : U64) → Π (+ ink : U64) → Π (+ key : U64) → Π (+ seen : U64) → Π (+ off : U64) → Π (+ len : U64) → Π (+ hex : U64) → Π (+ gap : U64) → JSt :=
+  λ (+ ph : U64) → λ (+ bad : U64) → λ (+ depth : U64) → λ (+ nest : U64) → λ (+ aux : U64) → λ (+ kpos : U64) → λ (+ ink : U64) → λ (+ key : U64) → λ (+ seen : U64) → λ (+ off : U64) → λ (+ len : U64) → λ (+ hex : U64) → λ (+ gap : U64) →
+    jst ph bad depth nest aux kpos ink key seen off len hex gap
+
+def jbBlank : run internal JSt :=
+  jbMk (toU64 0) (toU64 0) (toU64 0) (toU64 0) (toU64 0) (toU64 0) (toU64 0) (toU64 0) (toU64 0) (toU64 0) (toU64 0) (toU64 0) (toU64 0)
+
+def jbBad : run internal Π (+ st : JSt) → JSt :=
+  λ (+ st : JSt) →
+    match st motive (λ _ → JSt)
+      | jst ph _bad depth nest aux kpos ink key seen off len hex gap =>
+          jbMk ph (toU64 1) depth nest aux kpos ink key seen off len hex gap
+
+def jbWs : run internal Π (+ b : U8) → U64 :=
+  λ (+ b : U8) →
+    match (eqi b (toU8 32)) motive (λ _ → U64)
+      | wtrue => toU64 1
+      | wfalse =>
+          (match (eqi b (toU8 9)) motive (λ _ → U64)
+            | wtrue => toU64 1
+            | wfalse =>
+                (match (eqi b (toU8 10)) motive (λ _ → U64)
+                  | wtrue => toU64 1
+                  | wfalse =>
+                      (match (eqi b (toU8 13)) motive (λ _ → U64)
+                        | wtrue => toU64 1
+                        | wfalse => toU64 0)))
+
+def jbHex : run internal Π (+ b : U8) → U64 :=
+  λ (+ b : U8) →
+    match (lti b (toU8 48)) motive (λ _ → U64)
+      | wtrue => toU64 255
+      | wfalse =>
+          (match (lti (toU8 57) b) motive (λ _ → U64)
+            | wtrue =>
+                (match (lti b (toU8 65)) motive (λ _ → U64)
+                  | wtrue => toU64 255
+                  | wfalse =>
+                      (match (lti (toU8 70) b) motive (λ _ → U64)
+                        | wtrue =>
+                            (match (lti b (toU8 97)) motive (λ _ → U64)
+                              | wtrue => toU64 255
+                              | wfalse =>
+                                  (match (lti (toU8 102) b) motive (λ _ → U64)
+                                    | wtrue => toU64 255| wfalse => asU64 (subi b (toU8 87))
+                                    ))| wfalse => asU64 (subi b (toU8 55))
+                        ))| wfalse => asU64 (subi b (toU8 48))
+            )
+
+def jbIsDig : run internal Π (+ b : U8) → U64 :=
+  λ (+ b : U8) →
+    match (lti b (toU8 48)) motive (λ _ → U64)
+      | wtrue => toU64 0
+      | wfalse =>
+          (match (lti (toU8 57) b) motive (λ _ → U64)
+            | wtrue => toU64 0
+            | wfalse => toU64 1)
+
+def jbNz : run internal Π (+ b : U8) → U64 :=
+  λ (+ b : U8) →
+    match (lti b (toU8 49)) motive (λ _ → U64)
+      | wtrue => toU64 0
+      | wfalse =>
+          (match (lti (toU8 57) b) motive (λ _ → U64)
+            | wtrue => toU64 0
+            | wfalse => toU64 1)
+
+def jbExp : run internal Π (+ b : U8) → U64 :=
+  λ (+ b : U8) →
+    match (eqi b (toU8 101)) motive (λ _ → U64)
+      | wtrue => toU64 1
+      | wfalse =>
+          (match (eqi b (toU8 69)) motive (λ _ → U64)
+            | wtrue => toU64 1
+            | wfalse => toU64 0)
+
+def jbTerm : run internal Π (+ b : U8) → U64 :=
+  λ (+ b : U8) →
+    match (eqi (jbWs b) (toU64 1)) motive (λ _ → U64)
+      | wtrue => toU64 1
+      | wfalse =>
+          (match (eqi b (toU8 44)) motive (λ _ → U64)
+            | wtrue => toU64 1
+            | wfalse =>
+                (match (eqi b (toU8 125)) motive (λ _ → U64)
+                  | wtrue => toU64 1
+                  | wfalse =>
+                      (match (eqi b (toU8 93)) motive (λ _ → U64)
+                        | wtrue => toU64 1
+                        | wfalse => toU64 0)))
+
+-- 1 shifted by i, for i at most 32. shli wants a Nat, and toNat of a
+-- U64 builds that many successors, so this doubles a word instead.
+def jbDbl : run internal Π (+ i : U64) → Π (acc : U64) → Π (r : Slice) → U64 :=
+  λ (+ i : U64) → λ (acc : U64) → λ (r : Slice) →
+    match (lti (subi (toU64 32) (addi (sliceLen r) (toU64 1))) i) motive (λ _ → U64)
+      | wtrue => muli acc (toU64 2)
+      | wfalse => acc
+
+def jbMask : run internal Π (+ i : U64) → U64 :=
+  λ (+ i : U64) →
+    sliceFold U64 (toU64 1)
+      (λ (_b : U8) → λ (r : Slice) → λ (acc : U64) → jbDbl i acc r)
+      b"................................"
+
+def jbWithBit : run internal Π (+ nest : U64) → Π (+ i : U64) → U64 :=
+  λ (+ nest : U64) → λ (+ i : U64) → ori nest (jbMask i)
+
+def jbNoBit : run internal Π (+ nest : U64) → Π (+ i : U64) → U64 :=
+  λ (+ nest : U64) → λ (+ i : U64) → andi nest (noti (jbMask i))
+
+def jbHasBit : run internal Π (+ nest : U64) → Π (+ i : U64) → U64 :=
+  λ (+ nest : U64) → λ (+ i : U64) →
+    match (eqi (andi nest (jbMask i)) (toU64 0)) motive (λ _ → U64)
+      | wtrue => toU64 0
+      | wfalse => toU64 1
+
+def jbTooDeep : run internal Π (+ d : U64) → U64 :=
+  λ (+ d : U64) →
+    match (lti (toU64 32) d) motive (λ _ → U64)
+      | wtrue => toU64 1
+      | wfalse => toU64 0
+
+def jbOpenGo : run internal Π (+ arr : U64) → Π (+ d : U64) → Π (+ bad : U64) → Π (+ nest : U64) → Π (+ key : U64) → Π (+ seen : U64) → Π (+ off : U64) → Π (+ len : U64) → JSt :=
+  λ (+ arr : U64) → λ (+ d : U64) → λ (+ bad : U64) → λ (+ nest : U64) → λ (+ key : U64) → λ (+ seen : U64) → λ (+ off : U64) → λ (+ len : U64) →
+    match (eqi (jbTooDeep d) (toU64 1)) motive (λ _ → JSt)
+      | wtrue => jbMk (toU64 1) (toU64 1) d nest (toU64 0) (toU64 0) (toU64 0) key seen off len (toU64 0) (toU64 0)
+      | wfalse =>
+          (match (eqi arr (toU64 1)) motive (λ _ → JSt)
+            | wtrue => jbMk (toU64 11) bad d (jbWithBit nest d) (toU64 0) (toU64 0) (toU64 0) key seen off len (toU64 0) (toU64 0)
+            | wfalse => jbMk (toU64 1) bad d (jbNoBit nest d) (toU64 0) (toU64 0) (toU64 0) key seen off len (toU64 0) (toU64 0))
+
+def jbOpen : run internal Π (+ arr : U64) → Π (+ st : JSt) → JSt :=
+  λ (+ arr : U64) → λ (+ st : JSt) →
+    match st motive (λ _ → JSt)
+      | jst _ph bad depth nest _aux _kpos _ink key seen off len _hex _gap =>
+          jbOpenGo arr (addi depth (toU64 1)) bad nest key seen off len
+
+def jbCloseGo : run internal Π (+ d0 : U64) → Π (+ bad : U64) → Π (+ nest : U64) → Π (+ key : U64) → Π (+ seen : U64) → Π (+ off : U64) → Π (+ len : U64) → JSt :=
+  λ (+ d0 : U64) → λ (+ bad : U64) → λ (+ nest : U64) → λ (+ key : U64) → λ (+ seen : U64) → λ (+ off : U64) → λ (+ len : U64) →
+    match (eqi d0 (toU64 0)) motive (λ _ → JSt)
+      | wtrue => jbMk (toU64 8) bad (toU64 0) nest (toU64 0) (toU64 0) (toU64 0) key seen off len (toU64 0) (toU64 0)
+      | wfalse => jbMk (toU64 7) bad d0 nest (toU64 0) (toU64 0) (toU64 0) key seen off len (toU64 0) (toU64 0)
+
+def jbClose : run internal Π (+ wantArr : U64) → Π (+ st : JSt) → JSt :=
+  λ (+ wantArr : U64) → λ (+ st : JSt) →
+    match st motive (λ _ → JSt)
+      | jst _ph bad depth nest _aux _kpos _ink key seen off len _hex _gap =>
+          (match (eqi depth (toU64 0)) motive (λ _ → JSt)
+            | wtrue => jbBad st
+            | wfalse =>
+                (match (eqi (jbHasBit nest depth) wantArr) motive (λ _ → JSt)
+                  | wtrue => jbCloseGo (subi depth (toU64 1)) bad nest key seen off len| wfalse => jbBad st
+                  ))
+
+def jbComma : run internal Π (+ st : JSt) → JSt :=
+  λ (+ st : JSt) →
+    match st motive (λ _ → JSt)
+      | jst _ph bad depth nest _aux _kpos _ink key seen off len _hex _gap =>
+          (match (eqi depth (toU64 0)) motive (λ _ → JSt)
+            | wtrue => jbBad st
+            | wfalse =>
+                (match (eqi (jbHasBit nest depth) (toU64 1)) motive (λ _ → JSt)
+                  | wtrue => jbMk (toU64 11) bad depth nest (toU64 0) (toU64 0) (toU64 0) key seen off len (toU64 0) (toU64 1)
+                  | wfalse => jbMk (toU64 1) bad depth nest (toU64 0) (toU64 0) (toU64 0) key seen off len (toU64 0) (toU64 1)))
+
+def jbBump : run internal Π (+ ink : U64) → Π (+ key : U64) → Π (+ depth : U64) → Π (+ len : U64) → U64 :=
+  λ (+ ink : U64) → λ (+ key : U64) → λ (+ depth : U64) → λ (+ len : U64) →
+    match (eqi ink (toU64 0)) motive (λ _ → U64)
+      | wtrue =>
+          (match (eqi key (toU64 1)) motive (λ _ → U64)
+            | wtrue =>
+                (match (eqi depth (toU64 1)) motive (λ _ → U64)
+                  | wtrue => addi len (toU64 1)
+                  | wfalse => len)| wfalse => len
+            )
+| wfalse => len
+      
+def jbKeyAt : run internal Π (+ i : U64) → U8 :=
+  λ (+ i : U64) →
+    match (eqi i (toU64 0)) motive (λ _ → U8)
+      | wtrue => toU8 116
+      | wfalse =>
+          (match (eqi i (toU64 1)) motive (λ _ → U8)
+            | wtrue => toU8 101
+            | wfalse =>
+                (match (eqi i (toU64 2)) motive (λ _ → U8)
+                  | wtrue => toU8 120
+                  | wfalse => toU8 116))
+
+def jbNextKey : run internal Π (+ kpos : U64) → Π (+ b : U8) → U64 :=
+  λ (+ kpos : U64) → λ (+ b : U8) →
+    match (lti kpos (toU64 4)) motive (λ _ → U64)
+      | wtrue =>
+          (match (eqi b (jbKeyAt kpos)) motive (λ _ → U64)
+            | wtrue => addi kpos (toU64 1)
+            | wfalse => toU64 99)
+      | wfalse => toU64 99
+
+def jbKeyCode : run internal Π (+ kpos : U64) → U64 :=
+  λ (+ kpos : U64) →
+    match (eqi kpos (toU64 4)) motive (λ _ → U64)
+      | wtrue => toU64 1
+      | wfalse => toU64 2
+
+def jbDup : run internal Π (+ kpos : U64) → Π (+ depth : U64) → Π (+ seen : U64) → U64 :=
+  λ (+ kpos : U64) → λ (+ depth : U64) → λ (+ seen : U64) →
+    match (eqi kpos (toU64 4)) motive (λ _ → U64)
+      | wtrue =>
+          (match (eqi depth (toU64 1)) motive (λ _ → U64)
+            | wtrue =>
+                (match (eqi seen (toU64 0)) motive (λ _ → U64)
+                  | wtrue => toU64 0
+                  | wfalse => toU64 1)| wfalse => toU64 0
+            )
+| wfalse => toU64 0
+      
+def jbNon : run internal Π (+ key : U64) → Π (+ depth : U64) → Π (+ seen : U64) → U64 :=
+  λ (+ key : U64) → λ (+ depth : U64) → λ (+ seen : U64) →
+    match (eqi key (toU64 1)) motive (λ _ → U64)
+      | wtrue =>
+          (match (eqi depth (toU64 1)) motive (λ _ → U64)
+            | wtrue =>
+                (match (eqi seen (toU64 0)) motive (λ _ → U64)
+                  | wtrue => toU64 3
+                  | wfalse => toU64 99)| wfalse => seen
+            )
+| wfalse => seen
+      
+def jbSaw : run internal Π (+ key : U64) → Π (+ depth : U64) → Π (+ len : U64) → Π (+ seen : U64) → U64 :=
+  λ (+ key : U64) → λ (+ depth : U64) → λ (+ len : U64) → λ (+ seen : U64) →
+    match (eqi key (toU64 1)) motive (λ _ → U64)
+      | wtrue =>
+          (match (eqi depth (toU64 1)) motive (λ _ → U64)
+            | wtrue =>
+                (match (eqi seen (toU64 0)) motive (λ _ → U64)
+                  | wtrue =>
+                      (match (eqi len (toU64 0)) motive (λ _ → U64)
+                        | wtrue => toU64 2
+                        | wfalse => toU64 1)
+                  | wfalse => toU64 99)| wfalse => seen
+            )
+| wfalse => seen
+      
+def jbSur : run internal Π (+ h : U64) → U64 :=
+  λ (+ h : U64) →
+    match (lti h (toU64 55296)) motive (λ _ → U64)
+      | wtrue => toU64 0
+      | wfalse =>
+          (match (lti (toU64 57343) h) motive (λ _ → U64)
+            | wtrue => toU64 0
+            | wfalse => toU64 1)
+
+def jbStrEsc : run internal Π (+ b : U8) → Π (+ st : JSt) → JSt :=
+  λ (+ b : U8) → λ (+ st : JSt) →
+    match st motive (λ _ → JSt)
+      | jst ph bad depth nest _aux kpos ink key seen off len hex gap =>
+          (match (eqi b (toU8 117)) motive (λ _ → JSt)
+            | wtrue => jbMk ph bad depth nest (toU64 2) kpos ink key seen off (jbBump ink key depth len) (toU64 0) gap
+            | wfalse =>
+                (match (eqi b (toU8 34)) motive (λ _ → JSt)
+                  | wtrue => jbMk ph bad depth nest (toU64 0) kpos ink key seen off (jbBump ink key depth len) hex gap
+                  | wfalse =>
+                      (match (eqi b (toU8 92)) motive (λ _ → JSt)
+                        | wtrue => jbMk ph bad depth nest (toU64 0) kpos ink key seen off (jbBump ink key depth len) hex gap
+                        | wfalse =>
+                            (match (eqi b (toU8 47)) motive (λ _ → JSt)
+                              | wtrue => jbMk ph bad depth nest (toU64 0) kpos ink key seen off (jbBump ink key depth len) hex gap
+                              | wfalse =>
+                                  (match (eqi b (toU8 98)) motive (λ _ → JSt)
+                                    | wtrue => jbMk ph bad depth nest (toU64 0) kpos ink key seen off (jbBump ink key depth len) hex gap
+                                    | wfalse =>
+                                        (match (eqi b (toU8 102)) motive (λ _ → JSt)
+                                          | wtrue => jbMk ph bad depth nest (toU64 0) kpos ink key seen off (jbBump ink key depth len) hex gap
+                                          | wfalse =>
+                                              (match (eqi b (toU8 110)) motive (λ _ → JSt)
+                                                | wtrue => jbMk ph bad depth nest (toU64 0) kpos ink key seen off (jbBump ink key depth len) hex gap
+                                                | wfalse =>
+                                                    (match (eqi b (toU8 114)) motive (λ _ → JSt)
+                                                      | wtrue => jbMk ph bad depth nest (toU64 0) kpos ink key seen off (jbBump ink key depth len) hex gap
+                                                      | wfalse =>
+                                                          (match (eqi b (toU8 116)) motive (λ _ → JSt)
+                                                            | wtrue => jbMk ph bad depth nest (toU64 0) kpos ink key seen off (jbBump ink key depth len) hex gap
+                                                            | wfalse => jbBad st)))))))))
+
+def jbStrHex : run internal Π (+ b : U8) → Π (+ st : JSt) → JSt :=
+  λ (+ b : U8) → λ (+ st : JSt) →
+    match st motive (λ _ → JSt)
+      | jst ph bad depth nest aux kpos ink key seen off len _hex gap =>
+          (match (eqi (jbHex b) (toU64 255)) motive (λ _ → JSt)
+            | wtrue => jbBad st
+            | wfalse =>
+                (match (eqi aux (toU64 5)) motive (λ _ → JSt)
+                  | wtrue =>
+                      (match (eqi (jbSur (addi (muli (jstHex st) (toU64 16)) (jbHex b))) (toU64 1)) motive (λ _ → JSt)
+                        | wtrue => jbBad st
+                        | wfalse => jbMk ph bad depth nest (toU64 0) kpos ink key seen off (jbBump ink key depth len) (toU64 0) gap)
+                  | wfalse => jbMk ph bad depth nest (addi aux (toU64 1)) kpos ink key seen off (jbBump ink key depth len) (addi (muli (jstHex st) (toU64 16)) (jbHex b)) gap))
+
+def jstHex : run internal Π (+ st : JSt) → U64 :=
+  λ (+ st : JSt) →
+    match st motive (λ _ → U64)
+      | jst _ph _bad _depth _nest _aux _kpos _ink _key _seen _off _len hex _gap => hex
+
+def jbStrNorm : run internal Π (+ b : U8) → Π (+ i : U64) → Π (+ st : JSt) → JSt :=
+  λ (+ b : U8) → λ (+ i : U64) → λ (+ st : JSt) →
+    match st motive (λ _ → JSt)
+      | jst _ph bad depth nest _aux kpos ink key seen off len hex gap =>
+          (match (eqi b (toU8 34)) motive (λ _ → JSt)
+            | wtrue =>
+                (match (eqi ink (toU64 1)) motive (λ _ → JSt)
+                  | wtrue =>
+                      (match (eqi (jbDup kpos depth seen) (toU64 1)) motive (λ _ → JSt)
+                        | wtrue => jbBad st
+                        | wfalse => jbMk (toU64 3) bad depth nest (toU64 0) (toU64 0) (toU64 0) (jbKeyCode kpos) seen off len hex gap)
+                  | wfalse =>
+                      (match (eqi (jbSaw key depth len seen) (toU64 99)) motive (λ _ → JSt)
+                        | wtrue => jbBad st
+                        | wfalse => jbMk (toU64 7) bad depth nest (toU64 0) (toU64 0) (toU64 0) key (jbSaw key depth len seen) off len hex gap))
+            | wfalse =>
+                (match (eqi b (toU8 92)) motive (λ _ → JSt)
+                  | wtrue =>
+                      (match (eqi ink (toU64 1)) motive (λ _ → JSt)
+                        | wtrue => jbMk (toU64 2) bad depth nest (toU64 1) (toU64 99) ink key seen off (jbBump ink key depth len) hex gap
+                        | wfalse => jbMk (toU64 2) bad depth nest (toU64 1) kpos ink key seen off (jbBump ink key depth len) hex gap)
+                  | wfalse =>
+                      (match (lti b (toU8 32)) motive (λ _ → JSt)
+                        | wtrue => jbBad st
+                        | wfalse =>
+                            (match (eqi ink (toU64 1)) motive (λ _ → JSt)
+                              | wtrue => jbMk (toU64 2) bad depth nest (toU64 0) (jbNextKey kpos b) ink key seen off len hex gap
+                              | wfalse => jbMk (toU64 2) bad depth nest (toU64 0) kpos ink key seen off (jbBump ink key depth len) hex gap))))
+
+def jbStr : run internal Π (+ b : U8) → Π (+ i : U64) → Π (+ st : JSt) → JSt :=
+  λ (+ b : U8) → λ (+ i : U64) → λ (+ st : JSt) →
+    match st motive (λ _ → JSt)
+      | jst _ph _bad _depth _nest aux _kpos _ink _key _seen _off _len _hex _gap =>
+          (match (eqi aux (toU64 1)) motive (λ _ → JSt)
+            | wtrue => jbStrEsc b st
+            | wfalse =>
+                (match (lti (toU64 1) aux) motive (λ _ → JSt)
+                  | wtrue => jbStrHex b st
+                  | wfalse => jbStrNorm b i st))
+
+def jbLitAt : run internal Π (+ aux : U64) → Π (+ kpos : U64) → U8 :=
+  λ (+ aux : U64) → λ (+ kpos : U64) →
+    match (eqi aux (toU64 2)) motive (λ _ → U8)
+      | wtrue =>
+          (match (eqi kpos (toU64 1)) motive (λ _ → U8)
+            | wtrue => toU8 97
+            | wfalse =>
+                (match (eqi kpos (toU64 2)) motive (λ _ → U8)
+                  | wtrue => toU8 108
+                  | wfalse =>
+                      (match (eqi kpos (toU64 3)) motive (λ _ → U8)
+                        | wtrue => toU8 115
+                        | wfalse => toU8 101)))
+      | wfalse =>
+          (match (eqi aux (toU64 3)) motive (λ _ → U8)
+            | wtrue =>
+                (match (eqi kpos (toU64 1)) motive (λ _ → U8)
+                  | wtrue => toU8 117
+                  | wfalse => toU8 108)
+            | wfalse =>
+                (match (eqi kpos (toU64 1)) motive (λ _ → U8)
+                  | wtrue => toU8 114
+                  | wfalse =>
+                      (match (eqi kpos (toU64 2)) motive (λ _ → U8)
+                        | wtrue => toU8 117
+                        | wfalse => toU8 101)))
+
+def jbLitLen : run internal Π (+ aux : U64) → U64 :=
+  λ (+ aux : U64) →
+    match (eqi aux (toU64 2)) motive (λ _ → U64)
+      | wtrue => toU64 5
+      | wfalse => toU64 4
+
+def jbLit : run internal Π (+ b : U8) → Π (+ st : JSt) → JSt :=
+  λ (+ b : U8) → λ (+ st : JSt) →
+    match st motive (λ _ → JSt)
+      | jst _ph bad depth nest aux kpos _ink key seen off len hex gap =>
+          (match (eqi b (jbLitAt aux kpos)) motive (λ _ → JSt)
+            | wtrue =>
+                (match (eqi (addi kpos (toU64 1)) (jbLitLen aux)) motive (λ _ → JSt)
+                  | wtrue => jbMk (toU64 7) bad depth nest (toU64 0) (addi kpos (toU64 1)) (toU64 0) key seen off len hex gap
+                  | wfalse => jbMk (toU64 6) bad depth nest aux (addi kpos (toU64 1)) (toU64 0) key seen off len hex gap)| wfalse => jbBad st
+            )
+
+def jbNum1 : run internal Π (+ b : U8) → U64 :=
+  λ (+ b : U8) →
+    match (eqi b (toU8 48)) motive (λ _ → U64)
+      | wtrue => toU64 2
+      | wfalse =>
+          (match (eqi (jbNz b) (toU64 1)) motive (λ _ → U64)
+            | wtrue => toU64 3
+            | wfalse => toU64 99)
+
+def jbNum2 : run internal Π (+ b : U8) → U64 :=
+  λ (+ b : U8) →
+    match (eqi b (toU8 46)) motive (λ _ → U64)
+      | wtrue => toU64 4
+      | wfalse =>
+          (match (eqi (jbExp b) (toU64 1)) motive (λ _ → U64)
+            | wtrue => toU64 6
+            | wfalse =>
+                (match (eqi (jbTerm b) (toU64 1)) motive (λ _ → U64)
+                  | wtrue => toU64 50
+                  | wfalse => toU64 99))
+
+def jbNum3 : run internal Π (+ b : U8) → U64 :=
+  λ (+ b : U8) →
+    match (eqi (jbIsDig b) (toU64 1)) motive (λ _ → U64)
+      | wtrue => toU64 3
+      | wfalse =>
+          (match (eqi b (toU8 46)) motive (λ _ → U64)
+            | wtrue => toU64 4
+            | wfalse =>
+                (match (eqi (jbExp b) (toU64 1)) motive (λ _ → U64)
+                  | wtrue => toU64 6
+                  | wfalse =>
+                      (match (eqi (jbTerm b) (toU64 1)) motive (λ _ → U64)
+                        | wtrue => toU64 50
+                        | wfalse => toU64 99)))
+
+def jbNum4 : run internal Π (+ b : U8) → U64 :=
+  λ (+ b : U8) →
+    match (eqi (jbIsDig b) (toU64 1)) motive (λ _ → U64)
+      | wtrue => toU64 5
+      | wfalse => toU64 99
+
+def jbNum5 : run internal Π (+ b : U8) → U64 :=
+  λ (+ b : U8) →
+    match (eqi (jbIsDig b) (toU64 1)) motive (λ _ → U64)
+      | wtrue => toU64 5
+      | wfalse =>
+          (match (eqi (jbExp b) (toU64 1)) motive (λ _ → U64)
+            | wtrue => toU64 6
+            | wfalse =>
+                (match (eqi (jbTerm b) (toU64 1)) motive (λ _ → U64)
+                  | wtrue => toU64 50
+                  | wfalse => toU64 99))
+
+def jbNum6 : run internal Π (+ b : U8) → U64 :=
+  λ (+ b : U8) →
+    match (eqi b (toU8 43)) motive (λ _ → U64)
+      | wtrue => toU64 7
+      | wfalse =>
+          (match (eqi b (toU8 45)) motive (λ _ → U64)
+            | wtrue => toU64 7
+            | wfalse =>
+                (match (eqi (jbIsDig b) (toU64 1)) motive (λ _ → U64)
+                  | wtrue => toU64 8
+                  | wfalse => toU64 99))
+
+def jbNum7 : run internal Π (+ b : U8) → U64 :=
+  λ (+ b : U8) →
+    match (eqi (jbIsDig b) (toU64 1)) motive (λ _ → U64)
+      | wtrue => toU64 8
+      | wfalse => toU64 99
+
+def jbNum8 : run internal Π (+ b : U8) → U64 :=
+  λ (+ b : U8) →
+    match (eqi (jbIsDig b) (toU64 1)) motive (λ _ → U64)
+      | wtrue => toU64 8
+      | wfalse =>
+          (match (eqi (jbTerm b) (toU64 1)) motive (λ _ → U64)
+            | wtrue => toU64 50
+            | wfalse => toU64 99)
+
+def jbNumAux : run internal Π (+ aux : U64) → Π (+ b : U8) → U64 :=
+  λ (+ aux : U64) → λ (+ b : U8) →
+    match (eqi aux (toU64 1)) motive (λ _ → U64)
+      | wtrue => jbNum1 b
+      | wfalse =>
+          (match (eqi aux (toU64 2)) motive (λ _ → U64)
+            | wtrue => jbNum2 b
+            | wfalse =>
+                (match (eqi aux (toU64 3)) motive (λ _ → U64)
+                  | wtrue => jbNum3 b
+                  | wfalse =>
+                      (match (eqi aux (toU64 4)) motive (λ _ → U64)
+                        | wtrue => jbNum4 b
+                        | wfalse =>
+                            (match (eqi aux (toU64 5)) motive (λ _ → U64)
+                              | wtrue => jbNum5 b
+                              | wfalse =>
+                                  (match (eqi aux (toU64 6)) motive (λ _ → U64)
+                                    | wtrue => jbNum6 b
+                                    | wfalse =>
+                                        (match (eqi aux (toU64 7)) motive (λ _ → U64)
+                                          | wtrue => jbNum7 b
+                                          | wfalse =>
+                                              (match (eqi aux (toU64 8)) motive (λ _ → U64)
+                                                | wtrue => jbNum8 b
+                                                | wfalse => toU64 99)))))))
+
+def jbAfter : run internal Π (+ b : U8) → Π (+ st : JSt) → JSt :=
+  λ (+ b : U8) → λ (+ st : JSt) →
+    match (eqi (jbWs b) (toU64 1)) motive (λ _ → JSt)
+      | wtrue => st
+      | wfalse =>
+          (match (eqi b (toU8 44)) motive (λ _ → JSt)
+            | wtrue => jbComma st
+            | wfalse =>
+                (match (eqi b (toU8 125)) motive (λ _ → JSt)
+                  | wtrue => jbClose (toU64 0) st
+                  | wfalse =>
+                      (match (eqi b (toU8 93)) motive (λ _ → JSt)
+                        | wtrue => jbClose (toU64 1) st
+                        | wfalse => jbBad st)))
+
+def jbNum : run internal Π (+ b : U8) → Π (+ st : JSt) → JSt :=
+  λ (+ b : U8) → λ (+ st : JSt) →
+    match st motive (λ _ → JSt)
+      | jst _ph bad depth nest aux _kpos _ink key seen off len hex gap =>
+          (match (eqi (jbNumAux aux b) (toU64 99)) motive (λ _ → JSt)
+            | wtrue => jbBad st
+            | wfalse =>
+                (match (eqi (jbNumAux aux b) (toU64 50)) motive (λ _ → JSt)
+                  | wtrue => jbAfter b (jbMk (toU64 7) bad depth nest (toU64 0) (toU64 0) (toU64 0) key seen off len hex gap)
+                  | wfalse => jbMk (toU64 5) bad depth nest (jbNumAux aux b) (toU64 0) (toU64 0) key seen off len hex gap))
+
+def jbUseNon : run internal Π (+ seen1 : U64) → Π (+ st : JSt) → JSt :=
+  λ (+ seen1 : U64) → λ (+ st : JSt) →
+    match st motive (λ _ → JSt)
+      | jst ph bad depth nest aux kpos ink key _seen off len hex gap =>
+          (match (eqi seen1 (toU64 99)) motive (λ _ → JSt)
+            | wtrue => jbBad st
+            | wfalse => jbMk ph bad depth nest aux kpos ink key seen1 off len hex gap)
+
+def jbValStart : run internal Π (+ b : U8) → Π (+ i : U64) → Π (+ st : JSt) → JSt :=
+  λ (+ b : U8) → λ (+ i : U64) → λ (+ st : JSt) →
+    match st motive (λ _ → JSt)
+      | jst _ph bad depth nest _aux _kpos _ink key seen off len hex _gap =>
+          (match (eqi b (toU8 34)) motive (λ _ → JSt)
+            | wtrue =>
+                (match (eqi (jbDup (toU64 4) depth seen) (toU64 1)) motive (λ _ → JSt)
+                  | wtrue =>
+                      (match (eqi key (toU64 1)) motive (λ _ → JSt)
+                        | wtrue => jbBad st
+                        | wfalse => jbMk (toU64 2) bad depth nest (toU64 0) (toU64 0) (toU64 0) key seen off len hex (toU64 0))
+                  | wfalse =>
+                      (match (eqi key (toU64 1)) motive (λ _ → JSt)
+                        | wtrue =>
+                            (match (eqi depth (toU64 1)) motive (λ _ → JSt)
+                              | wtrue => jbMk (toU64 2) bad depth nest (toU64 0) (toU64 0) (toU64 0) key seen (addi i (toU64 1)) (toU64 0) hex (toU64 0)
+                              | wfalse => jbMk (toU64 2) bad depth nest (toU64 0) (toU64 0) (toU64 0) key seen off len hex (toU64 0))
+                        | wfalse => jbMk (toU64 2) bad depth nest (toU64 0) (toU64 0) (toU64 0) key seen off len hex (toU64 0)))
+            | wfalse =>
+                (match (eqi b (toU8 123)) motive (λ _ → JSt)
+                  | wtrue => jbOpen (toU64 0) (jbUseNon (jbNon key depth seen) st)
+                  | wfalse =>
+                      (match (eqi b (toU8 91)) motive (λ _ → JSt)
+                        | wtrue => jbOpen (toU64 1) (jbUseNon (jbNon key depth seen) st)
+                        | wfalse =>
+                            (match (eqi b (toU8 45)) motive (λ _ → JSt)
+                              | wtrue => jbUseNon (jbNon key depth seen) (jbMk (toU64 5) bad depth nest (toU64 1) (toU64 0) (toU64 0) key seen off len hex (toU64 0))
+                              | wfalse =>
+                                  (match (eqi b (toU8 48)) motive (λ _ → JSt)
+                                    | wtrue => jbUseNon (jbNon key depth seen) (jbMk (toU64 5) bad depth nest (toU64 2) (toU64 0) (toU64 0) key seen off len hex (toU64 0))
+                                    | wfalse =>
+                                        (match (eqi (jbNz b) (toU64 1)) motive (λ _ → JSt)
+                                          | wtrue => jbUseNon (jbNon key depth seen) (jbMk (toU64 5) bad depth nest (toU64 3) (toU64 0) (toU64 0) key seen off len hex (toU64 0))
+                                          | wfalse =>
+                                              (match (eqi b (toU8 116)) motive (λ _ → JSt)
+                                                | wtrue => jbUseNon (jbNon key depth seen) (jbMk (toU64 6) bad depth nest (toU64 1) (toU64 1) (toU64 0) key seen off len hex (toU64 0))
+                                                | wfalse =>
+                                                    (match (eqi b (toU8 102)) motive (λ _ → JSt)
+                                                      | wtrue => jbUseNon (jbNon key depth seen) (jbMk (toU64 6) bad depth nest (toU64 2) (toU64 1) (toU64 0) key seen off len hex (toU64 0))
+                                                      | wfalse =>
+                                                          (match (eqi b (toU8 110)) motive (λ _ → JSt)
+                                                            | wtrue => jbUseNon (jbNon key depth seen) (jbMk (toU64 6) bad depth nest (toU64 3) (toU64 1) (toU64 0) key seen off len hex (toU64 0))
+                                                            | wfalse => jbBad st)))))))))
+
+-- jbDup (toU64 4) treats every depth-1 text key as a duplicate when
+-- seen is already set. A string value under some other key must not
+-- take that branch. The key==1 guard above is that check. A second
+-- text string hits key==1, depth==1, seen!=0, and jbDup returns 1.
+
+def jbVal : run internal Π (+ b : U8) → Π (+ i : U64) → Π (+ st : JSt) → JSt :=
+  λ (+ b : U8) → λ (+ i : U64) → λ (+ st : JSt) →
+    match (eqi (jbWs b) (toU64 1)) motive (λ _ → JSt)
+      | wtrue => st
+      | wfalse => jbValStart b i st
+
+def jbObj : run internal Π (+ b : U8) → Π (+ st : JSt) → JSt :=
+  λ (+ b : U8) → λ (+ st : JSt) →
+    match (eqi (jbWs b) (toU64 1)) motive (λ _ → JSt)
+      | wtrue => st
+      | wfalse =>
+          (match (eqi b (toU8 34)) motive (λ _ → JSt)
+            | wtrue =>
+                (match st motive (λ _ → JSt)
+                  | jst _ph bad depth nest _aux _kpos _ink key seen off len _hex _gap =>
+                      jbMk (toU64 2) bad depth nest (toU64 0) (toU64 0) (toU64 1) key seen off len (toU64 0) (toU64 0))
+            | wfalse =>
+                (match (eqi b (toU8 125)) motive (λ _ → JSt)
+                  | wtrue =>
+                      (match st motive (λ _ → JSt)
+                        | jst _ph _bad _depth _nest _aux _kpos _ink _key _seen _off _len _hex gap =>
+                            (match (eqi gap (toU64 1)) motive (λ _ → JSt)
+                              | wtrue => jbBad st
+                              | wfalse => jbClose (toU64 0) st))
+                  | wfalse => jbBad st))
+
+def jbArr : run internal Π (+ b : U8) → Π (+ i : U64) → Π (+ st : JSt) → JSt :=
+  λ (+ b : U8) → λ (+ i : U64) → λ (+ st : JSt) →
+    match (eqi (jbWs b) (toU64 1)) motive (λ _ → JSt)
+      | wtrue => st
+      | wfalse =>
+          (match (eqi b (toU8 93)) motive (λ _ → JSt)
+            | wtrue =>
+                (match st motive (λ _ → JSt)
+                  | jst _ph _bad _depth _nest _aux _kpos _ink _key _seen _off _len _hex gap =>
+                      (match (eqi gap (toU64 1)) motive (λ _ → JSt)
+                        | wtrue => jbBad st
+                        | wfalse => jbClose (toU64 1) st))
+            | wfalse => jbValStart b i st)
+
+def jbTop : run internal Π (+ b : U8) → Π (+ st : JSt) → JSt :=
+  λ (+ b : U8) → λ (+ st : JSt) →
+    match (eqi (jbWs b) (toU64 1)) motive (λ _ → JSt)
+      | wtrue => st
+      | wfalse =>
+          (match (eqi b (toU8 123)) motive (λ _ → JSt)
+            | wtrue => jbOpen (toU64 0) st
+            | wfalse => jbBad st)
+
+def jbColon : run internal Π (+ b : U8) → Π (+ st : JSt) → JSt :=
+  λ (+ b : U8) → λ (+ st : JSt) →
+    match (eqi (jbWs b) (toU64 1)) motive (λ _ → JSt)
+      | wtrue => st
+      | wfalse =>
+          (match (eqi b (toU8 58)) motive (λ _ → JSt)
+            | wtrue =>
+                (match st motive (λ _ → JSt)
+                  | jst _ph bad depth nest _aux _kpos _ink key seen off len hex _gap =>
+                      jbMk (toU64 4) bad depth nest (toU64 0) (toU64 0) (toU64 0) key seen off len hex (toU64 0))
+            | wfalse => jbBad st)
+
+def jbDone : run internal Π (+ b : U8) → Π (+ st : JSt) → JSt :=
+  λ (+ b : U8) → λ (+ st : JSt) →
+    match (eqi (jbWs b) (toU64 1)) motive (λ _ → JSt)
+      | wtrue => st
+      | wfalse => jbBad st
+
+def jbOn : run internal Π (+ b : U8) → Π (+ i : U64) → Π (+ st : JSt) → JSt :=
+  λ (+ b : U8) → λ (+ i : U64) → λ (+ st : JSt) →
+    match st motive (λ _ → JSt)
+      | jst ph bad _depth _nest _aux _kpos _ink _key _seen _off _len _hex _gap =>
+          (match (eqi bad (toU64 1)) motive (λ _ → JSt)
+            | wtrue => st
+            | wfalse =>
+                (match (eqi ph (toU64 0)) motive (λ _ → JSt)
+                  | wtrue => jbTop b st
+                  | wfalse =>
+                      (match (eqi ph (toU64 1)) motive (λ _ → JSt)
+                        | wtrue => jbObj b st
+                        | wfalse =>
+                            (match (eqi ph (toU64 2)) motive (λ _ → JSt)
+                              | wtrue => jbStr b i st
+                              | wfalse =>
+                                  (match (eqi ph (toU64 3)) motive (λ _ → JSt)
+                                    | wtrue => jbColon b st
+                                    | wfalse =>
+                                        (match (eqi ph (toU64 4)) motive (λ _ → JSt)
+                                          | wtrue => jbVal b i st
+                                          | wfalse =>
+                                              (match (eqi ph (toU64 5)) motive (λ _ → JSt)
+                                                | wtrue => jbNum b st
+                                                | wfalse =>
+                                                    (match (eqi ph (toU64 6)) motive (λ _ → JSt)
+                                                      | wtrue => jbLit b st
+                                                      | wfalse =>
+                                                          (match (eqi ph (toU64 7)) motive (λ _ → JSt)
+                                                            | wtrue => jbAfter b st
+                                                            | wfalse =>
+                                                                (match (eqi ph (toU64 8)) motive (λ _ → JSt)
+                                                                  | wtrue => jbDone b st
+                                                                  | wfalse =>
+                                                                      (match (eqi ph (toU64 11)) motive (λ _ → JSt)
+                                                                        | wtrue => jbArr b i st
+                                                                        | wfalse => jbBad st)))))))))))
+
+def jbIndex : run internal Π (+ s : Slice) → Π (+ r : Slice) → U64 :=
+  λ (+ s : Slice) → λ (+ r : Slice) →
+    subi (sliceLen s) (addi (sliceLen r) (toU64 1))
+
+def jbScan : run internal Π (+ s : Slice) → JSt :=
+  λ (+ s : Slice) →
+    sliceFold JSt jbBlank
+      (λ (b : U8) → λ (r : Slice) → λ (st : JSt) → jbOn b (jbIndex s r) st)
+      s
+
+def jbPh : run internal Π (+ st : JSt) → U64 :=
+  λ (+ st : JSt) →
+    match st motive (λ _ → U64)
+      | jst ph _bad _depth _nest _aux _kpos _ink _key _seen _off _len _hex _gap => ph
+
+def jbBadOf : run internal Π (+ st : JSt) → U64 :=
+  λ (+ st : JSt) →
+    match st motive (λ _ → U64)
+      | jst _ph bad _depth _nest _aux _kpos _ink _key _seen _off _len _hex _gap => bad
+
+def jbSeen : run internal Π (+ st : JSt) → U64 :=
+  λ (+ st : JSt) →
+    match st motive (λ _ → U64)
+      | jst _ph _bad _depth _nest _aux _kpos _ink _key seen _off _len _hex _gap => seen
+
+def jbOff : run internal Π (+ st : JSt) → U64 :=
+  λ (+ st : JSt) →
+    match st motive (λ _ → U64)
+      | jst _ph _bad _depth _nest _aux _kpos _ink _key _seen off _len _hex _gap => off
+
+def jbLen : run internal Π (+ st : JSt) → U64 :=
+  λ (+ st : JSt) →
+    match st motive (λ _ → U64)
+      | jst _ph _bad _depth _nest _aux _kpos _ink _key _seen _off len _hex _gap => len
+
+def jbTag : run internal Π (+ st : JSt) → U64 :=
+  λ (+ st : JSt) →
+    match (eqi (jbBadOf st) (toU64 1)) motive (λ _ → U64)
+      | wtrue => toU64 1
+      | wfalse =>
+          (match (eqi (jbPh st) (toU64 8)) motive (λ _ → U64)
+            | wtrue =>
+                (match (eqi (jbSeen st) (toU64 1)) motive (λ _ → U64)
+                  | wtrue => toU64 4
+                  | wfalse => toU64 2)| wfalse => toU64 1
+            )
+
+def bodyClass : run Π (+ s : Slice) → U64 :=
+  λ (+ s : Slice) →
+    match (eqi (sliceLen s) (toU64 0)) motive (λ _ → U64)
+      | wtrue => toU64 0
+      | wfalse =>
+          (match (lti (toU64 1024) (sliceLen s)) motive (λ _ → U64)
+            | wtrue => toU64 3
+            | wfalse => jbTag (jbScan s))
+
+def textOff : run Π (+ s : Slice) → U64 :=
+  λ (+ s : Slice) →
+    match (eqi (bodyClass s) (toU64 4)) motive (λ _ → U64)
+      | wtrue => jbOff (jbScan s)
+| wfalse => toU64 0
+      
+def textLen : run Π (+ s : Slice) → U64 :=
+  λ (+ s : Slice) →
+    match (eqi (bodyClass s) (toU64 4)) motive (λ _ → U64)
+      | wtrue => jbLen (jbScan s)
+      | wfalse => toU64 0
+
+-- The empty body and a body past the 1024-byte cap return before
+-- jbScan. Those two gates reduce. A refl that walks jbScan does not
+-- finish: one byte of the scanner blew the checker past 30 GB. The
+-- scan cases are checked by the emitted C tests in c/test_body.c.
+      
+def bc-empty : evidence {bodyClass b"" ≡ toU64 0 : U64} := refl
+
+def bc-off-empty : evidence {textOff b"" ≡ toU64 0 : U64} := refl
+
+def bc-len-empty : evidence {textLen b"" ≡ toU64 0 : U64} := refl
+
+-- 1025 bytes is past the cap, so bodyClass returns 3 and does not scan.
+def bc-long : evidence {bodyClass b"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx" ≡ toU64 3 : U64} := refl

@@ -89,8 +89,13 @@ This PR does not edit those generated clauses. CI does not pass
 `--warnings-as-errors`. `mix test` and `mix muro.gen --check` do not
 either.
 
-JSON body class is not this step. That is scope. `classify` returns
-`body-none` and the raw body `Slice`. No muro issue was opened.
+`classify` still returns `body-none` and the raw body `Slice`.
+`priv/muro/http/body.muro` is a separate book. It does not import
+`decide.muro` or `std:bool.muro`, because a `def` is a global C
+symbol (gap 6) and `conn.o` already emits those. `bodyClass` allocates
+0. Four equations reduce, all of them before the scan. A refl through
+`jbScan` does not finish. `c/test_body` checks the scanner. The host
+calls `bodyClass` only for `POST /posts`.
 
 ## The connection stepper, on muro 0.21.14
 
@@ -184,13 +189,15 @@ choose it. A read error closes the fd. It is not `evError`. That
 event holds in the read phase. A full receive buffer that the image
 did not consume is a host limit. Closing it is not a status.
 
-The db event is a stub. `GET /health` sends `db-ok`. Every other
-route sends `db-down`. Auth is `auth-absent`, the body is
-`body-none`, like is `like-none`, and the id is the classifier tag
-already on the connection. `db-unknown` would leave the image
-observing, and this host has no second fact, so it does not send
-`db-unknown`. `db-down` here means there is no database. It does not
-mean a query failed. If the image asks again, the host closes.
+The db event carries real facts. The first ask passes `db-unknown`
+and `like-unknown`, with auth, body, and the classifier's id already
+filled. Auth is the HS256 class of the `Authorization` value. The
+body class for `POST /posts` is the emitted `bodyClass`, after the
+host has turned a bad unescape or bad UTF-8 into `body-malformed`.
+`decide` returns `act-observe` when a query is still required. The
+host then runs one SQLite statement and passes the terminal facts.
+`id-present` is that lookup. A failed open, or a failed statement,
+is `db-down`. If the image asks a third time, the host closes.
 
 ## The response bytes are emitted
 
@@ -214,19 +221,25 @@ feature that would remove the copy is still gap 6.
 That arm exists so the function has no hole. `act-health` is the body
 `ok`. `act-error` is the error token (`not-found`, `malformed`,
 `missing-bearer`, `db`, and the rest). `act-observe` is the body
-`observe`. Any other act is an empty body. Those acts would be rows.
-The book does not invent them. `keep` of 1 is `Connection: close`.
-Any other keep is `Connection: keep-alive`. Each suffix literal
-carries its own `Content-Length`.
+`observe`. Acts 1 through 5 append the row argument and a decimal
+`Content-Length`. The book does not build the JSON. The host does.
+Any other act is an empty text body. `keep` of 1 is
+`Connection: close`. Any other keep is `Connection: keep-alive`.
+Each fixed suffix literal carries its own `Content-Length`. The row
+suffix prints the length of the row.
 
 muro checks eight equations by reduction (`refl`): health with
 keep-alive, health with close, malformed, missing-bearer, not-found,
-db, an empty feed body, and code 7 with the health act. That last
-one is the total arm: status 500 and body `ok`. Evidence is not a
-run. `c/test_render` checks all eight reduction strings in the
-emitted C, and checks that `Content-Length` matches the body for
-codes 0..7, errors 0..12, acts 0..7, and both keep values (1664
-renders). That sweep is a test.
+db, an empty row (`application/json`, length 0), and code 7 with the
+health act. That last one is the total arm: status 500 and body
+`ok`. Evidence is not a run. The decimal walk for a positive length
+does not finish, so `[]` and a ten-byte row are not equations.
+`c/test_render` checks the eight reduction strings and those two
+rows in the emitted C, and checks that `Content-Length` matches the
+body for codes 0..7, errors 0..12, acts 0..7, and both keep values
+(1664 renders). That sweep is a test. On this pin, health render
+allocates 2, an empty row allocates 5, a two-byte row allocates 8,
+and a ten-byte row allocates 10.
 
 `render.h` defines the same prelude as `conn.h`. `c/host.c` does not
 include it. `c/host_render.c` includes the emitted header and copies

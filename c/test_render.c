@@ -1,9 +1,9 @@
-/* Check the emitted response bytes. The equations in render.muro are
-   reduction evidence (refl) for the strings they name. This driver
-   checks those eight strings in the C image and checks Content-Length
-   for every tag combination. The _Static_asserts below only pin
-   decision_tags.h to itself. emitted_tags_match calls the generated
-   *From helpers. */
+/* Check the emitted response bytes. Eight equations in render.muro
+   are reduction evidence (refl). This driver checks those strings,
+   plus a two-byte row and a ten-byte row. Those two reductions do
+   not finish. It also checks Content-Length for every tag
+   combination. The _Static_asserts below only pin decision_tags.h
+   to itself. emitted_tags_match calls the generated *From helpers. */
 
 #include "shim.h"
 #include "render.h"
@@ -70,8 +70,8 @@ static int content_length(const muro__slice s, size_t *cl, size_t *body) {
 }
 
 static void expect_eq(const char *name, uint64_t code, uint64_t err, uint64_t act, uint64_t keep,
-                      const char *lit) {
-  muro__slice s = httpRender(code, err, act, keep);
+                      const uint8_t *row, size_t row_n, const char *lit) {
+  muro__slice s = httpRender(code, err, act, keep, muro__slice_of(row, row_n));
   size_t n = strlen(lit);
   if (s.n != n || memcmp(s.p, lit, n) != 0) {
     fprintf(stderr, "FAIL %s: got %zu bytes\n", name, s.n);
@@ -96,35 +96,41 @@ static const char *line_of(unsigned code) {
 int main(void) {
   unsigned code, err, act, keep;
   if (!emitted_tags_match()) return 1;
-  expect_eq("health-keep", 0, 0, 0, 0,
+  expect_eq("health-keep", 0, 0, 0, 0, NULL, 0,
             "HTTP/1.1 200 OK\r\nConnection: keep-alive\r\nContent-Length: 2\r\n"
             "Content-Type: text/plain; charset=utf-8\r\n\r\nok");
-  expect_eq("health-close", 0, 0, 0, 1,
+  expect_eq("health-close", 0, 0, 0, 1, NULL, 0,
             "HTTP/1.1 200 OK\r\nConnection: close\r\nContent-Length: 2\r\n"
             "Content-Type: text/plain; charset=utf-8\r\n\r\nok");
-  expect_eq("malformed", 2, 7, 6, 1,
+  expect_eq("malformed", 2, 7, 6, 1, NULL, 0,
             "HTTP/1.1 400 Bad Request\r\nConnection: close\r\nContent-Length: 9\r\n"
             "Content-Type: text/plain; charset=utf-8\r\n\r\nmalformed");
-  expect_eq("missing-bearer", 3, 4, 6, 0,
+  expect_eq("missing-bearer", 3, 4, 6, 0, NULL, 0,
             "HTTP/1.1 401 Unauthorized\r\nConnection: keep-alive\r\nContent-Length: 14\r\n"
             "Content-Type: text/plain; charset=utf-8\r\n\r\nmissing-bearer");
-  expect_eq("not-found", 4, 1, 6, 0,
+  expect_eq("not-found", 4, 1, 6, 0, NULL, 0,
             "HTTP/1.1 404 Not Found\r\nConnection: keep-alive\r\nContent-Length: 9\r\n"
             "Content-Type: text/plain; charset=utf-8\r\n\r\nnot-found");
-  expect_eq("db", 6, 11, 6, 1,
+  expect_eq("db", 6, 11, 6, 1, NULL, 0,
             "HTTP/1.1 503 Service Unavailable\r\nConnection: close\r\nContent-Length: 2\r\n"
             "Content-Type: text/plain; charset=utf-8\r\n\r\ndb");
-  expect_eq("empty-feed", 0, 0, 1, 0,
+  expect_eq("empty-row", 0, 0, 1, 0, NULL, 0,
             "HTTP/1.1 200 OK\r\nConnection: keep-alive\r\nContent-Length: 0\r\n"
-            "Content-Type: text/plain; charset=utf-8\r\n\r\n");
-  expect_eq("code-out-of-range", 7, 0, 0, 0,
+            "Content-Type: application/json; charset=utf-8\r\n\r\n");
+  expect_eq("feed-empty", 0, 0, 1, 0, (const uint8_t *)"[]", 2,
+            "HTTP/1.1 200 OK\r\nConnection: keep-alive\r\nContent-Length: 2\r\n"
+            "Content-Type: application/json; charset=utf-8\r\n\r\n[]");
+  expect_eq("row-ten", 0, 0, 2, 0, (const uint8_t *)"1234567890", 10,
+            "HTTP/1.1 200 OK\r\nConnection: keep-alive\r\nContent-Length: 10\r\n"
+            "Content-Type: application/json; charset=utf-8\r\n\r\n1234567890");
+  expect_eq("code-out-of-range", 7, 0, 0, 0, NULL, 0,
             "HTTP/1.1 500 Internal Server Error\r\nConnection: keep-alive\r\nContent-Length: 2\r\n"
             "Content-Type: text/plain; charset=utf-8\r\n\r\nok");
   for (code = 0; code < 8; code++) {
     for (err = 0; err < 13; err++) {
       for (act = 0; act < 8; act++) {
         for (keep = 0; keep < 2; keep++) {
-          muro__slice s = httpRender(code, err, act, keep);
+          muro__slice s = httpRender(code, err, act, keep, muro__slice_empty());
           size_t cl = 0;
           size_t body = 0;
           if (!starts(s, line_of(code))) bad("status line");

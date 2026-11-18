@@ -14,8 +14,10 @@
 -- err: 0 none, 1 not-found, 2 invalid-id, 3 post-missing,
 -- 4 missing-bearer, 5 bad-token, 6 bad-payload, 7 malformed,
 -- 8 body-required, 9 body-long, 10 internal, 11 db, 12 observe.
--- act: 0 health, 6 error, 7 observe. Any other act has an empty body.
--- Those acts would be rows. This book does not invent them.
+-- act: 0 health, 6 error, 7 observe. Acts 1 through 5 are rows.
+-- The row argument is those body bytes. Content-Length is the decimal
+-- length of that argument. This book does not choose the status and
+-- does not invent a row. Any other act is an empty text body.
 -- keep: 1 sends Connection: close. Any other value sends keep-alive.
 --
 -- Each suffix literal carries its own Content-Length. The length is
@@ -93,8 +95,90 @@ def httpErrSuffix : run Π (+ err : U64) → Bytes :=
                                                                               | wtrue => b"Content-Length: 7\r\nContent-Type: text/plain; charset=utf-8\r\n\r\nobserve"
                                                                               | wfalse => b"Content-Length: 5\r\nContent-Type: text/plain; charset=utf-8\r\n\r\nerror"))))))))))))
 
-def httpSuffix : run Π (+ act : U64) → Π (+ err : U64) → Bytes :=
-  λ (+ act : U64) → λ (+ err : U64) →
+-- One decimal digit. remi 10 is 0 through 9. The last arm is total.
+def rdDigit : run internal Π (+ d : U64) → Bytes :=
+  λ (+ d : U64) →
+    match (eqi d (toU64 0)) motive (λ _ → Bytes)
+      | wtrue => b"0"
+      | wfalse =>
+          (match (eqi d (toU64 1)) motive (λ _ → Bytes)
+            | wtrue => b"1"
+            | wfalse =>
+                (match (eqi d (toU64 2)) motive (λ _ → Bytes)
+                  | wtrue => b"2"
+                  | wfalse =>
+                      (match (eqi d (toU64 3)) motive (λ _ → Bytes)
+                        | wtrue => b"3"
+                        | wfalse =>
+                            (match (eqi d (toU64 4)) motive (λ _ → Bytes)
+                              | wtrue => b"4"
+                              | wfalse =>
+                                  (match (eqi d (toU64 5)) motive (λ _ → Bytes)
+                                    | wtrue => b"5"
+                                    | wfalse =>
+                                        (match (eqi d (toU64 6)) motive (λ _ → Bytes)
+                                          | wtrue => b"6"
+                                          | wfalse =>
+                                              (match (eqi d (toU64 7)) motive (λ _ → Bytes)
+                                                | wtrue => b"7"
+                                                | wfalse =>
+                                                    (match (eqi d (toU64 8)) motive (λ _ → Bytes)
+                                                      | wtrue => b"8"
+                                                      | wfalse => b"9"))))))))
+
+-- Boxed: an unboxed field cannot hold Bytes. Each step of a positive
+-- length allocates one Dec. Length 0 returns the literal and does not.
+data Dec : Type where
+  dec : Π (+ n : U64) → Π (+ out : Bytes) → Dec
+
+-- Least-significant digit first, prepended, twenty steps. A U64 has
+-- at most twenty digits. Once n is 0 the rest of the steps hold.
+def rdStep : run internal Π (+ st : Dec) → Dec :=
+  λ (+ st : Dec) →
+    match st motive (λ _ → Dec)
+      | dec n out =>
+          (match (eqi n (toU64 0)) motive (λ _ → Dec)
+            | wtrue =>
+                (match (eqi (bytesLen out) (toU64 0)) motive (λ _ → Dec)
+                  | wtrue => dec (toU64 0) b"0"
+                  | wfalse => st)
+            | wfalse =>
+                (match (divi n (toU64 10)) motive (λ _ → Dec)
+                  | wsome q =>
+                      (match (remi n (toU64 10)) motive (λ _ → Dec)
+                        | wsome d => dec q (bytesCat (rdDigit d) out)
+                        | wnone => dec (toU64 0) b"0")
+                  | wnone => dec (toU64 0) b"0"))
+
+-- Zero is the literal 0. A positive length walks twenty steps.
+-- Reducing that walk does not finish, so the equations below do not
+-- call it. c/test_render checks a two-byte row and a ten-byte row.
+def rdShow : run internal Π (+ n : U64) → Bytes :=
+  λ (+ n : U64) →
+    match (eqi n (toU64 0)) motive (λ _ → Bytes)
+      | wtrue => b"0"
+      | wfalse =>
+          (match (sliceFold Dec (dec n b"")
+                  (λ (_b : U8) → λ (_r : Slice) → λ (st : Dec) → rdStep st)
+                  b"....................") motive (λ _ → Bytes)
+            | dec _m out => out)
+
+-- Acts 1 through 5. 0 is health. 6 is an error. 7 is observe.
+def rdIsRow : run internal Π (+ act : U64) → U64 :=
+  λ (+ act : U64) →
+    match (lti (toU64 0) act) motive (λ _ → U64)
+      | wtrue =>
+          (match (lti act (toU64 6)) motive (λ _ → U64)
+            | wtrue => toU64 1
+            | wfalse => toU64 0)
+      | wfalse => toU64 0
+
+def rdRowSuffix : run internal Π (+ row : Bytes) → Bytes :=
+  λ (+ row : Bytes) →
+    bytesCat (bytesCat (bytesCat b"Content-Length: " (rdShow (bytesLen row))) b"\r\nContent-Type: application/json; charset=utf-8\r\n\r\n") row
+
+def httpSuffix : run Π (+ act : U64) → Π (+ err : U64) → Π (+ row : Bytes) → Bytes :=
+  λ (+ act : U64) → λ (+ err : U64) → λ (+ row : Bytes) →
     match (eqi act (toU64 0)) motive (λ _ → Bytes)
       | wtrue => b"Content-Length: 2\r\nContent-Type: text/plain; charset=utf-8\r\n\r\nok"
       | wfalse =>
@@ -103,52 +187,55 @@ def httpSuffix : run Π (+ act : U64) → Π (+ err : U64) → Bytes :=
             | wfalse =>
                 (match (eqi act (toU64 7)) motive (λ _ → Bytes)
                   | wtrue => b"Content-Length: 7\r\nContent-Type: text/plain; charset=utf-8\r\n\r\nobserve"
-                  | wfalse => b"Content-Length: 0\r\nContent-Type: text/plain; charset=utf-8\r\n\r\n"))
+                  | wfalse =>
+                      (match (eqi (rdIsRow act) (toU64 1)) motive (λ _ → Bytes)
+                        | wtrue => rdRowSuffix row
+                        | wfalse => b"Content-Length: 0\r\nContent-Type: text/plain; charset=utf-8\r\n\r\n")))
 
 def httpJoin : run Π (+ line : Bytes) → Π (+ conn : Bytes) → Π (+ suffix : Bytes) → Bytes :=
   λ (+ line : Bytes) → λ (+ conn : Bytes) → λ (+ suffix : Bytes) →
     bytesCat (bytesCat line conn) suffix
 
-def httpRender : run Π (+ code : U64) → Π (+ err : U64) → Π (+ act : U64) → Π (+ keep : U64) → Bytes :=
-  λ (+ code : U64) → λ (+ err : U64) → λ (+ act : U64) → λ (+ keep : U64) →
-    httpJoin (httpLine code) (httpConn keep) (httpSuffix act err)
+def httpRender : run Π (+ code : U64) → Π (+ err : U64) → Π (+ act : U64) → Π (+ keep : U64) → Π (+ row : Bytes) → Bytes :=
+  λ (+ code : U64) → λ (+ err : U64) → λ (+ act : U64) → λ (+ keep : U64) → λ (+ row : Bytes) →
+    httpJoin (httpLine code) (httpConn keep) (httpSuffix act err row)
 
 def render-health-keep : evidence
-  {httpRender (toU64 0) (toU64 0) (toU64 0) (toU64 0)
+  {httpRender (toU64 0) (toU64 0) (toU64 0) (toU64 0) b""
     ≡ b"HTTP/1.1 200 OK\r\nConnection: keep-alive\r\nContent-Length: 2\r\nContent-Type: text/plain; charset=utf-8\r\n\r\nok"
     : Bytes} := refl
 
 def render-health-close : evidence
-  {httpRender (toU64 0) (toU64 0) (toU64 0) (toU64 1)
+  {httpRender (toU64 0) (toU64 0) (toU64 0) (toU64 1) b""
     ≡ b"HTTP/1.1 200 OK\r\nConnection: close\r\nContent-Length: 2\r\nContent-Type: text/plain; charset=utf-8\r\n\r\nok"
     : Bytes} := refl
 
 def render-malformed : evidence
-  {httpRender (toU64 2) (toU64 7) (toU64 6) (toU64 1)
+  {httpRender (toU64 2) (toU64 7) (toU64 6) (toU64 1) b""
     ≡ b"HTTP/1.1 400 Bad Request\r\nConnection: close\r\nContent-Length: 9\r\nContent-Type: text/plain; charset=utf-8\r\n\r\nmalformed"
     : Bytes} := refl
 
 def render-unauthorized : evidence
-  {httpRender (toU64 3) (toU64 4) (toU64 6) (toU64 0)
+  {httpRender (toU64 3) (toU64 4) (toU64 6) (toU64 0) b""
     ≡ b"HTTP/1.1 401 Unauthorized\r\nConnection: keep-alive\r\nContent-Length: 14\r\nContent-Type: text/plain; charset=utf-8\r\n\r\nmissing-bearer"
     : Bytes} := refl
 
 def render-not-found : evidence
-  {httpRender (toU64 4) (toU64 1) (toU64 6) (toU64 0)
+  {httpRender (toU64 4) (toU64 1) (toU64 6) (toU64 0) b""
     ≡ b"HTTP/1.1 404 Not Found\r\nConnection: keep-alive\r\nContent-Length: 9\r\nContent-Type: text/plain; charset=utf-8\r\n\r\nnot-found"
     : Bytes} := refl
 
 def render-db-down : evidence
-  {httpRender (toU64 6) (toU64 11) (toU64 6) (toU64 1)
+  {httpRender (toU64 6) (toU64 11) (toU64 6) (toU64 1) b""
     ≡ b"HTTP/1.1 503 Service Unavailable\r\nConnection: close\r\nContent-Length: 2\r\nContent-Type: text/plain; charset=utf-8\r\n\r\ndb"
     : Bytes} := refl
 
 def render-empty-row : evidence
-  {httpRender (toU64 0) (toU64 0) (toU64 1) (toU64 0)
-    ≡ b"HTTP/1.1 200 OK\r\nConnection: keep-alive\r\nContent-Length: 0\r\nContent-Type: text/plain; charset=utf-8\r\n\r\n"
+  {httpRender (toU64 0) (toU64 0) (toU64 1) (toU64 0) b""
+    ≡ b"HTTP/1.1 200 OK\r\nConnection: keep-alive\r\nContent-Length: 0\r\nContent-Type: application/json; charset=utf-8\r\n\r\n"
     : Bytes} := refl
 
 def render-code-out-of-range : evidence
-  {httpRender (toU64 7) (toU64 0) (toU64 0) (toU64 0)
+  {httpRender (toU64 7) (toU64 0) (toU64 0) (toU64 0) b""
     ≡ b"HTTP/1.1 500 Internal Server Error\r\nConnection: keep-alive\r\nContent-Length: 2\r\nContent-Type: text/plain; charset=utf-8\r\n\r\nok"
     : Bytes} := refl

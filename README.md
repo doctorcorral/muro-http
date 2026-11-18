@@ -160,30 +160,81 @@ writes it, reports `evProgress` for the bytes the socket took, then
 `more` say where the next request starts. The host does not read the
 socket while a response is in progress.
 
-Host facts are fixed stubs. They are not a database. `GET /health`
-is `db-ok`. Health does not read a row. Every other route is
-`db-down`, which means there is no database. It does not mean a query
-failed. Auth is `auth-absent`. The body is `body-none`. Like is
-`like-none`. The id tag is the classifier's tag. `id-present` and
-`id-missing` are not supplied. If decide asks a second time, the host
-closes. It does not invent another fact.
+Host facts come from the request, from SQLite, and from an HS256
+check. The host computes those facts and performs the act `decide`
+returns. It does not choose a move, a status, or a body.
 
-Flags `--port`, `--idle-ms`, and `--max-connections` override
-`MURO_HTTP_PORT`, `MURO_HTTP_IDLE_MS`, and `MURO_HTTP_MAX_CONNECTIONS`.
-The defaults are port 8080, 5000 ms, and 128 connections. Port 0
-prints `listening 127.0.0.1 <port>`. SIGINT and SIGTERM close the
-sockets and exit 0.
+`GET /health` and `GET /feed` query when `decide` returns
+`act-observe`. `POST /posts` queries only after auth is `auth-ok` and
+the body class is `body-ok`. `GET /posts/:id` and
+`POST /posts/:id/like` query when the id is still `id-unknown`. One
+query sets the terminal db, id, and like facts together. A later ask
+closes the socket. `id-present` is that completed lookup. The host
+does not pair it with `db-down`. If the write fails after the lookup
+was going to report `id-present`, the host sends `db-down` and leaves
+the id unknown.
 
-`c/test_e2e` starts that binary on an ephemeral port and checks
+The database is SQLite, one connection, `SQLITE_OPEN_NOMUTEX`.
+`--db` or `MURO_HTTP_DB` is the path. The default is `:memory:`.
+Tables are `posts(id INTEGER PRIMARY KEY AUTOINCREMENT, text TEXT NOT
+NULL)` and `likes(post_id INTEGER NOT NULL, sub TEXT NOT NULL,
+PRIMARY KEY(post_id, sub))`. A path that cannot be opened leaves the
+process listening. Every db fact is then `db-down`, and stderr says
+`muro-httpd: database is unavailable`.
+
+The JWT key is `--jwt-key` or `MURO_HTTP_JWT_KEY`. The flag wins.
+The bytes are the HMAC key, at most 256. A longer key exits 2. An
+empty key checks no bearer: a presented token is `auth-bad-token`,
+and a missing header stays `auth-absent`. The value must be `Bearer `
+plus three base64url segments. `alg` must be `HS256`. `none` and any
+other alg are `auth-bad-token`. The MAC compare is constant-time.
+The signature is checked before the payload. `sub` is a non-empty
+string of at most 128 bytes. `exp` and `nbf`, when present, are JSON
+integers compared with `time(NULL)`. A bad `sub`, `exp`, or `nbf` is
+`auth-bad-payload`. The test key `muro-http-test-key` lives in the
+test sources. It is not a server default.
+
+`BodyClass` for `POST /posts` is the emitted `bodyClass`. Other
+routes pass `body-none`. A class of `body-ok` is unescaped and
+checked as UTF-8 before the first `decide`. A bad escape or
+ill-formed UTF-8 becomes `body-malformed`. That change is a fact.
+
+Row acts pass the row bytes into `httpRender`. The book prints the
+decimal `Content-Length` and concatenates the row. The host builds
+the JSON. Feed is a JSON array ordered by id. Read and create are
+`{"id":N,"text":"..."}`. Like is `{"id":N,"likes":M}`. The same
+subject twice is `like-new` (201) and then `like-again` (200), and
+the count stays 1. Acts 0, 6, and 7 ignore the row.
+
+Flags `--port`, `--idle-ms`, `--max-connections`, `--db`, and
+`--jwt-key` override `MURO_HTTP_PORT`, `MURO_HTTP_IDLE_MS`,
+`MURO_HTTP_MAX_CONNECTIONS`, `MURO_HTTP_DB`, and `MURO_HTTP_JWT_KEY`.
+The defaults are port 8080, 5000 ms, 128 connections, `:memory:`, and
+no key. Port 0 prints `listening 127.0.0.1 <port>`. SIGINT and
+SIGTERM close the sockets and exit 0. The process binds `127.0.0.1`
+only.
+
+`c/test_e2e` starts that binary on an ephemeral port. It checks
 `GET /health`, a malformed request, two requests on one connection, a
 pipelined pair, `Connection: close`, an idle timeout, a peer FIN
 mid-request, a body that arrives after the headers, a response the
 socket takes in more than one write, the connection cap, and a
-receive buffer that fills before the image consumes it. Those are
-tests. The reduction equations in `render.muro` are the reduction
-evidence (refl) for the strings they name. `c/test_render` checks
-the emitted C against all eight of those strings, and checks
-that `Content-Length` matches the body for every tag combination it
+receive buffer that fills before the image consumes it. It also
+checks each challenge route: a good JWT, a bad signature, `alg`
+`none`, a missing bearer, a bad payload, a missing and a present id,
+a like and the same like again, valid and invalid JSON, and a
+database path that cannot be opened. The child drops
+`MURO_HTTP_DB` and `MURO_HTTP_JWT_KEY` and passes `--db` and
+`--jwt-key`, so a developer environment does not change the result.
+Those are tests.
+
+The reduction equations in `render.muro` are the reduction evidence
+(refl) for the strings they name. There are eight. `render-empty-row`
+is an empty row: `application/json` and `Content-Length: 0`.
+`c/test_render` checks those eight strings, plus `[]` and a ten-byte
+row. The checker does not finish a reduction that walks the decimal
+printer for a positive length. The same driver checks that
+`Content-Length` matches the body for every tag combination it
 sweeps (1664 renders). That sweep is a test.
 
 muro 0.21.15 and 0.21.16 add a temporal check and a synthesis cover.
@@ -218,20 +269,45 @@ FIN. A piece is answered and the connection ends, so this end does
 not read again. Conforms and meets in the book check keep, close,
 timeout, a bad request, half-close, bare FIN, and a chunk.
 
-## What this step does not do
+## What is emitted, and what is host code
 
-- JWT HMAC verification. The classifier records the raw `Authorization`
-  value. `AuthClass` is a host input to `decide`, carried on the db
-  event.
-- JSON body class. A POST body is the raw `Slice` plus the length.
-  `BodyClass` from `classify` is `body-none`. The db event carries the
-  host's body class.
-- The id integer, and SQLite. The stubs above are `db-down` for every
-  route except `GET /health`. They are not stored rows.
-- Row bytes. `act-feed`, `act-read`, `act-create`, and the like acts
-  render an empty body. `httpRender` does not invent a row.
-- A bind address other than `127.0.0.1`.
-- A wrapped `U64` in `addCap`. The driver reports a delta of 8.
+`--backend c` emits `request.muro` (classify, `authValue`, `bodyView`,
+`idNumber`), `decide.muro`, `conn.muro`, `session.muro`, `admit.muro`,
+`render.muro` (`httpRender`, the decimal `Content-Length`, and the
+row bytes on the end of the response), and `body.muro` (`bodyClass`,
+`textOff`, `textLen`).
+
+Hand-written: `c/host.c`, `c/host_poll.c`, and `c/httpd.c` (sockets,
+kqueue or epoll, the fact loop); `c/store.c` (SQLite); `c/jwt.c`
+(SHA-256, HMAC-SHA256, base64url, the HS256 check); `c/json_text.c`
+(string unescape, the UTF-8 check, and the row JSON); `c/host_body.c`
+(the call into `bodyClass`). `body.h` and `conn.h` both define the
+prelude, so the socket loop includes neither `body.h` nor `render.h`.
+
+## Limits
+
+- The process binds `127.0.0.1` only.
+- `addCap` still wraps a `U64`. The driver reports a delta of 8.
+- `bc-empty`, `bc-off-empty`, `bc-len-empty`, and `bc-long` reduce.
+  They return before `jbScan`. A refl that walks the scanner does not
+  finish. One byte of that scan took the checker past 30 GB.
+  `c/test_body.c` checks the scanner.
+- `render-empty-row` reduces. A positive `Content-Length` walks twenty
+  steps of a boxed `Dec`, and that reduction does not finish.
+  `c/test_render` checks `[]` and a ten-byte row in the emitted C.
+- The body book accepts any octet inside a JSON string, including a
+  byte that is not UTF-8. The host turns that `body-ok` into
+  `body-malformed` before `decide`. A `\u` surrogate
+  (U+D800 through U+DFFF) is malformed in the book. Surrogate pairs
+  are not decoded.
+- A JWT claim name longer than 32 bytes is rejected. Header and
+  payload JSON are decoded into a 4096-byte buffer.
+- The row buffer is 65536 bytes and the write buffer is 69632. A row
+  or a response that does not fit closes the socket. That close is a
+  host limit. A create that already inserted the row still closes.
+  The image's write range stays length 16. The host sends the rendered
+  buffer, then `evDone`.
+- An authorization value longer than 16384 bytes is `auth-bad-token`.
 
 ## Check
 
@@ -280,7 +356,12 @@ The driver prints `OK` and allocation counts. `methodView`,
 `targetView`, `pathView`, and `versionView` allocate 0. On muro
 0.21.14, as on 0.20.42, `classify` of `GET /health` allocates 1 and
 `classify` of `POST /posts` with a two-byte body allocates 1. That
-object is the `Classified` result. See `GAPS.md`.
+object is the `Classified` result. See `GAPS.md`. `bodyClass`,
+`textOff`, and `textLen` allocate 0, including on a 1024-byte body.
+`httpRender` of the health act allocates 2. An empty row act
+allocates 5. A two-byte row allocates 8. A ten-byte row allocates 10.
+Those counts are the bump arena on this pin. The host copies the
+slice and resets the arena.
 Method, path, authorization, and body views still point at the
 original buffer, or at the out-of-range empty when the span is absent.
 

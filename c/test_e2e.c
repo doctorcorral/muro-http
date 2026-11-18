@@ -16,6 +16,10 @@
 
 static int failures;
 static const char *bin_path = "c/muro-httpd";
+/* Child flags. The test key is not a server default. */
+static const char *srv_db = ":memory:";
+static const char *srv_jwt = NULL;
+static int last_json;
 
 static void fail(const char *name, const char *what) {
   fprintf(stderr, "FAIL %s: %s\n", name, what);
@@ -46,17 +50,35 @@ static pid_t start_server(int idle_ms, int max_conn, int *port, const char *writ
     return -1;
   }
   if (pid == 0) {
+    char *av[16];
+    int argc = 0;
+    const char *db = srv_db && srv_db[0] ? srv_db : ":memory:";
     alarm(0);
     if (dup2(sp[1], STDOUT_FILENO) < 0) _exit(127);
     close(sp[0]);
     close(sp[1]);
     snprintf(idle, sizeof idle, "%d", idle_ms);
     snprintf(maxc, sizeof maxc, "%d", max_conn);
+    unsetenv("MURO_HTTP_DB");
+    unsetenv("MURO_HTTP_JWT_KEY");
     if (write_limit && write_limit[0]) setenv("MURO_TEST_WRITE_LIMIT", write_limit, 1);
     if (write_log && write_log[0]) setenv("MURO_TEST_WRITE_LOG", write_log, 1);
     if (in_cap && in_cap[0]) setenv("MURO_TEST_IN_CAP", in_cap, 1);
-    execl(bin_path, "muro-httpd", "--port", "0", "--idle-ms", idle, "--max-connections", maxc,
-          (char *)NULL);
+    av[argc++] = "muro-httpd";
+    av[argc++] = "--port";
+    av[argc++] = "0";
+    av[argc++] = "--idle-ms";
+    av[argc++] = idle;
+    av[argc++] = "--max-connections";
+    av[argc++] = maxc;
+    av[argc++] = "--db";
+    av[argc++] = (char *)db;
+    if (srv_jwt && srv_jwt[0]) {
+      av[argc++] = "--jwt-key";
+      av[argc++] = (char *)srv_jwt;
+    }
+    av[argc] = NULL;
+    execv(bin_path, av);
     perror("exec");
     _exit(127);
   }
@@ -204,6 +226,7 @@ static int read_response(int fd, char *buf, size_t cap, size_t have, size_t *use
         if (sscanf(buf, "HTTP/1.1 %d", &code) != 1) return -1;
         *status = code;
         *conn_close = memmem(buf, (size_t)hend, "Connection: close", 17) != NULL;
+        last_json = memmem(buf, (size_t)hend, "Content-Type: application/json", 30) != NULL;
         if ((size_t)cl > body_cap) return -1;
         memcpy(body, buf + hend + 4, (size_t)cl);
         body[(size_t)cl] = 0;
@@ -245,8 +268,8 @@ static int expect_eof(int fd) {
 static int check_one(int port, const char *name, const char *req, int want_status, const char *want_body,
                      int want_close, int want_eof) {
   int fd = dial(port);
-  char buf[4096];
-  char body[256];
+  char buf[8192];
+  char body[4096];
   size_t body_n = 0;
   size_t used = 0;
   int status = 0;
@@ -274,6 +297,7 @@ static int check_one(int port, const char *name, const char *req, int want_statu
     fprintf(stderr, "FAIL %s: body '%s'\n", name, body);
     failures += 1;
   }
+  if (body_n > 0 && (body[0] == '{' || body[0] == '[') && !last_json) fail(name, "content-type");
   if (conn_close != want_close) fail(name, want_close ? "wanted close" : "wanted keep-alive");
   if (want_eof) {
     if (!expect_eof(fd)) fail(name, "expected eof");
@@ -671,12 +695,181 @@ static void check_partial_send(void) {
   if (stop_server(pid) < 0) return;
 }
 
+/* HS256 fixtures signed with the test key muro-http-test-key. */
+static const char tok_ada[] =
+    "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJhZGEifQ.3KE6Im9uhSMiXa5L1JtMwmzrpKhdX6M3BvI4x3brFts";
+static const char tok_exp[] =
+    "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJhZGEiLCJleHAiOjk5OTk5OTk5OTl9.Epjenj7XS31B0sLSJP-s-TiWA-YPjZ5NC6IhmtQKqB0";
+static const char tok_nbf[] =
+    "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJhZGEiLCJuYmYiOjF9.BH2rRpEPRSrkyv8B4BUpQODlzBSGPofoKu-_vTsIIwE";
+static const char tok_exp_only[] =
+    "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJleHAiOjF9.6O0vDw5xVpA0Vc5reohZXUgr71QOA86t3Yd4R7QHPyg";
+static const char tok_empty_sub[] =
+    "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIifQ.3cHkEIQwrbEhQ0j2DFdg1fDQV24zE0me48Cvz9_oZSM";
+static const char tok_sub_num[] =
+    "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOjF9.aQRXrUwRnMtL8wGhhFGC3iMJElpzIx6mkvG99u0Mxzw";
+static const char tok_expired[] =
+    "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJhZGEiLCJleHAiOjF9.x6mPeg8JrI4FpgdQ5GgdiH0Ba__Ig0COpNp_LIZu0NU";
+static const char tok_nbf_far[] =
+    "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJhZGEiLCJuYmYiOjk5OTk5OTk5OTl9.uAiBGBuaNzU9ec4vg5IwpVrAF4Syhl4HmKZQp_SZATg";
+static const char tok_none[] =
+    "eyJhbGciOiJub25lIiwidHlwIjoiSldUIn0.eyJzdWIiOiJhZGEifQ.8NI1blacf6p2nNGEpD22a4xFD8e3zVHm1ClUuEbbzGs";
+static const char tok_bad[] =
+    "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJhZGEifQ.3KE6Im9uhSMiXa5L1JtMwmzrpKhdX6M3BvI4x3brFtA";
+
+static void post_json(char *dst, size_t cap, const char *token, const char *json) {
+  if (token && token[0]) {
+    snprintf(dst, cap,
+             "POST /posts HTTP/1.1\r\nAuthorization: Bearer %s\r\nContent-Length: %zu\r\n\r\n%s",
+             token, strlen(json), json);
+  } else {
+    snprintf(dst, cap, "POST /posts HTTP/1.1\r\nContent-Length: %zu\r\n\r\n%s", strlen(json), json);
+  }
+}
+
+static void post_like(char *dst, size_t cap, const char *id, const char *token) {
+  if (token && token[0]) {
+    snprintf(dst, cap, "POST /posts/%s/like HTTP/1.1\r\nAuthorization: Bearer %s\r\n\r\n", id, token);
+  } else {
+    snprintf(dst, cap, "POST /posts/%s/like HTTP/1.1\r\n\r\n", id);
+  }
+}
+
+static void check_routes(int port) {
+  char req[4096];
+  char longbody[1200];
+  post_json(req, sizeof req, NULL, "{}");
+  check_one(port, "post-no-auth", req, 401, "missing-bearer", 0, 0);
+  post_json(req, sizeof req, tok_bad, "{\"text\":\"hi\"}");
+  check_one(port, "post-bad-token", req, 401, "bad-token", 0, 0);
+  post_json(req, sizeof req, tok_none, "{\"text\":\"hi\"}");
+  check_one(port, "post-alg-none", req, 401, "bad-token", 0, 0);
+  snprintf(req, sizeof req,
+           "POST /posts HTTP/1.1\r\nAuthorization: bearer %s\r\nContent-Length: 13\r\n\r\n"
+           "{\"text\":\"hi\"}",
+           tok_ada);
+  check_one(port, "post-lower-bearer", req, 401, "bad-token", 0, 0);
+  check_one(port, "post-empty-bearer",
+            "POST /posts HTTP/1.1\r\nAuthorization: Bearer \r\nContent-Length: 13\r\n\r\n"
+            "{\"text\":\"hi\"}",
+            401, "bad-token", 0, 0);
+  post_json(req, sizeof req, tok_empty_sub, "{\"text\":\"hi\"}");
+  check_one(port, "post-empty-sub", req, 401, "bad-payload", 0, 0);
+  post_json(req, sizeof req, tok_sub_num, "{\"text\":\"hi\"}");
+  check_one(port, "post-sub-num", req, 401, "bad-payload", 0, 0);
+  post_json(req, sizeof req, tok_expired, "{\"text\":\"hi\"}");
+  check_one(port, "post-expired", req, 401, "bad-payload", 0, 0);
+  post_json(req, sizeof req, tok_nbf_far, "{\"text\":\"hi\"}");
+  check_one(port, "post-nbf", req, 401, "bad-payload", 0, 0);
+  post_json(req, sizeof req, tok_exp_only, "{\"text\":\"hi\"}");
+  check_one(port, "post-no-sub", req, 401, "bad-payload", 0, 0);
+  post_json(req, sizeof req, tok_ada, "{}");
+  check_one(port, "post-empty-obj", req, 400, "body-required", 0, 0);
+  post_json(req, sizeof req, tok_ada, "{");
+  check_one(port, "post-trunc", req, 400, "malformed", 0, 0);
+  post_json(req, sizeof req, tok_ada, "{\"text\":\"\"}");
+  check_one(port, "post-empty-text", req, 400, "body-required", 0, 0);
+  post_json(req, sizeof req, tok_ada, "{\"text\":1}");
+  check_one(port, "post-num", req, 400, "body-required", 0, 0);
+  post_json(req, sizeof req, tok_ada, "{\"a\":{\"text\":\"hi\"}}");
+  check_one(port, "post-nested", req, 400, "body-required", 0, 0);
+  post_json(req, sizeof req, tok_ada, "{\"\\u0074ext\":\"hi\"}");
+  check_one(port, "post-key-esc", req, 400, "body-required", 0, 0);
+  post_json(req, sizeof req, tok_ada, "{\"text\":\"a\",\"text\":\"b\"}");
+  check_one(port, "post-dup", req, 400, "malformed", 0, 0);
+  post_json(req, sizeof req, tok_ada, "{\"text\":\"\\uD800\"}");
+  check_one(port, "post-surrogate", req, 400, "malformed", 0, 0);
+  post_json(req, sizeof req, tok_ada, "{\"text\":\"hi\"}x");
+  check_one(port, "post-trail", req, 400, "malformed", 0, 0);
+  post_json(req, sizeof req, tok_ada, "{\"text\":\"hi\",}");
+  check_one(port, "post-comma", req, 400, "malformed", 0, 0);
+  post_json(req, sizeof req, tok_ada, "{\"text\":\"\xff\"}");
+  check_one(port, "post-utf8", req, 400, "malformed", 0, 0);
+  post_json(req, sizeof req, tok_ada, "{\"text\":\"\n\"}");
+  check_one(port, "post-control", req, 400, "malformed", 0, 0);
+  memset(longbody, 'x', sizeof longbody);
+  memcpy(longbody, "{\"text\":\"", 9);
+  memcpy(longbody + 9 + 1100, "\"}", 2);
+  longbody[9 + 1100 + 2] = 0;
+  post_json(req, sizeof req, tok_ada, longbody);
+  if (strlen(longbody) <= 1024) fail("post-long", "fixture");
+  check_one(port, "post-long", req, 400, "body-long", 0, 0);
+  post_json(req, sizeof req, tok_ada, "{\"text\":\"hi\"}");
+  check_one(port, "create", req, 201, "{\"id\":1,\"text\":\"hi\"}", 0, 0);
+  post_json(req, sizeof req, tok_exp, "{\"text\":\"\\u0041\"}");
+  check_one(port, "create-exp", req, 201, "{\"id\":2,\"text\":\"A\"}", 0, 0);
+  post_json(req, sizeof req, tok_nbf, "{\"text\":\"a\\\"b\"}");
+  check_one(port, "create-nbf", req, 201, "{\"id\":3,\"text\":\"a\\\"b\"}", 0, 0);
+  check_one(port, "read-1", "GET /posts/1 HTTP/1.1\r\n\r\n", 200, "{\"id\":1,\"text\":\"hi\"}", 0, 0);
+  check_one(port, "read-2", "GET /posts/2 HTTP/1.1\r\n\r\n", 200, "{\"id\":2,\"text\":\"A\"}", 0, 0);
+  check_one(port, "read-missing", "GET /posts/9 HTTP/1.1\r\n\r\n", 404, "post-missing", 0, 0);
+  check_one(port, "read-zero", "GET /posts/0 HTTP/1.1\r\n\r\n", 400, "invalid-id", 0, 0);
+  check_one(port, "read-pad", "GET /posts/01 HTTP/1.1\r\n\r\n", 400, "invalid-id", 0, 0);
+  check_one(port, "get-posts", "GET /posts HTTP/1.1\r\n\r\n", 404, "not-found", 0, 0);
+  post_like(req, sizeof req, "1", NULL);
+  check_one(port, "like-no-auth", req, 401, "missing-bearer", 0, 0);
+  post_like(req, sizeof req, "1", tok_bad);
+  check_one(port, "like-bad-token", req, 401, "bad-token", 0, 0);
+  post_like(req, sizeof req, "0", tok_ada);
+  check_one(port, "like-bad-id", req, 400, "invalid-id", 0, 0);
+  post_like(req, sizeof req, "1", tok_ada);
+  check_one(port, "like-new", req, 201, "{\"id\":1,\"likes\":1}", 0, 0);
+  post_like(req, sizeof req, "1", tok_ada);
+  check_one(port, "like-again", req, 200, "{\"id\":1,\"likes\":1}", 0, 0);
+  post_like(req, sizeof req, "9", tok_ada);
+  check_one(port, "like-missing", req, 404, "post-missing", 0, 0);
+  check_one(port, "feed-rows", "GET /feed HTTP/1.1\r\n\r\n", 200,
+            "[{\"id\":1,\"text\":\"hi\"},{\"id\":2,\"text\":\"A\"},{\"id\":3,\"text\":\"a\\\"b\"}]", 0, 0);
+  check_one(port, "post-health", "POST /health HTTP/1.1\r\n\r\n", 404, "not-found", 0, 0);
+  check_one(port, "post-feed", "POST /feed HTTP/1.1\r\n\r\n", 404, "not-found", 0, 0);
+  check_one(port, "get-like", "GET /posts/1/like HTTP/1.1\r\n\r\n", 404, "not-found", 0, 0);
+  check_one(port, "put-health", "PUT /health HTTP/1.1\r\n\r\n", 404, "not-found", 0, 0);
+  snprintf(req, sizeof req, "GET /health HTTP/1.1\r\nAuthorization: Bearer %s\r\n\r\n", tok_bad);
+  check_one(port, "health-bad-auth", req, 200, "ok", 0, 0);
+}
+
+static void check_db_down(void) {
+  pid_t pid;
+  int port = -1;
+  char req[1024];
+  srv_db = "/no/such/directory/muro-http.db";
+  pid = start_server(10000, 4, &port, NULL, NULL, NULL);
+  srv_db = ":memory:";
+  if (pid < 0) return;
+  check_one(port, "down-health", "GET /health HTTP/1.1\r\n\r\n", 503, "db", 0, 0);
+  check_one(port, "down-feed", "GET /feed HTTP/1.1\r\n\r\n", 500, "internal", 0, 0);
+  post_json(req, sizeof req, tok_ada, "{\"text\":\"hi\"}");
+  check_one(port, "down-create", req, 500, "internal", 0, 0);
+  check_one(port, "down-read", "GET /posts/1 HTTP/1.1\r\n\r\n", 500, "internal", 0, 0);
+  post_like(req, sizeof req, "1", tok_ada);
+  check_one(port, "down-like", req, 500, "internal", 0, 0);
+  if (stop_server(pid) < 0) return;
+}
+
+static void check_no_key(void) {
+  pid_t pid;
+  int port = -1;
+  char req[1024];
+  const char *saved = srv_jwt;
+  srv_jwt = NULL;
+  pid = start_server(10000, 4, &port, NULL, NULL, NULL);
+  srv_jwt = saved;
+  if (pid < 0) return;
+  check_one(port, "nokey-health", "GET /health HTTP/1.1\r\n\r\n", 200, "ok", 0, 0);
+  post_json(req, sizeof req, tok_ada, "{\"text\":\"hi\"}");
+  check_one(port, "nokey-token", req, 401, "bad-token", 0, 0);
+  check_one(port, "nokey-absent", "POST /posts HTTP/1.1\r\nContent-Length: 2\r\n\r\n{}", 401,
+            "missing-bearer", 0, 0);
+  if (stop_server(pid) < 0) return;
+}
+
 int main(int argc, char **argv) {
   pid_t pid;
   int port = -1;
   if (argc > 1) bin_path = argv[1];
   signal(SIGPIPE, SIG_IGN);
-  alarm(90);
+  alarm(180);
+  srv_jwt = "muro-http-test-key";
   pid = start_server(10000, 16, &port, NULL, NULL, NULL);
   if (pid < 0) return 1;
   check_one(port, "health", "GET /health HTTP/1.1\r\n\r\n", 200, "ok", 0, 0);
@@ -685,11 +878,12 @@ int main(int argc, char **argv) {
   check_one(port, "close", "GET /health HTTP/1.1\r\nConnection: close\r\n\r\n", 200, "ok", 1, 1);
   check_one(port, "malformed", "GET/feed HTTP/1.1\r\n\r\n", 400, "malformed", 1, 1);
   check_fin(port);
-  check_one(port, "feed", "GET /feed HTTP/1.1\r\n\r\n", 500, "internal", 0, 0);
+  check_one(port, "feed", "GET /feed HTTP/1.1\r\n\r\n", 200, "[]", 0, 0);
   check_one(port, "missing", "GET /missing HTTP/1.1\r\n\r\n", 404, "not-found", 0, 0);
   check_one(port, "post", "POST /posts HTTP/1.1\r\nContent-Length: 2\r\n\r\n{}", 401, "missing-bearer",
             0, 0);
   check_split_body(port);
+  check_routes(port);
   check_full_buffer();
   if (stop_server(pid) < 0) return 1;
   pid = start_server(300, 16, &port, NULL, NULL, NULL);
@@ -699,6 +893,8 @@ int main(int argc, char **argv) {
   if (stop_server(pid) < 0) return 1;
   check_max_conn();
   check_partial_send();
+  check_db_down();
+  check_no_key();
   if (failures != 0) {
     fprintf(stderr, "%d failures\n", failures);
     return 1;

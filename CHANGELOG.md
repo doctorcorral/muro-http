@@ -2,29 +2,42 @@
 
 ## 0.1.0-dev — unreleased
 
+- `priv/muro/http/body.muro` is `bodyClass`, `textOff`, and
+  `textLen`. `--backend c` emits them. Four equations reduce: the
+  empty body, and a body past 1024 bytes, all of which return before
+  the scan. A refl that walks the scanner does not finish.
+  `c/test_body` checks the scanner, and checks that those calls
+  allocate 0. The host unescapes a `body-ok` value and rejects
+  ill-formed UTF-8 before `decide`.
 - `priv/muro/http/render.muro` is the HTTP/1.1 response bytes.
-  `--backend c` emits `httpRender`. The host copies that slice and
-  writes it. It does not choose the status or the body. Eight
-  equations are reduction evidence (`refl`). `c/test_render` checks
-  all eight strings, the emitted `*From` tag helpers, and
-  `Content-Length` for 1664 tag combinations. That sweep is a test.
-  The `_Static_assert`s in that driver only pin `c/decision_tags.h`
-  to itself. The book does not import `decide.muro`
-  (see `GAPS.md`, gap 6). Acts that would be rows render an empty
-  body.
+  `--backend c` emits `httpRender`, now with the row bytes. The host
+  copies that slice and writes it. It does not choose the status or
+  the body. Eight equations are reduction evidence (`refl`), including
+  an empty row (`application/json`, `Content-Length: 0`). A positive
+  length walks the decimal printer, and that reduction does not
+  finish. `c/test_render` checks the eight strings, `[]`, a ten-byte
+  row, the emitted `*From` tag helpers, and `Content-Length` for 1664
+  tag combinations. That sweep is a test. The `_Static_assert`s in
+  that driver only pin `c/decision_tags.h` to itself. The book does
+  not import `decide.muro` (see `GAPS.md`, gap 6). Health render
+  allocates 2. An empty row allocates 5. A two-byte row allocates 8.
+  A ten-byte row allocates 10.
 - `c/muro-httpd` is a hand-written loop. It binds `127.0.0.1`, waits
   with kqueue or epoll, and feeds bytes, peer eof, write progress,
-  write done, write error, and an idle tick through `proto_admit`
-  and `step`. A refusal closes the socket. Host facts are stubs:
-  `GET /health` is `db-ok`, every other route is `db-down`, auth is
-  absent, the body is unclassified, and the id is the classifier
-  tag. There is no database. `c/test_e2e` checks health, a malformed
-  request, keep-alive, a pipeline, `Connection: close`, the idle
-  timeout, a peer FIN mid-request, a split body, a short write, the
-  connection cap, and a full receive buffer. Those are tests. A failed
-  connection watch closes that socket. A failed listen watch stops
-  the process. muro 0.21.15
-  and 0.21.16 are not useful here. The pin stays 0.21.14.
+  write done, write error, an idle tick, and db facts through
+  `proto_admit` and `step`. A refusal closes the socket. Facts are
+  SQLite rows, an HS256 check of the `Authorization` value (key from
+  `--jwt-key` or `MURO_HTTP_JWT_KEY`, constant-time MAC compare), and
+  the emitted body class. The host builds the row JSON. `c/test_e2e`
+  checks health, a malformed request, keep-alive, a pipeline,
+  `Connection: close`, the idle timeout, a peer FIN mid-request, a
+  split body, a short write, the connection cap, a full receive
+  buffer, and every challenge route against a live database,
+  including a path that cannot be opened. `c/test_jwt`, `c/test_json`,
+  and `c/test_store` check the hand-written pieces. Those are tests.
+  A failed connection watch closes that socket. A failed listen watch
+  stops the process. muro 0.21.15 and 0.21.16 are not useful here.
+  The pin stays 0.21.14. The library version stays `0.1.0-dev`.
 - `priv/muro/http/admit.muro` is the event-to-move map. `--backend c`
   emits it as `admitChoice`. `c/proto.c` applies that offer and calls
   the stepper. It does not choose the moves. `c/admit_glue.c` unpacks

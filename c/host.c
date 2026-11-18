@@ -2,7 +2,8 @@
    The image is conn.step. The moves are proto_admit, which applies
    the emitted admitChoice. This file does not choose a move, a
    status, or a response. It feeds bytes, peer eof, write progress,
-   write done, write error, an idle tick, and one stub db event.
+   write done, write error, an idle tick, and db events whose facts
+   come from the request, the JWT check, and SQLite.
    It performs the action the image returns.
 
    c/generated/render.h cannot sit in this file. It and conn.h both
@@ -16,6 +17,10 @@
 #include "host.h"
 #include "host_poll.h"
 #include "host_render.h"
+#include "host_body.h"
+#include "jwt.h"
+#include "json_text.h"
+#include "store.h"
 
 #include <arpa/inet.h>
 #include <errno.h>
@@ -46,7 +51,8 @@ enum {
   EV_EOF = 1,
   EV_DB = 6,
   IN_CAP = 65536,
-  OUT_CAP = 2048,
+  OUT_CAP = 69632,
+  ROW_CAP = 65536,
   PUMP_FUSE = 100000
 };
 
@@ -90,14 +96,31 @@ typedef struct Slot {
   int want_read;
   int want_write;
   int rendered;
-  int db_sent;
+  int fact_live;
+  int fact_queried;
   Proto *proto;
   Conn st;
   uint8_t *in;
   size_t in_len;
-  uint8_t out[OUT_CAP];
+  uint8_t *out;
+  size_t out_cap;
   size_t out_len;
   size_t out_off;
+  uint8_t *row;
+  size_t row_cap;
+  size_t row_len;
+  int row_ok;
+  uint64_t f_auth;
+  uint64_t f_body;
+  uint64_t f_like;
+  uint64_t f_db;
+  uint64_t f_idc;
+  int64_t f_idn;
+  uint8_t f_sub[128];
+  size_t f_sub_n;
+  uint8_t f_text[1024];
+  size_t f_text_n;
+  int f_text_ok;
   uint64_t deadline;
 } Slot;
 
@@ -113,6 +136,9 @@ typedef struct Server {
   const char *write_log;
   size_t in_cap;
   uint64_t armed_deadline;
+  Store *store;
+  uint8_t jwt_key[256];
+  size_t jwt_key_len;
 } Server;
 
 static int set_nb_cloexec(int fd) {
@@ -211,31 +237,170 @@ static void close_slot(Server *sv, Slot *s) {
   close(s->fd);
   proto_free(s->proto);
   free(s->in);
+  free(s->out);
+  free(s->row);
   memset(s, 0, sizeof *s);
   s->fd = -1;
   if (sv->nconn > 0) sv->nconn -= 1;
   (void)sync_listen(sv);
 }
 
-/* Stub facts. Not a decision and not a database.
-   auth-absent: this host does not check a bearer token.
-   body-none: classify does not parse JSON, and this host does not either.
-   like-none: there is no like table.
-   id is the classifier tag already stored on the connection.
-   id-present and id-missing are not supplied.
-   GET /health gets db-ok. Health does not read a row. The process is up.
-   Every other route gets db-down. db-unknown would leave the image
-   observing, and this host has no second fact. */
-static void stub_facts(const Slot *s, uint64_t *auth, uint64_t *body, uint64_t *like,
-                       uint64_t *db, uint64_t *idc) {
+/* First facts, before any query. db and like stay unknown so decide
+   can ask for the query. A post body that classifies as body-ok is
+   unescaped here. A bad escape or bad UTF-8 is body-malformed, which
+   is a fact, not a status. Returns 0 when the request span is not in
+   the buffer. */
+static int take_facts(Server *sv, Slot *s) {
+  uint64_t end = field(s->st, 13);
   uint64_t verb = field(s->st, 3);
   uint64_t path = field(s->st, 4);
-  *auth = AUTH_ABSENT;
-  *body = BODY_NONE;
-  *like = LIKE_NONE;
-  *idc = field(s->st, 5);
-  if (verb == VERB_GET && path == PATH_HEALTH) *db = DB_OK;
-  else *db = DB_DOWN;
+  uint64_t idc = field(s->st, 5);
+  muro__slice req;
+  muro__slice av;
+  AuthMark *mark;
+  uint8_t authbuf[16384];
+  size_t authn = 0;
+  if (end == 0 || end > (uint64_t)s->in_len) return 0;
+  req = muro__slice_of(s->in, (size_t)end);
+  mark = authMark(req);
+  av = authValue(req);
+  if (av.n > sizeof authbuf) {
+    s->f_auth = AUTH_BAD_TOKEN;
+    s->f_sub_n = 0;
+  } else if (!mark || mark->muro__field_tag == 0) {
+    s->f_auth = AUTH_ABSENT;
+    s->f_sub_n = 0;
+  } else {
+    JwtResult jr;
+    if (av.n && av.p) memcpy(authbuf, av.p, av.n);
+    authn = av.n;
+    jwt_classify(authbuf, authn, sv->jwt_key, sv->jwt_key_len, (int64_t)time(NULL), &jr);
+    s->f_auth = (uint64_t)jr.auth;
+    s->f_sub_n = jr.sub_n;
+    if (jr.sub_n) memcpy(s->f_sub, jr.sub, jr.sub_n);
+  }
+  s->f_body = BODY_NONE;
+  s->f_text_ok = 0;
+  s->f_text_n = 0;
+  if (verb == VERB_POST && path == PATH_POSTS) {
+    muro__slice body = bodyView(req);
+    uint64_t cls = host_body_class(body.p, body.n);
+    if (cls == BODY_OK) {
+      uint64_t off = host_text_off(body.p, body.n);
+      uint64_t len = host_text_len(body.p, body.n);
+      size_t tn = 0;
+      if (off > (uint64_t)body.n || len > (uint64_t)body.n - off ||
+          json_unescape(body.p + (size_t)off, (size_t)len, s->f_text, sizeof s->f_text, &tn) != 0 ||
+          !json_utf8(s->f_text, tn)) {
+        cls = BODY_MALFORMED;
+      } else {
+        s->f_text_n = tn;
+        s->f_text_ok = 1;
+      }
+    }
+    s->f_body = cls;
+  }
+  s->f_like = LIKE_UNKNOWN;
+  s->f_db = DB_UNKNOWN;
+  s->f_idc = idc;
+  s->f_idn = 0;
+  if (idc == ID_UNKNOWN) s->f_idn = idNumber(req);
+  s->row_ok = 0;
+  s->row_len = 0;
+  s->fact_live = 1;
+  s->fact_queried = 0;
+  muro_http_reset();
+  return 1;
+}
+
+/* One query after decide returns act-observe. The lookup and the like
+   write are one step, so id-present is not paired with db-down.
+   Returns 0 when the row does not fit or the route has nothing left
+   to learn. That closes the socket. It is not a status. */
+static int query_facts(Server *sv, Slot *s) {
+  uint64_t verb = field(s->st, 3);
+  uint64_t path = field(s->st, 4);
+  int rc;
+  s->row_ok = 0;
+  s->row_len = 0;
+  if (verb == VERB_GET && path == PATH_HEALTH) {
+    s->f_db = store_ping(sv->store) ? DB_OK : DB_DOWN;
+    return 1;
+  }
+  if (verb == VERB_GET && path == PATH_FEED) {
+    rc = store_feed(sv->store, s->row, s->row_cap, &s->row_len);
+    if (rc == -2) return 0;
+    if (rc != 0) {
+      s->f_db = DB_DOWN;
+      return 1;
+    }
+    s->f_db = DB_OK;
+    s->row_ok = 1;
+    return 1;
+  }
+  if (verb == VERB_POST && path == PATH_POSTS) {
+    int64_t id = 0;
+    size_t n = 0;
+    if (!s->f_text_ok) {
+      s->f_db = DB_DOWN;
+      return 1;
+    }
+    if (store_create(sv->store, s->f_text, s->f_text_n, &id) != 0) {
+      s->f_db = DB_DOWN;
+      return 1;
+    }
+    if (json_row_post(s->row, s->row_cap, &n, id, s->f_text, s->f_text_n) != 0) return 0;
+    s->row_len = n;
+    s->row_ok = 1;
+    s->f_db = DB_OK;
+    return 1;
+  }
+  if (verb == VERB_GET && path == PATH_POST_ID) {
+    uint8_t text[1024];
+    size_t tn = 0;
+    size_t n = 0;
+    if (s->f_idc != ID_UNKNOWN) return 0;
+    rc = store_read(sv->store, s->f_idn, text, sizeof text, &tn);
+    if (rc == -2) return 0;
+    if (rc < 0) {
+      s->f_db = DB_DOWN;
+      return 1;
+    }
+    if (rc == 0) {
+      s->f_db = DB_OK;
+      s->f_idc = ID_MISSING;
+      return 1;
+    }
+    if (json_row_post(s->row, s->row_cap, &n, s->f_idn, text, tn) != 0) return 0;
+    s->row_len = n;
+    s->row_ok = 1;
+    s->f_db = DB_OK;
+    s->f_idc = ID_PRESENT;
+    return 1;
+  }
+  if (verb == VERB_POST && path == PATH_POST_LIKE) {
+    int64_t likes = 0;
+    size_t n = 0;
+    if (s->f_idc != ID_UNKNOWN || s->f_auth != AUTH_OK || s->f_sub_n == 0) return 0;
+    rc = store_like(sv->store, s->f_idn, s->f_sub, s->f_sub_n, &likes);
+    if (rc < 0) {
+      s->f_db = DB_DOWN;
+      return 1;
+    }
+    if (rc == 0) {
+      s->f_db = DB_OK;
+      s->f_idc = ID_MISSING;
+      return 1;
+    }
+    if (json_row_like(s->row, s->row_cap, &n, s->f_idn, likes) != 0) return 0;
+    s->row_len = n;
+    s->row_ok = 1;
+    s->f_db = DB_OK;
+    s->f_idc = ID_PRESENT;
+    s->f_like = rc == 1 ? LIKE_NEW : LIKE_AGAIN;
+    return 1;
+  }
+  return 0;
 }
 
 static int step_ev(Slot *s, Ev ev) {
@@ -279,8 +444,21 @@ static int step_ev(Slot *s, Ev ev) {
 
 static int render_out(Slot *s) {
   size_t got = 0;
-  size_t n = host_copy_render(s->out, OUT_CAP, field(s->st, 8), field(s->st, 9), field(s->st, 10),
-                              field(s->st, 2), &got);
+  uint64_t act = field(s->st, 10);
+  const uint8_t *row = NULL;
+  size_t row_n = 0;
+  size_t n;
+  if (act >= ACT_FEED && act <= ACT_LIKE_AGAIN) {
+    if (!s->row_ok || !s->row) {
+      muro_http_reset();
+      fprintf(stderr, "muro-httpd: row is missing\n");
+      return 0;
+    }
+    row = s->row;
+    row_n = s->row_len;
+  }
+  n = host_copy_render(s->out, s->out_cap, field(s->st, 8), field(s->st, 9), act, field(s->st, 2),
+                       row, row_n, &got);
   if (n == 0) {
     muro_http_reset();
     fprintf(stderr, "muro-httpd: response is %zu bytes\n", got);
@@ -311,21 +489,34 @@ static int pump(Server *sv, Slot *s) {
     uint64_t end_off = field(s->st, 13);
     uint64_t more = field(s->st, 14);
     spins += 1;
-    if (phase != PH_DECIDE) s->db_sent = 0;
+    if (phase == PH_READ || phase == PH_IDLE || phase == PH_CLOSED) {
+      s->fact_live = 0;
+      s->fact_queried = 0;
+      s->row_ok = 0;
+    }
     if (phase == PH_CLOSED || action == HOST_ACT_CLOSE) {
       close_slot(sv, s);
       return 0;
     }
     if (action == HOST_ACT_DECIDE) {
-      uint64_t auth, body, like, db, idc;
-      if (s->db_sent) {
+      if (!s->fact_live) {
+        if (!take_facts(sv, s)) {
+          close_slot(sv, s);
+          return 0;
+        }
+      } else if (!s->fact_queried) {
+        if (!query_facts(sv, s)) {
+          fprintf(stderr, "muro-httpd: row does not fit\n");
+          close_slot(sv, s);
+          return 0;
+        }
+        s->fact_queried = 1;
+      } else {
         fprintf(stderr, "muro-httpd: decide asked again; no further fact\n");
         close_slot(sv, s);
         return 0;
       }
-      s->db_sent = 1;
-      stub_facts(s, &auth, &body, &like, &db, &idc);
-      if (!step_ev(s, evDb(auth, body, like, db, idc))) {
+      if (!step_ev(s, evDb(s->f_auth, s->f_body, s->f_like, s->f_db, s->f_idc))) {
         close_slot(sv, s);
         return 0;
       }
@@ -512,10 +703,16 @@ static void accept_some(Server *sv) {
     memset(s, 0, sizeof *s);
     s->fd = fd;
     s->in = malloc(sv->in_cap);
+    s->out = malloc(OUT_CAP);
+    s->out_cap = s->out ? (size_t)OUT_CAP : 0;
+    s->row = malloc(ROW_CAP);
+    s->row_cap = s->row ? (size_t)ROW_CAP : 0;
     s->proto = proto_begin();
-    if (!s->in || !s->proto) {
+    if (!s->in || !s->out || !s->row || !s->proto) {
       proto_free(s->proto);
       free(s->in);
+      free(s->out);
+      free(s->row);
       close(fd);
       memset(s, 0, sizeof *s);
       s->fd = -1;
@@ -631,6 +828,11 @@ int host_run(const HostConfig *cfg) {
   sv.in_cap = env_in_cap();
   sv.write_limit = env_write_limit();
   sv.write_log = getenv("MURO_TEST_WRITE_LOG");
+  if (cfg->jwt_key_len > sizeof sv.jwt_key) return -1;
+  if (cfg->jwt_key_len) memcpy(sv.jwt_key, cfg->jwt_key, cfg->jwt_key_len);
+  sv.jwt_key_len = cfg->jwt_key_len;
+  sv.store = store_open(cfg->db_path && cfg->db_path[0] ? cfg->db_path : ":memory:");
+  if (!sv.store) fprintf(stderr, "muro-httpd: database is unavailable\n");
   if (sv.write_log && !sv.write_log[0]) sv.write_log = NULL;
   sv.slots = calloc((size_t)cfg->max_conn, sizeof(Slot));
   sv.pq = host_poll_open();
@@ -725,5 +927,6 @@ out:
   }
   host_poll_close(sv.pq);
   free(sv.slots);
+  store_close(sv.store);
   return rc;
 }
