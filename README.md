@@ -164,10 +164,10 @@ Host facts come from the request, from SQLite, and from an HS256
 check. The host computes those facts and performs the act `decide`
 returns. It does not choose a move or a body. `decide` chooses every
 status. The one exception is a create or a like that has already
-committed and whose rendered response does not fit: the host writes
-`500` and the body `internal`, so the socket is not closed with no
-status. The row buffer is larger than any row that can meet that
-case. See Limits.
+committed. If the rendered response does not fit, or the socket
+closes before any status byte is written, the host sends `500` and
+the body `internal`. The row buffer is larger than any row that can
+meet the render case. See Limits.
 
 `GET /health` and `GET /feed` query when `decide` returns
 `act-observe`. `POST /posts` queries only after auth is `auth-ok` and
@@ -185,8 +185,11 @@ The store is the swap boundary. `decide` never sees SQLite. The host
 asks for rows and performs the act. `store_open` runs
 `PRAGMA journal_mode=WAL` and `PRAGMA synchronous=NORMAL`, then reads
 both back, and sets `sqlite3_busy_timeout` to 5000 ms. `NORMAL` is 1.
-The challenge names that mode as the durability floor for WAL: the
-commit finishes before create returns 0 or like returns 1 or 2.
+The challenge names that mode as the durability floor for WAL. With
+WAL and `synchronous=NORMAL`, a commit survives a process crash and
+may be lost on power loss. The commit finishes before create returns
+0 or like returns 1 or 2. The reopen tests prove a clean close and
+reopen, not crash or power-loss durability.
 A file database whose journal mode is not `wal`, or whose synchronous
 value is below `NORMAL`, is not opened. `:memory:` cannot be WAL.
 It remains the test-only default, journal mode `memory`, and it is
@@ -216,8 +219,9 @@ signature is checked before the payload. `sub` is a non-empty string
 of at most 128 bytes. `exp` and `nbf` are optional. The challenge
 SPEC says to verify `exp`. It does not say a missing `exp` is an
 error, and the upstream tests always send one. When present, each
-must be a JSON integer with no fraction and no exponent, so a float
-`exp` or `nbf` is `auth-bad-payload`. They are compared with
+must be a JSON integer with no fraction, no exponent, and no leading
+zero, so a float `exp` or `nbf`, or an `exp` of `01`, is
+`auth-bad-payload`. They are compared with
 `time(NULL)`. A token is rejected when `exp <= now` and when
 `nbf > now`. `nbf == now` is valid. When both claims are present the
 valid window is `nbf <= now < exp`. A bad `sub`, `exp`, or `nbf` is
@@ -256,13 +260,18 @@ checks each challenge route: a good JWT, a bad signature, `alg`
 `none`, a missing bearer, a bad payload, a missing and a present id,
 a like and the same like again, valid and invalid JSON, and a
 database path that cannot be opened, `exp == now`, `nbf == now`,
-a float `exp`, a float ignored claim, `typ` absent or `jwt` or
-`JWS`, a temp file whose create is still there after reopen, and
-the path order `--db`, then `MURO_HTTP_DB`, then `SQLITE_PATH`.
+a float `exp`, a leading-zero `exp`, a float ignored claim, `typ`
+absent or `jwt` or `JWS`, a temp file whose create is still there
+after a clean close and reopen (not a crash or power-loss test), an
+empty `--db`, `MURO_HTTP_DB`, or `SQLITE_PATH` (exit 2), a committed
+create and like whose db admit then fails (500 `internal`, and the
+rows remain), and the path order `--db`, then `MURO_HTTP_DB`, then
+`SQLITE_PATH`.
 A `:memory:` server is still checked. The child drops
-`MURO_HTTP_DB`, `SQLITE_PATH`, and `MURO_HTTP_JWT_KEY` and passes
-`--db` and `--jwt-key`, except in the path-order cases, so a
-developer environment does not change the result. Those are tests.
+`MURO_HTTP_DB`, `SQLITE_PATH`, `MURO_HTTP_JWT_KEY`, and
+`MURO_TEST_FAIL_DB_ADMIT`, and passes `--db` and `--jwt-key`, except
+in the path-order cases and the admit-fail case, so a developer
+environment does not change the result. Those are tests.
 
 The reduction equations in `render.muro` are the reduction evidence
 (refl) for the strings they name. There are eight. `render-empty-row`
@@ -344,15 +353,19 @@ prelude, so the socket loop includes neither `body.h` nor `render.h`.
   rolls back and the fact is `db-down`, so `decide` answers 500.
   The HTTP header on a row is under 256 bytes, so a row that fits in
   the row buffer fits in the write buffer. If the rendered response
-  still does not fit after a committed write, the host sends 500 and
-  the body `internal`. No path leaves a committed write with no HTTP
-  status. The image's write range stays length 16. The host sends
-  the rendered buffer, then `evDone`.
+  still does not fit after a committed write, or the host closes
+  before any status byte is written, it sends 500 and the body
+  `internal`. No path leaves a committed write with no HTTP status.
+  The image's write range stays length 16. The host sends the
+  rendered buffer, then `evDone`.
 - `:memory:` is the default and is test-only. It cannot be WAL, so
   it is not a durable database and it does not meet the challenge
   rule that forbids an in-memory database. A file path does.
   `synchronous=NORMAL` is the value read back on every open store,
-  including `:memory:`.
+  including `:memory:`. With WAL and `synchronous=NORMAL`, a commit
+  survives a process crash and may be lost on power loss. The reopen
+  tests prove a clean close and reopen, not crash or power-loss
+  durability.
 - An authorization value longer than 16384 bytes is `auth-bad-token`.
 
 ## Check

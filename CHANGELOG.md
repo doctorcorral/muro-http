@@ -28,7 +28,8 @@
   `proto_admit` and `step`. A refusal closes the socket. Facts are
   SQLite rows, an HS256 check of the `Authorization` value (key from
   `--jwt-key` or `MURO_HTTP_JWT_KEY`, constant-time MAC compare), and
-  the emitted body class. The host builds the row JSON. `c/test_e2e`
+  the emitted body class. Feed, create, and like rows come from the
+  store. The host builds read JSON only. `c/test_e2e`
   checks health, a malformed request, keep-alive, a pipeline,
   `Connection: close`, the idle timeout, a peer FIN mid-request, a
   split body, a short write, the connection cap, a full receive

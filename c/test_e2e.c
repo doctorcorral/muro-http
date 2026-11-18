@@ -25,6 +25,7 @@ static const char *srv_jwt = NULL;
 static int pass_db = 1;
 static const char *env_sqlite = NULL;
 static const char *env_muro_db = NULL;
+static const char *env_fail_admit = NULL;
 static int last_json;
 
 static void fail(const char *name, const char *what) {
@@ -50,9 +51,11 @@ static pid_t start_server(int idle_ms, int max_conn, int *port, const char *writ
   int use_db = pass_db;
   const char *sqlite_env = env_sqlite;
   const char *muro_env = env_muro_db;
+  const char *fail_admit = env_fail_admit;
   pass_db = 1;
   env_sqlite = NULL;
   env_muro_db = NULL;
+  env_fail_admit = NULL;
   if (max_conn < 1) return -1;
   if (pipe(sp) < 0) return -1;
   pid = fork();
@@ -74,8 +77,10 @@ static pid_t start_server(int idle_ms, int max_conn, int *port, const char *writ
     unsetenv("MURO_HTTP_DB");
     unsetenv("MURO_HTTP_JWT_KEY");
     unsetenv("SQLITE_PATH");
+    unsetenv("MURO_TEST_FAIL_DB_ADMIT");
     if (sqlite_env && sqlite_env[0]) setenv("SQLITE_PATH", sqlite_env, 1);
     if (muro_env && muro_env[0]) setenv("MURO_HTTP_DB", muro_env, 1);
+    if (fail_admit && fail_admit[0]) setenv("MURO_TEST_FAIL_DB_ADMIT", fail_admit, 1);
     if (write_limit && write_limit[0]) setenv("MURO_TEST_WRITE_LIMIT", write_limit, 1);
     if (write_log && write_log[0]) setenv("MURO_TEST_WRITE_LOG", write_log, 1);
     if (in_cap && in_cap[0]) setenv("MURO_TEST_IN_CAP", in_cap, 1);
@@ -1109,6 +1114,132 @@ static void check_precedence(void) {
   unlink_db(file_b);
 }
 
+/* An empty path is rejected before listen. Exit 2, no banner. */
+static void check_exit2(const char *name, char **av, const char *sqlite_env, const char *muro_env,
+                        const char *err_needle) {
+  int sp[2];
+  pid_t pid;
+  char buf[512];
+  size_t n = 0;
+  int status = 0;
+  int i;
+  int reaped = 0;
+  if (pipe(sp) < 0) {
+    fail(name, "pipe");
+    return;
+  }
+  pid = fork();
+  if (pid < 0) {
+    close(sp[0]);
+    close(sp[1]);
+    fail(name, "fork");
+    return;
+  }
+  if (pid == 0) {
+    alarm(0);
+    if (dup2(sp[1], STDOUT_FILENO) < 0) _exit(127);
+    if (dup2(sp[1], STDERR_FILENO) < 0) _exit(127);
+    close(sp[0]);
+    close(sp[1]);
+    unsetenv("MURO_HTTP_DB");
+    unsetenv("MURO_HTTP_JWT_KEY");
+    unsetenv("MURO_HTTP_PORT");
+    unsetenv("MURO_HTTP_IDLE_MS");
+    unsetenv("MURO_HTTP_MAX_CONNECTIONS");
+    unsetenv("SQLITE_PATH");
+    unsetenv("MURO_TEST_FAIL_DB_ADMIT");
+    unsetenv("MURO_TEST_WRITE_LIMIT");
+    unsetenv("MURO_TEST_WRITE_LOG");
+    unsetenv("MURO_TEST_IN_CAP");
+    if (sqlite_env) setenv("SQLITE_PATH", sqlite_env, 1);
+    if (muro_env) setenv("MURO_HTTP_DB", muro_env, 1);
+    execv(bin_path, av);
+    _exit(127);
+  }
+  close(sp[1]);
+  for (;;) {
+    struct pollfd pfd;
+    ssize_t r;
+    if (n + 1 >= sizeof buf) break;
+    pfd.fd = sp[0];
+    pfd.events = POLLIN;
+    if (poll(&pfd, 1, 2000) <= 0) break;
+    r = read(sp[0], buf + n, sizeof buf - 1 - n);
+    if (r <= 0) break;
+    n += (size_t)r;
+  }
+  close(sp[0]);
+  buf[n] = 0;
+  for (i = 0; i < 40; i++) {
+    pid_t got = waitpid(pid, &status, WNOHANG);
+    if (got == pid) {
+      reaped = 1;
+      break;
+    }
+    if (got < 0) break;
+    usleep(50000);
+  }
+  if (!reaped) {
+    kill(pid, SIGKILL);
+    waitpid(pid, &status, 0);
+    fail(name, "still running");
+    return;
+  }
+  if (!WIFEXITED(status) || WEXITSTATUS(status) != 2) {
+    fprintf(stderr, "FAIL %s: status %d out '%s'\n", name, status, buf);
+    failures += 1;
+    return;
+  }
+  if (strstr(buf, "listening") != NULL) fail(name, "listened");
+  if (err_needle && strstr(buf, err_needle) == NULL) {
+    fprintf(stderr, "FAIL %s: stderr '%s'\n", name, buf);
+    failures += 1;
+  }
+}
+
+static void check_empty_db(void) {
+  char *flag[] = {"muro-httpd", "--port", "0", "--db", "", NULL};
+  char *envonly[] = {"muro-httpd", "--port", "0", NULL};
+  check_exit2("empty-db-flag", flag, NULL, NULL, "bad --db");
+  check_exit2("empty-muro-db", envonly, NULL, "", "bad MURO_HTTP_DB");
+  check_exit2("empty-sqlite-path", envonly, "", NULL, "bad SQLITE_PATH");
+}
+
+/* MURO_TEST_FAIL_DB_ADMIT refuses the evDb admit after the store
+   commit. The client still gets 500, and the row is still there. */
+static void check_commit_status(void) {
+  char path[] = "/tmp/muro-http-admit-XXXXXX";
+  char req[1024];
+  const char *saved = srv_db;
+  pid_t pid;
+  int port = -1;
+  int fd = mkstemp(path);
+  if (fd < 0) {
+    fail("commit-status", "mkstemp");
+    return;
+  }
+  close(fd);
+  srv_db = path;
+  env_fail_admit = "2";
+  pid = start_server(10000, 4, &port, NULL, NULL, NULL);
+  if (pid < 0) {
+    srv_db = saved;
+    unlink_db(path);
+    return;
+  }
+  post_json(req, sizeof req, tok_ada, "{\"text\":\"hi\"}");
+  check_one(port, "commit-create", req, 500, "internal", 0, 1);
+  post_like(req, sizeof req, "1", tok_ada);
+  check_one(port, "commit-like", req, 500, "internal", 0, 1);
+  check_one(port, "commit-read", "GET /posts/1 HTTP/1.1\r\n\r\n", 200, "{\"id\":1,\"text\":\"hi\"}", 0,
+            0);
+  post_like(req, sizeof req, "1", tok_ada);
+  check_one(port, "commit-like-again", req, 200, "{\"id\":1,\"likes\":1}", 0, 0);
+  stop_server(pid);
+  srv_db = saved;
+  unlink_db(path);
+}
+
 static void check_no_key(void) {
   pid_t pid;
   int port = -1;
@@ -1182,6 +1313,8 @@ int main(int argc, char **argv) {
   check_memory();
   check_reopen();
   check_precedence();
+  check_empty_db();
+  check_commit_status();
   unlink_db(dbpath);
   if (failures != 0) {
     fprintf(stderr, "%d failures\n", failures);

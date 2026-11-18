@@ -1,8 +1,9 @@
 /* SQLite rows for the challenge routes. A failed open is a NULL
    store, and every query then reports down. This file does not
    choose a status. A file database is WAL with synchronous=NORMAL.
-   NORMAL is the durability floor the challenge names for WAL: the
-   commit finishes before create or like returns 0, 1, or 2.
+   NORMAL is the durability floor the challenge names for WAL. A
+   commit survives a process crash and may be lost on power loss.
+   It finishes before create or like returns 0, 1, or 2.
    :memory: cannot be WAL and is not a durable database. */
 
 #include "store.h"

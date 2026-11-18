@@ -5,9 +5,10 @@
    write done, write error, an idle tick, and db events whose facts
    come from the request, the JWT check, and SQLite.
    It performs the action the image returns. decide chooses every
-   status except one: a create or a like that has already committed,
-   whose rendered response does not fit, is answered 500 here so the
-   socket is not closed with no status.
+   status except one: a create or a like that has already committed.
+   If the rendered response does not fit, or the socket closes before
+   any status byte is written, the host sends 500 and the body
+   internal.
 
    c/generated/render.h cannot sit in this file. It and conn.h both
    define the muro prelude. c/host_render.c includes render.h and
@@ -30,6 +31,7 @@
 #include <fcntl.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
+#include <poll.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -60,6 +62,8 @@ enum {
 };
 
 static volatile sig_atomic_t stop_flag;
+/* Remaining forced evDb refusals. See MURO_TEST_FAIL_DB_ADMIT. */
+static int fail_db_admit;
 
 static void on_signal(int sig) {
   (void)sig;
@@ -186,7 +190,9 @@ static void note_write(const Server *sv, size_t n) {
 
 /* MURO_TEST_IN_CAP lowers the receive buffer under the image's
    16384-byte malformed scan. Absent, the cap is IN_CAP. A full
-   buffer the image did not consume still closes with no status. */
+   buffer the image did not consume still closes with no status.
+   MURO_TEST_FAIL_DB_ADMIT=N makes the next N evDb admits fail after
+   a committed create or like. The close still sends 500. */
 static size_t env_in_cap(void) {
   const char *e = getenv("MURO_TEST_IN_CAP");
   char *end = NULL;
@@ -196,6 +202,17 @@ static size_t env_in_cap(void) {
   cap = strtoul(e, &end, 10);
   if (errno || end == e || *end || cap < 128ul || cap > (unsigned long)IN_CAP) return (size_t)IN_CAP;
   return (size_t)cap;
+}
+
+static int env_fail_db_admit(void) {
+  const char *e = getenv("MURO_TEST_FAIL_DB_ADMIT");
+  char *end = NULL;
+  unsigned long n;
+  if (!e || !*e) return 0;
+  errno = 0;
+  n = strtoul(e, &end, 10);
+  if (errno || end == e || *end || n > 1000ul) return 0;
+  return (int)n;
 }
 
 static size_t env_write_limit(void) {
@@ -224,6 +241,7 @@ static int sync_listen(Server *sv) {
 }
 
 static void close_slot(Server *sv, Slot *s);
+static void status_before_close(Server *sv, Slot *s);
 
 static void sync_watch(Server *sv, Slot *s) {
   int err;
@@ -237,6 +255,7 @@ static void sync_watch(Server *sv, Slot *s) {
 
 static void close_slot(Server *sv, Slot *s) {
   if (!s->used) return;
+  status_before_close(sv, s);
   host_poll_watch(sv->pq, s->fd, 0, 0);
   close(s->fd);
   proto_free(s->proto);
@@ -441,6 +460,14 @@ static int step_ev(Slot *s, Ev ev) {
     if (act == ACT_OBSERVE) observe = 1;
     else reply = code <= ST_201 ? 0 : 1;
   }
+  /* The store write has already committed. Refusing here is the same
+     close as proto_admit returning 0: the image never reaches write. */
+  if (tag == EV_DB && s->wrote && fail_db_admit > 0) {
+    fail_db_admit -= 1;
+    muro_http_reset();
+    fprintf(stderr, "muro-httpd: test hook refused db admit phase %d ev %d\n", phase, tag);
+    return 0;
+  }
   admitted = proto_admit(s->proto, phase, tag, buf.n, status, reply, observe, half || keep);
   if (admitted != 1) {
     muro_http_reset();
@@ -452,8 +479,9 @@ static int step_ev(Slot *s, Ev ev) {
   return 1;
 }
 
-/* Body is decide's err-internal text. Used only after a committed
-   write whose success response did not fit. keep 1 is Connection: close. */
+/* Body is decide's err-internal text. Used after a committed write
+   whose success response did not fit, and when a close happens
+   before any status byte is written. keep 1 is Connection: close. */
 static const char k_500_keep[] =
     "HTTP/1.1 500 Internal Server Error\r\n"
     "Connection: keep-alive\r\n"
@@ -468,6 +496,48 @@ static const char k_500_close[] =
     "Content-Type: text/plain; charset=utf-8\r\n"
     "\r\n"
     "internal";
+
+/* Best-effort. The fd is non-blocking. A short write is retried. */
+static void write_status(Server *sv, int fd, const char *p, size_t n) {
+  size_t off = 0;
+  int spins = 0;
+  if (fd < 0 || !p || n == 0) return;
+  while (off < n && spins < 8) {
+    ssize_t w = write(fd, p + off, n - off);
+    if (w < 0 && errno == EINTR) continue;
+    if (w < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+      struct pollfd pfd;
+      pfd.fd = fd;
+      pfd.events = POLLOUT;
+      if (poll(&pfd, 1, 200) <= 0) return;
+      spins += 1;
+      continue;
+    }
+    if (w <= 0) return;
+    off += (size_t)w;
+    note_write(sv, (size_t)w);
+    spins = 0;
+  }
+}
+
+/* wrote is set only after a committed create or like. If no status
+   byte has left the socket, send one before the fd is closed. A
+   rendered buffer is that status. Otherwise the body is internal. */
+static void status_before_close(Server *sv, Slot *s) {
+  const char *msg;
+  size_t n;
+  if (!s->wrote || s->fd < 0 || s->out_off > 0) return;
+  if (s->rendered && s->out && s->out_len > 0) {
+    msg = (const char *)s->out;
+    n = s->out_len;
+  } else {
+    msg = field(s->st, 2) == 1 ? k_500_close : k_500_keep;
+    n = strlen(msg);
+    fprintf(stderr, "muro-httpd: committed write has no status; sending 500\n");
+  }
+  write_status(sv, s->fd, msg, n);
+  s->wrote = 0;
+}
 
 static int render_out(Slot *s) {
   size_t got = 0;
@@ -528,15 +598,15 @@ static int pump(Server *sv, Slot *s) {
     uint64_t end_off = field(s->st, 13);
     uint64_t more = field(s->st, 14);
     spins += 1;
-    if (phase == PH_READ || phase == PH_IDLE || phase == PH_CLOSED) {
+    if (phase == PH_CLOSED || action == HOST_ACT_CLOSE) {
+      close_slot(sv, s);
+      return 0;
+    }
+    if (phase == PH_READ || phase == PH_IDLE) {
       s->fact_live = 0;
       s->fact_queried = 0;
       s->row_ok = 0;
       s->wrote = 0;
-    }
-    if (phase == PH_CLOSED || action == HOST_ACT_CLOSE) {
-      close_slot(sv, s);
-      return 0;
     }
     if (action == HOST_ACT_DECIDE) {
       if (!s->fact_live) {
@@ -589,6 +659,8 @@ static int pump(Server *sv, Slot *s) {
           continue;
         }
         s->out_off += (size_t)n;
+        /* A status byte has left. A later close must not send another. */
+        if (s->out_off > 0) s->wrote = 0;
         s->want_write = 0;
         note_write(sv, (size_t)n);
         if (!step_ev(s, evProgress((uint64_t)n))) {
@@ -868,6 +940,7 @@ int host_run(const HostConfig *cfg) {
   sv.in_cap = env_in_cap();
   sv.write_limit = env_write_limit();
   sv.write_log = getenv("MURO_TEST_WRITE_LOG");
+  fail_db_admit = env_fail_db_admit();
   if (cfg->jwt_key_len > sizeof sv.jwt_key) return -1;
   if (cfg->jwt_key_len) memcpy(sv.jwt_key, cfg->jwt_key, cfg->jwt_key_len);
   sv.jwt_key_len = cfg->jwt_key_len;

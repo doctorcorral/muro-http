@@ -228,6 +228,7 @@ int main(void) {
   expect_claims("float-exp-e", NULL, "{\"sub\":\"ada\",\"exp\":1e2}", AUTH_BAD_PAYLOAD, NULL);
   expect_claims("float-nbf", NULL, "{\"sub\":\"ada\",\"nbf\":1.0}", AUTH_BAD_PAYLOAD, NULL);
   expect_claims("bad-num", NULL, "{\"sub\":\"ada\",\"x\":01}", AUTH_BAD_PAYLOAD, NULL);
+  expect_claims("exp-lead-zero", NULL, "{\"sub\":\"ada\",\"exp\":01}", AUTH_BAD_PAYLOAD, NULL);
   expect_claims("header-float", "{\"alg\":\"HS256\",\"typ\":\"JWT\",\"kid\":1.5}", "{\"sub\":\"ada\"}",
                 AUTH_OK, "ada");
   expect_claims("typ-lower", "{\"alg\":\"HS256\",\"typ\":\"jwt\"}", "{\"sub\":\"ada\"}", AUTH_OK,

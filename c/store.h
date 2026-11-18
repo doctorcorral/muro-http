@@ -11,9 +11,12 @@
    whose journal mode is not wal, or whose synchronous value is
    below NORMAL, is not opened. :memory: cannot be WAL. It stays
    journal mode memory and is for tests. It is not durable.
-   A write is durable before create returns 0 or like returns 1
-   or 2. The row JSON is rendered inside that transaction. If the
-   row does not fit, the store rolls back and returns -2.
+   With WAL and synchronous=NORMAL, a commit survives a process
+   crash and may be lost on power loss. The reopen tests prove a
+   clean close and reopen, not crash or power-loss durability.
+   A write returns only after that commit: create returns 0, like
+   returns 1 or 2. The row JSON is rendered inside that transaction.
+   If the row does not fit, the store rolls back and returns -2.
    ping: 1 up, 0 down.
    feed: 0 ok, -1 query failed, -2 the row does not fit.
    create: 0 ok, -1 failed, -2 the row does not fit.
