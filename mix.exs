@@ -9,7 +9,7 @@ defmodule MuroHttp.MixProject do
       start_permanent: Mix.env() == :prod,
       deps: deps(),
       description:
-        "A Muro HTTP library. A zero-copy request classifier and one step of an HTTP/1 connection.",
+        "A Muro HTTP library. A zero-copy request classifier, one connection step, and a host loop that serves it.",
       package: package()
     ]
   end
@@ -35,6 +35,7 @@ defmodule MuroHttp.MixProject do
         c
         mix.exs
         muro.exs
+        Makefile
         README.md
         LICENSE
         CHANGELOG.md

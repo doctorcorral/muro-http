@@ -11,6 +11,7 @@
     {"priv/muro/http/session.muro", MuroHttp.SessionFsm, "lib/muro_http/session_fsm.ex",
      [kind: :fsm]},
     {"priv/muro/http/conn.muro", "c/generated/conn.c", [kind: :c]},
+    {"priv/muro/http/render.muro", "c/generated/render.c", [kind: :c]},
     {"priv/muro/http/conn.muro", MuroHttp.Conn, "lib/muro_http/conn.ex"},
     {"priv/muro/http/conn.muro", MuroHttp.ConnEqTest, "test/conn_eq_test.exs",
      [kind: :exunit, impl: MuroHttp.Conn, imports: false]},
