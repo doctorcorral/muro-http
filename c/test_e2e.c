@@ -12,10 +12,21 @@
 #include <string.h>
 #include <sys/socket.h>
 #include <sys/wait.h>
+#include <time.h>
 #include <unistd.h>
+
+#include "jwt.h"
 
 static int failures;
 static const char *bin_path = "c/muro-httpd";
+/* Child flags. The test key is not a server default. */
+static const char *srv_db = ":memory:";
+static const char *srv_jwt = NULL;
+static int pass_db = 1;
+static const char *env_sqlite = NULL;
+static const char *env_muro_db = NULL;
+static const char *env_fail_admit = NULL;
+static int last_json;
 
 static void fail(const char *name, const char *what) {
   fprintf(stderr, "FAIL %s: %s\n", name, what);
@@ -37,6 +48,14 @@ static pid_t start_server(int idle_ms, int max_conn, int *port, const char *writ
   char maxc[32];
   char buf[128];
   size_t n = 0;
+  int use_db = pass_db;
+  const char *sqlite_env = env_sqlite;
+  const char *muro_env = env_muro_db;
+  const char *fail_admit = env_fail_admit;
+  pass_db = 1;
+  env_sqlite = NULL;
+  env_muro_db = NULL;
+  env_fail_admit = NULL;
   if (max_conn < 1) return -1;
   if (pipe(sp) < 0) return -1;
   pid = fork();
@@ -46,17 +65,42 @@ static pid_t start_server(int idle_ms, int max_conn, int *port, const char *writ
     return -1;
   }
   if (pid == 0) {
+    char *av[16];
+    int argc = 0;
+    const char *db = srv_db && srv_db[0] ? srv_db : ":memory:";
     alarm(0);
     if (dup2(sp[1], STDOUT_FILENO) < 0) _exit(127);
     close(sp[0]);
     close(sp[1]);
     snprintf(idle, sizeof idle, "%d", idle_ms);
     snprintf(maxc, sizeof maxc, "%d", max_conn);
+    unsetenv("MURO_HTTP_DB");
+    unsetenv("MURO_HTTP_JWT_KEY");
+    unsetenv("SQLITE_PATH");
+    unsetenv("MURO_TEST_FAIL_DB_ADMIT");
+    if (sqlite_env && sqlite_env[0]) setenv("SQLITE_PATH", sqlite_env, 1);
+    if (muro_env && muro_env[0]) setenv("MURO_HTTP_DB", muro_env, 1);
+    if (fail_admit && fail_admit[0]) setenv("MURO_TEST_FAIL_DB_ADMIT", fail_admit, 1);
     if (write_limit && write_limit[0]) setenv("MURO_TEST_WRITE_LIMIT", write_limit, 1);
     if (write_log && write_log[0]) setenv("MURO_TEST_WRITE_LOG", write_log, 1);
     if (in_cap && in_cap[0]) setenv("MURO_TEST_IN_CAP", in_cap, 1);
-    execl(bin_path, "muro-httpd", "--port", "0", "--idle-ms", idle, "--max-connections", maxc,
-          (char *)NULL);
+    av[argc++] = "muro-httpd";
+    av[argc++] = "--port";
+    av[argc++] = "0";
+    av[argc++] = "--idle-ms";
+    av[argc++] = idle;
+    av[argc++] = "--max-connections";
+    av[argc++] = maxc;
+    if (use_db) {
+      av[argc++] = "--db";
+      av[argc++] = (char *)db;
+    }
+    if (srv_jwt && srv_jwt[0]) {
+      av[argc++] = "--jwt-key";
+      av[argc++] = (char *)srv_jwt;
+    }
+    av[argc] = NULL;
+    execv(bin_path, av);
     perror("exec");
     _exit(127);
   }
@@ -204,6 +248,7 @@ static int read_response(int fd, char *buf, size_t cap, size_t have, size_t *use
         if (sscanf(buf, "HTTP/1.1 %d", &code) != 1) return -1;
         *status = code;
         *conn_close = memmem(buf, (size_t)hend, "Connection: close", 17) != NULL;
+        last_json = memmem(buf, (size_t)hend, "Content-Type: application/json", 30) != NULL;
         if ((size_t)cl > body_cap) return -1;
         memcpy(body, buf + hend + 4, (size_t)cl);
         body[(size_t)cl] = 0;
@@ -245,8 +290,8 @@ static int expect_eof(int fd) {
 static int check_one(int port, const char *name, const char *req, int want_status, const char *want_body,
                      int want_close, int want_eof) {
   int fd = dial(port);
-  char buf[4096];
-  char body[256];
+  char buf[8192];
+  char body[4096];
   size_t body_n = 0;
   size_t used = 0;
   int status = 0;
@@ -274,6 +319,7 @@ static int check_one(int port, const char *name, const char *req, int want_statu
     fprintf(stderr, "FAIL %s: body '%s'\n", name, body);
     failures += 1;
   }
+  if (body_n > 0 && (body[0] == '{' || body[0] == '[') && !last_json) fail(name, "content-type");
   if (conn_close != want_close) fail(name, want_close ? "wanted close" : "wanted keep-alive");
   if (want_eof) {
     if (!expect_eof(fd)) fail(name, "expected eof");
@@ -621,6 +667,8 @@ static void check_partial_send(void) {
   char line[64];
   size_t sum = 0;
   int nwrite = 0;
+  int tries;
+  int bad_line = 0;
   size_t want;
   tfd = mkstemp(tmpl);
   if (tfd < 0) {
@@ -646,59 +694,628 @@ static void check_partial_send(void) {
   close(fd);
   if (status != 200 || strcmp(body, "ok") != 0 || conn_close) fail("partial-send", "status");
   want = strlen(health_keep);
-  log = fopen(tmpl, "r");
-  if (!log) {
-    fail("partial-send", "no write log");
-  } else {
-    while (fgets(line, sizeof line, log)) {
-      char *end = NULL;
-      long v = strtol(line, &end, 10);
-      if (end == line || v != 1) {
-        fprintf(stderr, "FAIL partial-send: write '%s'\n", line);
-        failures += 1;
-        break;
+  /* note_write runs after write() returns. The response can arrive
+     before that last line is in the log. Re-read until it catches up. */
+  for (tries = 0; tries < 100; tries++) {
+    bad_line = 0;
+    sum = 0;
+    nwrite = 0;
+    log = fopen(tmpl, "r");
+    if (log) {
+      while (fgets(line, sizeof line, log)) {
+        char *end = NULL;
+        long v = strtol(line, &end, 10);
+        if (end == line || v != 1) {
+          fprintf(stderr, "FAIL partial-send: write '%s'\n", line);
+          failures += 1;
+          bad_line = 1;
+          break;
+        }
+        sum += 1;
+        nwrite += 1;
       }
-      sum += 1;
-      nwrite += 1;
+      fclose(log);
+      if (bad_line) break;
+      if (nwrite >= 2 && sum == want) break;
     }
-    fclose(log);
-    if (nwrite < 2 || sum != want) {
-      fprintf(stderr, "FAIL partial-send: writes %d sum %zu want %zu\n", nwrite, sum, want);
-      failures += 1;
-    }
+    poll(NULL, 0, 10);
+  }
+  if (!bad_line && (nwrite < 2 || sum != want)) {
+    fprintf(stderr, "FAIL partial-send: writes %d sum %zu want %zu\n", nwrite, sum, want);
+    failures += 1;
   }
   unlink(tmpl);
+  if (stop_server(pid) < 0) return;
+}
+
+/* HS256 fixtures signed with the test key muro-http-test-key. */
+static const char tok_ada[] =
+    "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJhZGEifQ.3KE6Im9uhSMiXa5L1JtMwmzrpKhdX6M3BvI4x3brFts";
+static const char tok_exp[] =
+    "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJhZGEiLCJleHAiOjk5OTk5OTk5OTl9.Epjenj7XS31B0sLSJP-s-TiWA-YPjZ5NC6IhmtQKqB0";
+static const char tok_nbf[] =
+    "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJhZGEiLCJuYmYiOjF9.BH2rRpEPRSrkyv8B4BUpQODlzBSGPofoKu-_vTsIIwE";
+static const char tok_exp_only[] =
+    "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJleHAiOjF9.6O0vDw5xVpA0Vc5reohZXUgr71QOA86t3Yd4R7QHPyg";
+static const char tok_empty_sub[] =
+    "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIifQ.3cHkEIQwrbEhQ0j2DFdg1fDQV24zE0me48Cvz9_oZSM";
+static const char tok_sub_num[] =
+    "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOjF9.aQRXrUwRnMtL8wGhhFGC3iMJElpzIx6mkvG99u0Mxzw";
+static const char tok_expired[] =
+    "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJhZGEiLCJleHAiOjF9.x6mPeg8JrI4FpgdQ5GgdiH0Ba__Ig0COpNp_LIZu0NU";
+static const char tok_nbf_far[] =
+    "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJhZGEiLCJuYmYiOjk5OTk5OTk5OTl9.uAiBGBuaNzU9ec4vg5IwpVrAF4Syhl4HmKZQp_SZATg";
+static const char tok_none[] =
+    "eyJhbGciOiJub25lIiwidHlwIjoiSldUIn0.eyJzdWIiOiJhZGEifQ.8NI1blacf6p2nNGEpD22a4xFD8e3zVHm1ClUuEbbzGs";
+static const char tok_bad[] =
+    "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJhZGEifQ.3KE6Im9uhSMiXa5L1JtMwmzrpKhdX6M3BvI4x3brFtA";
+
+static void post_json(char *dst, size_t cap, const char *token, const char *json) {
+  if (token && token[0]) {
+    snprintf(dst, cap,
+             "POST /posts HTTP/1.1\r\nAuthorization: Bearer %s\r\nContent-Length: %zu\r\n\r\n%s",
+             token, strlen(json), json);
+  } else {
+    snprintf(dst, cap, "POST /posts HTTP/1.1\r\nContent-Length: %zu\r\n\r\n%s", strlen(json), json);
+  }
+}
+
+static const char b64tab[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+
+static int b64url_enc(const uint8_t *in, size_t n, char *dst, size_t cap) {
+  size_t i = 0;
+  size_t o = 0;
+  while (i + 2 < n) {
+    unsigned v = ((unsigned)in[i] << 16) | ((unsigned)in[i + 1] << 8) | (unsigned)in[i + 2];
+    if (o + 4 >= cap) return -1;
+    dst[o++] = b64tab[(v >> 18) & 63];
+    dst[o++] = b64tab[(v >> 12) & 63];
+    dst[o++] = b64tab[(v >> 6) & 63];
+    dst[o++] = b64tab[v & 63];
+    i += 3;
+  }
+  if (i < n) {
+    unsigned v = (unsigned)in[i] << 16;
+    int rem = (int)(n - i);
+    if (rem == 2) v |= (unsigned)in[i + 1] << 8;
+    if (o + (rem == 2 ? 3 : 2) >= cap) return -1;
+    dst[o++] = b64tab[(v >> 18) & 63];
+    dst[o++] = b64tab[(v >> 12) & 63];
+    if (rem == 2) dst[o++] = b64tab[(v >> 6) & 63];
+  }
+  if (o >= cap) return -1;
+  dst[o] = 0;
+  return (int)o;
+}
+
+static int sign_hs(char *dst, size_t cap, const char *header, const char *payload) {
+  char hb[256];
+  char pb[512];
+  char sb[64];
+  char mac_in[800];
+  uint8_t mac[32];
+  int hn;
+  int pn;
+  int sn;
+  int n;
+  const char *key = "muro-http-test-key";
+  if (!header) header = "{\"alg\":\"HS256\",\"typ\":\"JWT\"}";
+  hn = b64url_enc((const uint8_t *)header, strlen(header), hb, sizeof hb);
+  pn = b64url_enc((const uint8_t *)payload, strlen(payload), pb, sizeof pb);
+  if (hn < 0 || pn < 0) return -1;
+  n = snprintf(mac_in, sizeof mac_in, "%s.%s", hb, pb);
+  if (n < 0 || (size_t)n >= sizeof mac_in) return -1;
+  jwt_hmac_sha256((const uint8_t *)key, strlen(key), (const uint8_t *)mac_in, (size_t)n, mac);
+  sn = b64url_enc(mac, 32, sb, sizeof sb);
+  if (sn < 0) return -1;
+  n = snprintf(dst, cap, "%s.%s", mac_in, sb);
+  if (n < 0 || (size_t)n >= cap) return -1;
+  return n;
+}
+
+static void unlink_db(const char *path) {
+  char side[256];
+  if (!path || !path[0]) return;
+  unlink(path);
+  snprintf(side, sizeof side, "%s-wal", path);
+  unlink(side);
+  snprintf(side, sizeof side, "%s-shm", path);
+  unlink(side);
+}
+
+static void post_like(char *dst, size_t cap, const char *id, const char *token) {
+  if (token && token[0]) {
+    snprintf(dst, cap, "POST /posts/%s/like HTTP/1.1\r\nAuthorization: Bearer %s\r\n\r\n", id, token);
+  } else {
+    snprintf(dst, cap, "POST /posts/%s/like HTTP/1.1\r\n\r\n", id);
+  }
+}
+
+static void check_routes(int port) {
+  char req[4096];
+  char longbody[1200];
+  char tok[800];
+  char payload[96];
+  int64_t edge_now = (int64_t)time(NULL);
+  snprintf(payload, sizeof payload, "{\"sub\":\"ada\",\"exp\":%lld}", (long long)edge_now);
+  if (sign_hs(tok, sizeof tok, NULL, payload) < 0) fail("exp-eq", "sign");
+  else {
+    post_json(req, sizeof req, tok, "{\"text\":\"nope\"}");
+    check_one(port, "exp-eq", req, 401, "bad-payload", 0, 0);
+  }
+  snprintf(payload, sizeof payload, "{\"sub\":\"ada\",\"nbf\":%lld}", (long long)edge_now);
+  if (sign_hs(tok, sizeof tok, NULL, payload) < 0) fail("nbf-eq", "sign");
+  else {
+    post_json(req, sizeof req, tok, "{}");
+    check_one(port, "nbf-eq", req, 400, "body-required", 0, 0);
+  }
+  if (sign_hs(tok, sizeof tok, NULL, "{\"sub\":\"ada\",\"iat\":1.5}") < 0) fail("float-iat", "sign");
+  else {
+    post_json(req, sizeof req, tok, "{}");
+    check_one(port, "float-iat", req, 400, "body-required", 0, 0);
+  }
+  if (sign_hs(tok, sizeof tok, NULL, "{\"sub\":\"ada\",\"exp\":1.5}") < 0) fail("float-exp", "sign");
+  else {
+    post_json(req, sizeof req, tok, "{\"text\":\"nope\"}");
+    check_one(port, "float-exp", req, 401, "bad-payload", 0, 0);
+  }
+  if (sign_hs(tok, sizeof tok, "{\"alg\":\"HS256\",\"typ\":\"jwt\"}", "{\"sub\":\"ada\"}") < 0)
+    fail("typ-lower", "sign");
+  else {
+    post_json(req, sizeof req, tok, "{}");
+    check_one(port, "typ-lower", req, 400, "body-required", 0, 0);
+  }
+  if (sign_hs(tok, sizeof tok, "{\"alg\":\"HS256\"}", "{\"sub\":\"ada\"}") < 0) fail("typ-absent", "sign");
+  else {
+    post_json(req, sizeof req, tok, "{}");
+    check_one(port, "typ-absent", req, 400, "body-required", 0, 0);
+  }
+  if (sign_hs(tok, sizeof tok, "{\"alg\":\"HS256\",\"typ\":\"JWS\"}", "{\"sub\":\"ada\"}") < 0)
+    fail("typ-jws", "sign");
+  else {
+    post_json(req, sizeof req, tok, "{\"text\":\"nope\"}");
+    check_one(port, "typ-jws", req, 401, "bad-token", 0, 0);
+  }
+  post_json(req, sizeof req, NULL, "{}");
+  check_one(port, "post-no-auth", req, 401, "missing-bearer", 0, 0);
+  post_json(req, sizeof req, tok_bad, "{\"text\":\"hi\"}");
+  check_one(port, "post-bad-token", req, 401, "bad-token", 0, 0);
+  post_json(req, sizeof req, tok_none, "{\"text\":\"hi\"}");
+  check_one(port, "post-alg-none", req, 401, "bad-token", 0, 0);
+  snprintf(req, sizeof req,
+           "POST /posts HTTP/1.1\r\nAuthorization: bearer %s\r\nContent-Length: 13\r\n\r\n"
+           "{\"text\":\"hi\"}",
+           tok_ada);
+  check_one(port, "post-lower-bearer", req, 401, "bad-token", 0, 0);
+  check_one(port, "post-empty-bearer",
+            "POST /posts HTTP/1.1\r\nAuthorization: Bearer \r\nContent-Length: 13\r\n\r\n"
+            "{\"text\":\"hi\"}",
+            401, "bad-token", 0, 0);
+  post_json(req, sizeof req, tok_empty_sub, "{\"text\":\"hi\"}");
+  check_one(port, "post-empty-sub", req, 401, "bad-payload", 0, 0);
+  post_json(req, sizeof req, tok_sub_num, "{\"text\":\"hi\"}");
+  check_one(port, "post-sub-num", req, 401, "bad-payload", 0, 0);
+  post_json(req, sizeof req, tok_expired, "{\"text\":\"hi\"}");
+  check_one(port, "post-expired", req, 401, "bad-payload", 0, 0);
+  post_json(req, sizeof req, tok_nbf_far, "{\"text\":\"hi\"}");
+  check_one(port, "post-nbf", req, 401, "bad-payload", 0, 0);
+  post_json(req, sizeof req, tok_exp_only, "{\"text\":\"hi\"}");
+  check_one(port, "post-no-sub", req, 401, "bad-payload", 0, 0);
+  post_json(req, sizeof req, tok_ada, "{}");
+  check_one(port, "post-empty-obj", req, 400, "body-required", 0, 0);
+  post_json(req, sizeof req, tok_ada, "{");
+  check_one(port, "post-trunc", req, 400, "malformed", 0, 0);
+  post_json(req, sizeof req, tok_ada, "{\"text\":\"\"}");
+  check_one(port, "post-empty-text", req, 400, "body-required", 0, 0);
+  post_json(req, sizeof req, tok_ada, "{\"text\":1}");
+  check_one(port, "post-num", req, 400, "body-required", 0, 0);
+  post_json(req, sizeof req, tok_ada, "{\"a\":{\"text\":\"hi\"}}");
+  check_one(port, "post-nested", req, 400, "body-required", 0, 0);
+  post_json(req, sizeof req, tok_ada, "{\"\\u0074ext\":\"hi\"}");
+  check_one(port, "post-key-esc", req, 400, "body-required", 0, 0);
+  post_json(req, sizeof req, tok_ada, "{\"text\":\"a\",\"text\":\"b\"}");
+  check_one(port, "post-dup", req, 400, "malformed", 0, 0);
+  post_json(req, sizeof req, tok_ada, "{\"text\":\"\\uD800\"}");
+  check_one(port, "post-surrogate", req, 400, "malformed", 0, 0);
+  post_json(req, sizeof req, tok_ada, "{\"text\":\"hi\"}x");
+  check_one(port, "post-trail", req, 400, "malformed", 0, 0);
+  post_json(req, sizeof req, tok_ada, "{\"text\":\"hi\",}");
+  check_one(port, "post-comma", req, 400, "malformed", 0, 0);
+  post_json(req, sizeof req, tok_ada, "{\"text\":\"\xff\"}");
+  check_one(port, "post-utf8", req, 400, "malformed", 0, 0);
+  post_json(req, sizeof req, tok_ada, "{\"text\":\"\n\"}");
+  check_one(port, "post-control", req, 400, "malformed", 0, 0);
+  memset(longbody, 'x', sizeof longbody);
+  memcpy(longbody, "{\"text\":\"", 9);
+  memcpy(longbody + 9 + 1100, "\"}", 2);
+  longbody[9 + 1100 + 2] = 0;
+  post_json(req, sizeof req, tok_ada, longbody);
+  if (strlen(longbody) <= 1024) fail("post-long", "fixture");
+  check_one(port, "post-long", req, 400, "body-long", 0, 0);
+  post_json(req, sizeof req, tok_ada, "{\"text\":\"hi\"}");
+  check_one(port, "create", req, 201, "{\"id\":1,\"text\":\"hi\"}", 0, 0);
+  post_json(req, sizeof req, tok_exp, "{\"text\":\"\\u0041\"}");
+  check_one(port, "create-exp", req, 201, "{\"id\":2,\"text\":\"A\"}", 0, 0);
+  post_json(req, sizeof req, tok_nbf, "{\"text\":\"a\\\"b\"}");
+  check_one(port, "create-nbf", req, 201, "{\"id\":3,\"text\":\"a\\\"b\"}", 0, 0);
+  check_one(port, "read-1", "GET /posts/1 HTTP/1.1\r\n\r\n", 200, "{\"id\":1,\"text\":\"hi\"}", 0, 0);
+  check_one(port, "read-2", "GET /posts/2 HTTP/1.1\r\n\r\n", 200, "{\"id\":2,\"text\":\"A\"}", 0, 0);
+  check_one(port, "read-missing", "GET /posts/9 HTTP/1.1\r\n\r\n", 404, "post-missing", 0, 0);
+  check_one(port, "read-zero", "GET /posts/0 HTTP/1.1\r\n\r\n", 400, "invalid-id", 0, 0);
+  check_one(port, "read-pad", "GET /posts/01 HTTP/1.1\r\n\r\n", 400, "invalid-id", 0, 0);
+  check_one(port, "get-posts", "GET /posts HTTP/1.1\r\n\r\n", 404, "not-found", 0, 0);
+  snprintf(req, sizeof req,
+           "POST /posts HTTP/1.1\r\nAuthorization: Bearer %s\r\nContent-Length: 0\r\n\r\n", tok_ada);
+  check_one(port, "post-empty-body", req, 400, "malformed", 0, 0);
+  check_one(port, "post-on-id", "POST /posts/1 HTTP/1.1\r\n\r\n", 404, "not-found", 0, 0);
+  post_like(req, sizeof req, "1", NULL);
+  check_one(port, "like-no-auth", req, 401, "missing-bearer", 0, 0);
+  post_like(req, sizeof req, "1", tok_expired);
+  check_one(port, "like-bad-payload", req, 401, "bad-payload", 0, 0);
+  post_like(req, sizeof req, "1", tok_bad);
+  check_one(port, "like-bad-token", req, 401, "bad-token", 0, 0);
+  post_like(req, sizeof req, "0", tok_ada);
+  check_one(port, "like-bad-id", req, 400, "invalid-id", 0, 0);
+  post_like(req, sizeof req, "1", tok_ada);
+  check_one(port, "like-new", req, 201, "{\"id\":1,\"likes\":1}", 0, 0);
+  post_like(req, sizeof req, "1", tok_ada);
+  check_one(port, "like-again", req, 200, "{\"id\":1,\"likes\":1}", 0, 0);
+  post_like(req, sizeof req, "9", tok_ada);
+  check_one(port, "like-missing", req, 404, "post-missing", 0, 0);
+  check_one(port, "feed-rows", "GET /feed HTTP/1.1\r\n\r\n", 200,
+            "[{\"id\":1,\"text\":\"hi\"},{\"id\":2,\"text\":\"A\"},{\"id\":3,\"text\":\"a\\\"b\"}]", 0, 0);
+  check_one(port, "post-health", "POST /health HTTP/1.1\r\n\r\n", 404, "not-found", 0, 0);
+  check_one(port, "post-feed", "POST /feed HTTP/1.1\r\n\r\n", 404, "not-found", 0, 0);
+  check_one(port, "get-like", "GET /posts/1/like HTTP/1.1\r\n\r\n", 404, "not-found", 0, 0);
+  check_one(port, "put-health", "PUT /health HTTP/1.1\r\n\r\n", 404, "not-found", 0, 0);
+  snprintf(req, sizeof req, "GET /health HTTP/1.1\r\nAuthorization: Bearer %s\r\n\r\n", tok_bad);
+  check_one(port, "health-bad-auth", req, 200, "ok", 0, 0);
+}
+
+static void check_db_down(void) {
+  pid_t pid;
+  int port = -1;
+  char req[1024];
+  const char *saved = srv_db;
+  srv_db = "/no/such/directory/muro-http.db";
+  pid = start_server(10000, 4, &port, NULL, NULL, NULL);
+  srv_db = saved;
+  if (pid < 0) return;
+  check_one(port, "down-health", "GET /health HTTP/1.1\r\n\r\n", 503, "db", 0, 0);
+  check_one(port, "down-feed", "GET /feed HTTP/1.1\r\n\r\n", 500, "internal", 0, 0);
+  post_json(req, sizeof req, tok_ada, "{\"text\":\"hi\"}");
+  check_one(port, "down-create", req, 500, "internal", 0, 0);
+  check_one(port, "down-read", "GET /posts/1 HTTP/1.1\r\n\r\n", 500, "internal", 0, 0);
+  post_like(req, sizeof req, "1", tok_ada);
+  check_one(port, "down-like", req, 500, "internal", 0, 0);
+  if (stop_server(pid) < 0) return;
+}
+
+static void check_memory(void) {
+  pid_t pid;
+  int port = -1;
+  char req[1024];
+  const char *saved = srv_db;
+  srv_db = ":memory:";
+  pid = start_server(10000, 4, &port, NULL, NULL, NULL);
+  srv_db = saved;
+  if (pid < 0) return;
+  check_one(port, "memory-health", "GET /health HTTP/1.1\r\n\r\n", 200, "ok", 0, 0);
+  post_json(req, sizeof req, tok_ada, "{\"text\":\"hi\"}");
+  check_one(port, "memory-create", req, 201, "{\"id\":1,\"text\":\"hi\"}", 0, 0);
+  check_one(port, "memory-read", "GET /posts/1 HTTP/1.1\r\n\r\n", 200, "{\"id\":1,\"text\":\"hi\"}", 0,
+            0);
+  if (stop_server(pid) < 0) return;
+}
+
+static void check_reopen(void) {
+  char path[] = "/tmp/muro-http-reopen-XXXXXX";
+  char req[1024];
+  const char *saved = srv_db;
+  pid_t pid;
+  int port = -1;
+  int fd = mkstemp(path);
+  if (fd < 0) {
+    fail("reopen", "mkstemp");
+    return;
+  }
+  close(fd);
+  srv_db = path;
+  pid = start_server(10000, 4, &port, NULL, NULL, NULL);
+  if (pid < 0) {
+    srv_db = saved;
+    unlink_db(path);
+    return;
+  }
+  post_json(req, sizeof req, tok_ada, "{\"text\":\"hi\"}");
+  check_one(port, "reopen-create", req, 201, "{\"id\":1,\"text\":\"hi\"}", 0, 0);
+  if (stop_server(pid) < 0) {
+    srv_db = saved;
+    unlink_db(path);
+    return;
+  }
+  pid = start_server(10000, 4, &port, NULL, NULL, NULL);
+  if (pid < 0) {
+    srv_db = saved;
+    unlink_db(path);
+    return;
+  }
+  check_one(port, "reopen-read", "GET /posts/1 HTTP/1.1\r\n\r\n", 200, "{\"id\":1,\"text\":\"hi\"}", 0,
+            0);
+  stop_server(pid);
+  srv_db = saved;
+  unlink_db(path);
+}
+
+static void check_precedence(void) {
+  char file_a[] = "/tmp/muro-http-dba-XXXXXX";
+  char file_b[] = "/tmp/muro-http-dbb-XXXXXX";
+  char req[1024];
+  const char *saved = srv_db;
+  pid_t pid;
+  int port = -1;
+  int fd_a = mkstemp(file_a);
+  int fd_b = mkstemp(file_b);
+  if (fd_a < 0 || fd_b < 0) {
+    fail("precedence", "mkstemp");
+    if (fd_a >= 0) {
+      close(fd_a);
+      unlink_db(file_a);
+    }
+    if (fd_b >= 0) {
+      close(fd_b);
+      unlink_db(file_b);
+    }
+    return;
+  }
+  close(fd_a);
+  close(fd_b);
+  srv_db = file_a;
+  pid = start_server(10000, 4, &port, NULL, NULL, NULL);
+  if (pid < 0) {
+    srv_db = saved;
+    unlink_db(file_a);
+    unlink_db(file_b);
+    return;
+  }
+  post_json(req, sizeof req, tok_ada, "{\"text\":\"hi\"}");
+  check_one(port, "prec-create", req, 201, "{\"id\":1,\"text\":\"hi\"}", 0, 0);
+  if (stop_server(pid) < 0) {
+    srv_db = saved;
+    unlink_db(file_a);
+    unlink_db(file_b);
+    return;
+  }
+  srv_db = ":memory:";
+  env_sqlite = file_a;
+  pid = start_server(10000, 4, &port, NULL, NULL, NULL);
+  if (pid >= 0) {
+    check_one(port, "prec-flag", "GET /posts/1 HTTP/1.1\r\n\r\n", 404, "post-missing", 0, 0);
+    stop_server(pid);
+  }
+  pass_db = 0;
+  env_sqlite = file_a;
+  env_muro_db = file_b;
+  pid = start_server(10000, 4, &port, NULL, NULL, NULL);
+  if (pid >= 0) {
+    check_one(port, "prec-muro-db", "GET /posts/1 HTTP/1.1\r\n\r\n", 404, "post-missing", 0, 0);
+    stop_server(pid);
+  }
+  pass_db = 0;
+  env_sqlite = file_a;
+  pid = start_server(10000, 4, &port, NULL, NULL, NULL);
+  if (pid >= 0) {
+    check_one(port, "prec-sqlite-path", "GET /posts/1 HTTP/1.1\r\n\r\n", 200,
+              "{\"id\":1,\"text\":\"hi\"}", 0, 0);
+    stop_server(pid);
+  }
+  srv_db = saved;
+  unlink_db(file_a);
+  unlink_db(file_b);
+}
+
+/* An empty path is rejected before listen. Exit 2, no banner. */
+static void check_exit2(const char *name, char **av, const char *sqlite_env, const char *muro_env,
+                        const char *err_needle) {
+  int sp[2];
+  pid_t pid;
+  char buf[512];
+  size_t n = 0;
+  int status = 0;
+  int i;
+  int reaped = 0;
+  if (pipe(sp) < 0) {
+    fail(name, "pipe");
+    return;
+  }
+  pid = fork();
+  if (pid < 0) {
+    close(sp[0]);
+    close(sp[1]);
+    fail(name, "fork");
+    return;
+  }
+  if (pid == 0) {
+    alarm(0);
+    if (dup2(sp[1], STDOUT_FILENO) < 0) _exit(127);
+    if (dup2(sp[1], STDERR_FILENO) < 0) _exit(127);
+    close(sp[0]);
+    close(sp[1]);
+    unsetenv("MURO_HTTP_DB");
+    unsetenv("MURO_HTTP_JWT_KEY");
+    unsetenv("MURO_HTTP_PORT");
+    unsetenv("MURO_HTTP_IDLE_MS");
+    unsetenv("MURO_HTTP_MAX_CONNECTIONS");
+    unsetenv("SQLITE_PATH");
+    unsetenv("MURO_TEST_FAIL_DB_ADMIT");
+    unsetenv("MURO_TEST_WRITE_LIMIT");
+    unsetenv("MURO_TEST_WRITE_LOG");
+    unsetenv("MURO_TEST_IN_CAP");
+    if (sqlite_env) setenv("SQLITE_PATH", sqlite_env, 1);
+    if (muro_env) setenv("MURO_HTTP_DB", muro_env, 1);
+    execv(bin_path, av);
+    _exit(127);
+  }
+  close(sp[1]);
+  for (;;) {
+    struct pollfd pfd;
+    ssize_t r;
+    if (n + 1 >= sizeof buf) break;
+    pfd.fd = sp[0];
+    pfd.events = POLLIN;
+    if (poll(&pfd, 1, 2000) <= 0) break;
+    r = read(sp[0], buf + n, sizeof buf - 1 - n);
+    if (r <= 0) break;
+    n += (size_t)r;
+  }
+  close(sp[0]);
+  buf[n] = 0;
+  for (i = 0; i < 40; i++) {
+    pid_t got = waitpid(pid, &status, WNOHANG);
+    if (got == pid) {
+      reaped = 1;
+      break;
+    }
+    if (got < 0) break;
+    usleep(50000);
+  }
+  if (!reaped) {
+    kill(pid, SIGKILL);
+    waitpid(pid, &status, 0);
+    fail(name, "still running");
+    return;
+  }
+  if (!WIFEXITED(status) || WEXITSTATUS(status) != 2) {
+    fprintf(stderr, "FAIL %s: status %d out '%s'\n", name, status, buf);
+    failures += 1;
+    return;
+  }
+  if (strstr(buf, "listening") != NULL) fail(name, "listened");
+  if (err_needle && strstr(buf, err_needle) == NULL) {
+    fprintf(stderr, "FAIL %s: stderr '%s'\n", name, buf);
+    failures += 1;
+  }
+}
+
+static void check_empty_db(void) {
+  char *flag[] = {"muro-httpd", "--port", "0", "--db", "", NULL};
+  char *envonly[] = {"muro-httpd", "--port", "0", NULL};
+  check_exit2("empty-db-flag", flag, NULL, NULL, "bad --db");
+  check_exit2("empty-muro-db", envonly, NULL, "", "bad MURO_HTTP_DB");
+  check_exit2("empty-sqlite-path", envonly, "", NULL, "bad SQLITE_PATH");
+}
+
+/* MURO_TEST_FAIL_DB_ADMIT refuses the evDb admit after the store
+   commit. The client still gets 500, and the row is still there. */
+static void check_commit_status(void) {
+  char path[] = "/tmp/muro-http-admit-XXXXXX";
+  char req[1024];
+  const char *saved = srv_db;
+  pid_t pid;
+  int port = -1;
+  int fd = mkstemp(path);
+  if (fd < 0) {
+    fail("commit-status", "mkstemp");
+    return;
+  }
+  close(fd);
+  srv_db = path;
+  env_fail_admit = "2";
+  pid = start_server(10000, 4, &port, NULL, NULL, NULL);
+  if (pid < 0) {
+    srv_db = saved;
+    unlink_db(path);
+    return;
+  }
+  post_json(req, sizeof req, tok_ada, "{\"text\":\"hi\"}");
+  check_one(port, "commit-create", req, 500, "internal", 0, 1);
+  post_like(req, sizeof req, "1", tok_ada);
+  check_one(port, "commit-like", req, 500, "internal", 0, 1);
+  check_one(port, "commit-read", "GET /posts/1 HTTP/1.1\r\n\r\n", 200, "{\"id\":1,\"text\":\"hi\"}", 0,
+            0);
+  post_like(req, sizeof req, "1", tok_ada);
+  check_one(port, "commit-like-again", req, 200, "{\"id\":1,\"likes\":1}", 0, 0);
+  stop_server(pid);
+  srv_db = saved;
+  unlink_db(path);
+}
+
+static void check_no_key(void) {
+  pid_t pid;
+  int port = -1;
+  char req[1024];
+  const char *saved = srv_jwt;
+  srv_jwt = NULL;
+  pid = start_server(10000, 4, &port, NULL, NULL, NULL);
+  srv_jwt = saved;
+  if (pid < 0) return;
+  check_one(port, "nokey-health", "GET /health HTTP/1.1\r\n\r\n", 200, "ok", 0, 0);
+  post_json(req, sizeof req, tok_ada, "{\"text\":\"hi\"}");
+  check_one(port, "nokey-token", req, 401, "bad-token", 0, 0);
+  check_one(port, "nokey-absent", "POST /posts HTTP/1.1\r\nContent-Length: 2\r\n\r\n{}", 401,
+            "missing-bearer", 0, 0);
   if (stop_server(pid) < 0) return;
 }
 
 int main(int argc, char **argv) {
   pid_t pid;
   int port = -1;
+  char dbpath[] = "/tmp/muro-http-e2e-XXXXXX";
+  int dbfd;
   if (argc > 1) bin_path = argv[1];
   signal(SIGPIPE, SIG_IGN);
-  alarm(90);
+  alarm(180);
+  srv_jwt = "muro-http-test-key";
+  dbfd = mkstemp(dbpath);
+  if (dbfd < 0) {
+    fail("main-db", "mkstemp");
+    return 1;
+  }
+  close(dbfd);
+  srv_db = dbpath;
   pid = start_server(10000, 16, &port, NULL, NULL, NULL);
-  if (pid < 0) return 1;
+  if (pid < 0) {
+    unlink_db(dbpath);
+    return 1;
+  }
   check_one(port, "health", "GET /health HTTP/1.1\r\n\r\n", 200, "ok", 0, 0);
   check_keepalive(port);
   check_pipeline(port);
   check_one(port, "close", "GET /health HTTP/1.1\r\nConnection: close\r\n\r\n", 200, "ok", 1, 1);
   check_one(port, "malformed", "GET/feed HTTP/1.1\r\n\r\n", 400, "malformed", 1, 1);
   check_fin(port);
-  check_one(port, "feed", "GET /feed HTTP/1.1\r\n\r\n", 500, "internal", 0, 0);
+  check_one(port, "feed", "GET /feed HTTP/1.1\r\n\r\n", 200, "[]", 0, 0);
   check_one(port, "missing", "GET /missing HTTP/1.1\r\n\r\n", 404, "not-found", 0, 0);
   check_one(port, "post", "POST /posts HTTP/1.1\r\nContent-Length: 2\r\n\r\n{}", 401, "missing-bearer",
             0, 0);
   check_split_body(port);
+  check_routes(port);
   check_full_buffer();
-  if (stop_server(pid) < 0) return 1;
+  if (stop_server(pid) < 0) {
+    unlink_db(dbpath);
+    return 1;
+  }
   pid = start_server(300, 16, &port, NULL, NULL, NULL);
-  if (pid < 0) return 1;
+  if (pid < 0) {
+    unlink_db(dbpath);
+    return 1;
+  }
   check_idle_bare(port);
   check_idle_after(port);
-  if (stop_server(pid) < 0) return 1;
+  if (stop_server(pid) < 0) {
+    unlink_db(dbpath);
+    return 1;
+  }
   check_max_conn();
   check_partial_send();
+  check_db_down();
+  check_no_key();
+  check_memory();
+  check_reopen();
+  check_precedence();
+  check_empty_db();
+  check_commit_status();
+  unlink_db(dbpath);
   if (failures != 0) {
     fprintf(stderr, "%d failures\n", failures);
     return 1;

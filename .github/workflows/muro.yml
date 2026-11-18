@@ -40,6 +40,9 @@ jobs:
       - name: Test
         run: mix test
 
+      - name: Install SQLite
+        run: sudo apt-get update && sudo apt-get install -y libsqlite3-dev
+
       - name: Build and run the C drivers and muro-httpd
         run: make c-check
 
@@ -48,6 +51,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
+
+      - name: Install SQLite
+        run: sudo apt-get update && sudo apt-get install -y libsqlite3-dev
 
       - name: C drivers and muro-httpd under ASan and UBSan
         run: make c-sanitize

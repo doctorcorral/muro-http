@@ -9,5 +9,9 @@ c/test_sess
 c/test_admit
 c/test_render
 c/test_e2e
+c/test_body
+c/test_jwt
+c/test_json
+c/test_store
 c/muro-httpd
 *.o
