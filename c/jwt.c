@@ -1,7 +1,9 @@
 /* HS256 bearer check. SHA-256 and HMAC are the FIPS 180-4 and
-   FIPS 198-1 constructions. The compare of the 32-byte MAC is
-   constant-time. Header and payload JSON are read here because the
-   body book classifies a post body. It does not extract a claim. */
+   FIPS 198-1 constructions. The MAC compare always runs over 32
+   bytes, against a dummy when the decoded signature is not 32
+   bytes, and then rejects a bad length. Header and payload JSON
+   are read here because the body book classifies a post body.
+   It does not extract a claim. */
 
 #include "jwt.h"
 #include "decision_tags.h"
@@ -201,6 +203,10 @@ static int b64url_dec(const uint8_t *in, size_t n, uint8_t *dst, size_t cap, siz
       have += 1;
     }
     if (have < 2) return -1;
+    /* RFC 4648: leftover bits in a final partial quartet must be 0.
+       Two chars leave 4 bits. Three chars leave 2 bits. */
+    if (have == 2 && (v[1] & 0x0f) != 0) return -1;
+    if (have == 3 && (v[2] & 0x03) != 0) return -1;
     acc = ((unsigned)v[0] << 18) | ((unsigned)(v[1] < 0 ? 0 : v[1]) << 12);
     if (have > 2) acc |= (unsigned)v[2] << 6;
     if (have > 3) acc |= (unsigned)v[3];
@@ -311,6 +317,8 @@ static int skip_string(const uint8_t *p, size_t n, size_t *i) {
   return take_string(p, n, i, NULL, 0, NULL, 0);
 }
 
+/* JSON integer only. A fraction or an exponent is rejected, so a
+   float exp or nbf is not a valid claim. */
 static int take_i64(const uint8_t *p, size_t n, size_t *i, int64_t *out) {
   int neg = 0;
   uint64_t u = 0;
@@ -346,9 +354,29 @@ static int take_i64(const uint8_t *p, size_t n, size_t *i, int64_t *out) {
   return 0;
 }
 
+/* A JSON number: optional minus, int, optional fraction, optional
+   exponent. Ignored claims and nested values use this. The value
+   does not have to fit in an int64. */
 static int skip_number(const uint8_t *p, size_t n, size_t *i) {
-  int64_t v;
-  return take_i64(p, n, i, &v);
+  if (*i < n && p[*i] == '-') *i += 1;
+  if (*i >= n || p[*i] < '0' || p[*i] > '9') return -1;
+  if (p[*i] == '0') {
+    *i += 1;
+  } else {
+    while (*i < n && p[*i] >= '0' && p[*i] <= '9') *i += 1;
+  }
+  if (*i < n && p[*i] == '.') {
+    *i += 1;
+    if (*i >= n || p[*i] < '0' || p[*i] > '9') return -1;
+    while (*i < n && p[*i] >= '0' && p[*i] <= '9') *i += 1;
+  }
+  if (*i < n && (p[*i] == 'e' || p[*i] == 'E')) {
+    *i += 1;
+    if (*i < n && (p[*i] == '+' || p[*i] == '-')) *i += 1;
+    if (*i >= n || p[*i] < '0' || p[*i] > '9') return -1;
+    while (*i < n && p[*i] >= '0' && p[*i] <= '9') *i += 1;
+  }
+  return 0;
 }
 
 static int skip_lit(const uint8_t *p, size_t n, size_t *i, const char *lit, size_t ln) {
@@ -417,8 +445,18 @@ static int key_is(const uint8_t *k, size_t kn, const char *lit) {
   return kn == n && memcmp(k, lit, n) == 0;
 }
 
+/* RFC 7519 leaves typ optional. When present it is a media type,
+   compared as three ASCII letters, any case. */
+static int typ_is_jwt(const uint8_t *v, size_t n) {
+  if (n != 3) return 0;
+  if ((v[0] | 0x20) != 'j') return 0;
+  if ((v[1] | 0x20) != 'w') return 0;
+  if ((v[2] | 0x20) != 't') return 0;
+  return 1;
+}
+
 /* 0 ok. alg_hs is 1 only for the four bytes HS256. typ_bad is 1 when
-   typ is present and is not JWT. */
+   typ is present and is not JWT in any ASCII case. */
 static int parse_header(const uint8_t *p, size_t n, int *alg_hs, int *typ_bad) {
   size_t i = 0;
   int saw_alg = 0;
@@ -459,7 +497,7 @@ static int parse_header(const uint8_t *p, size_t n, int *alg_hs, int *typ_bad) {
       if (saw_typ) return -1;
       saw_typ = 1;
       if (take_string(p, n, &i, val, sizeof val, &vn, 1) < 0) return -1;
-      if (!key_is(val, vn, "JWT")) *typ_bad = 1;
+      if (!typ_is_jwt(val, vn)) *typ_bad = 1;
     } else if (skip_value(p, n, &i, 0) < 0) {
       return -1;
     }
@@ -524,7 +562,10 @@ static int parse_payload(const uint8_t *p, size_t n, int64_t now, JwtResult *out
       i += 1;
       skip_ws(p, n, &i);
       if (i != n || !saw_sub) return -1;
-      if (saw_exp && (now < 0 || exp < now)) return -1;
+      /* exp and nbf are optional. RFC 7519: a token is invalid on
+         or after exp, and before nbf. nbf == now is valid.
+         The valid window, when both are present, is nbf <= now < exp. */
+      if (saw_exp && (now < 0 || exp <= now)) return -1;
       if (saw_nbf && (now < 0 || nbf > now)) return -1;
       return 0;
     }
@@ -590,7 +631,11 @@ void jwt_classify(const uint8_t *val, size_t n, const uint8_t *key, size_t key_n
     bad_token(out);
     return;
   }
-  sig_ok = sig_n == 32 && ct_eq(mac, sig, 32);
+  {
+    static const uint8_t dummy[32] = {0};
+    const uint8_t *cmp = sig_n == 32 ? sig : dummy;
+    sig_ok = ct_eq(mac, cmp, 32) && sig_n == 32;
+  }
   if (!sig_ok) {
     bad_token(out);
     return;

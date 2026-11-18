@@ -4,7 +4,10 @@
    status, or a response. It feeds bytes, peer eof, write progress,
    write done, write error, an idle tick, and db events whose facts
    come from the request, the JWT check, and SQLite.
-   It performs the action the image returns.
+   It performs the action the image returns. decide chooses every
+   status except one: a create or a like that has already committed,
+   whose rendered response does not fit, is answered 500 here so the
+   socket is not closed with no status.
 
    c/generated/render.h cannot sit in this file. It and conn.h both
    define the muro prelude. c/host_render.c includes render.h and
@@ -110,6 +113,7 @@ typedef struct Slot {
   size_t row_cap;
   size_t row_len;
   int row_ok;
+  int wrote;
   uint64_t f_auth;
   uint64_t f_body;
   uint64_t f_like;
@@ -315,8 +319,13 @@ static int take_facts(Server *sv, Slot *s) {
 
 /* One query after decide returns act-observe. The lookup and the like
    write are one step, so id-present is not paired with db-down.
-   Returns 0 when the row does not fit or the route has nothing left
-   to learn. That closes the socket. It is not a status. */
+   Create and like render the row inside the store transaction and
+   commit only when that row fits. A fit failure rolls back and this
+   function reports db-down, so decide answers 500.
+   Returns 0 when a read row does not fit, or when the route has
+   nothing left to learn. That closes the socket. It is not a status.
+   POST /posts reaches here only for body-ok, which stored the text.
+   A missing text is a host bug and closes the socket. */
 static int query_facts(Server *sv, Slot *s) {
   uint64_t verb = field(s->st, 3);
   uint64_t path = field(s->st, 4);
@@ -342,17 +351,18 @@ static int query_facts(Server *sv, Slot *s) {
     int64_t id = 0;
     size_t n = 0;
     if (!s->f_text_ok) {
+      fprintf(stderr, "muro-httpd: create observed without text\n");
+      return 0;
+    }
+    rc = store_create(sv->store, s->f_text, s->f_text_n, &id, s->row, s->row_cap, &n);
+    if (rc != 0) {
       s->f_db = DB_DOWN;
       return 1;
     }
-    if (store_create(sv->store, s->f_text, s->f_text_n, &id) != 0) {
-      s->f_db = DB_DOWN;
-      return 1;
-    }
-    if (json_row_post(s->row, s->row_cap, &n, id, s->f_text, s->f_text_n) != 0) return 0;
     s->row_len = n;
     s->row_ok = 1;
     s->f_db = DB_OK;
+    s->wrote = 1;
     return 1;
   }
   if (verb == VERB_GET && path == PATH_POST_ID) {
@@ -382,7 +392,7 @@ static int query_facts(Server *sv, Slot *s) {
     int64_t likes = 0;
     size_t n = 0;
     if (s->f_idc != ID_UNKNOWN || s->f_auth != AUTH_OK || s->f_sub_n == 0) return 0;
-    rc = store_like(sv->store, s->f_idn, s->f_sub, s->f_sub_n, &likes);
+    rc = store_like(sv->store, s->f_idn, s->f_sub, s->f_sub_n, &likes, s->row, s->row_cap, &n);
     if (rc < 0) {
       s->f_db = DB_DOWN;
       return 1;
@@ -392,12 +402,12 @@ static int query_facts(Server *sv, Slot *s) {
       s->f_idc = ID_MISSING;
       return 1;
     }
-    if (json_row_like(s->row, s->row_cap, &n, s->f_idn, likes) != 0) return 0;
     s->row_len = n;
     s->row_ok = 1;
     s->f_db = DB_OK;
     s->f_idc = ID_PRESENT;
     s->f_like = rc == 1 ? LIKE_NEW : LIKE_AGAIN;
+    s->wrote = 1;
     return 1;
   }
   return 0;
@@ -442,6 +452,23 @@ static int step_ev(Slot *s, Ev ev) {
   return 1;
 }
 
+/* Body is decide's err-internal text. Used only after a committed
+   write whose success response did not fit. keep 1 is Connection: close. */
+static const char k_500_keep[] =
+    "HTTP/1.1 500 Internal Server Error\r\n"
+    "Connection: keep-alive\r\n"
+    "Content-Length: 8\r\n"
+    "Content-Type: text/plain; charset=utf-8\r\n"
+    "\r\n"
+    "internal";
+static const char k_500_close[] =
+    "HTTP/1.1 500 Internal Server Error\r\n"
+    "Connection: close\r\n"
+    "Content-Length: 8\r\n"
+    "Content-Type: text/plain; charset=utf-8\r\n"
+    "\r\n"
+    "internal";
+
 static int render_out(Slot *s) {
   size_t got = 0;
   uint64_t act = field(s->st, 10);
@@ -461,6 +488,18 @@ static int render_out(Slot *s) {
                        row, row_n, &got);
   if (n == 0) {
     muro_http_reset();
+    if (s->wrote) {
+      const char *fb = field(s->st, 2) == 1 ? k_500_close : k_500_keep;
+      size_t fn = strlen(fb);
+      if (fn <= s->out_cap) {
+        memcpy(s->out, fb, fn);
+        s->out_len = fn;
+        s->out_off = 0;
+        s->rendered = 1;
+        fprintf(stderr, "muro-httpd: response is %zu bytes after commit; sending 500\n", got);
+        return 1;
+      }
+    }
     fprintf(stderr, "muro-httpd: response is %zu bytes\n", got);
     return 0;
   }
@@ -493,6 +532,7 @@ static int pump(Server *sv, Slot *s) {
       s->fact_live = 0;
       s->fact_queried = 0;
       s->row_ok = 0;
+      s->wrote = 0;
     }
     if (phase == PH_CLOSED || action == HOST_ACT_CLOSE) {
       close_slot(sv, s);
@@ -506,7 +546,7 @@ static int pump(Server *sv, Slot *s) {
         }
       } else if (!s->fact_queried) {
         if (!query_facts(sv, s)) {
-          fprintf(stderr, "muro-httpd: row does not fit\n");
+          fprintf(stderr, "muro-httpd: query closed the socket\n");
           close_slot(sv, s);
           return 0;
         }

@@ -162,7 +162,12 @@ socket while a response is in progress.
 
 Host facts come from the request, from SQLite, and from an HS256
 check. The host computes those facts and performs the act `decide`
-returns. It does not choose a move, a status, or a body.
+returns. It does not choose a move or a body. `decide` chooses every
+status. The one exception is a create or a like that has already
+committed and whose rendered response does not fit: the host writes
+`500` and the body `internal`, so the socket is not closed with no
+status. The row buffer is larger than any row that can meet that
+case. See Limits.
 
 `GET /health` and `GET /feed` query when `decide` returns
 `act-observe`. `POST /posts` queries only after auth is `auth-ok` and
@@ -172,13 +177,28 @@ query sets the terminal db, id, and like facts together. A later ask
 closes the socket. `id-present` is that completed lookup. The host
 does not pair it with `db-down`. If the write fails after the lookup
 was going to report `id-present`, the host sends `db-down` and leaves
-the id unknown.
+the id unknown. `POST /posts` reaches the query only for `body-ok`,
+which has already stored the text. A missing text closes the socket.
+That path is a host bug, not a `500`.
 
-The database is SQLite, one connection, `SQLITE_OPEN_NOMUTEX`.
-`--db` or `MURO_HTTP_DB` is the path. The default is `:memory:`.
-Tables are `posts(id INTEGER PRIMARY KEY AUTOINCREMENT, text TEXT NOT
-NULL)` and `likes(post_id INTEGER NOT NULL, sub TEXT NOT NULL,
-PRIMARY KEY(post_id, sub))`. A path that cannot be opened leaves the
+The store is the swap boundary. `decide` never sees SQLite. The host
+asks for rows and performs the act. `store_open` runs
+`PRAGMA journal_mode=WAL` and `PRAGMA synchronous=NORMAL`, then reads
+both back, and sets `sqlite3_busy_timeout` to 5000 ms. `NORMAL` is 1.
+The challenge names that mode as the durability floor for WAL: the
+commit finishes before create returns 0 or like returns 1 or 2.
+A file database whose journal mode is not `wal`, or whose synchronous
+value is below `NORMAL`, is not opened. `:memory:` cannot be WAL.
+It remains the test-only default, journal mode `memory`, and it is
+not a durable database. The path is `--db`, then `MURO_HTTP_DB`,
+then `SQLITE_PATH`, then `:memory:`. An empty `--db`, `MURO_HTTP_DB`,
+or `SQLITE_PATH` exits 2. Tables are
+`posts(id INTEGER PRIMARY KEY AUTOINCREMENT, text TEXT NOT NULL)` and
+`likes(post_id INTEGER NOT NULL, sub TEXT NOT NULL, PRIMARY KEY(post_id, sub))`.
+One connection, `SQLITE_OPEN_NOMUTEX`. Create and like render the row
+inside the write transaction and commit only when that row fits. If
+it does not fit, the store rolls back and the host passes `db-down`,
+so `decide` answers 500. A path that cannot be opened leaves the
 process listening. Every db fact is then `db-down`, and stderr says
 `muro-httpd: database is unavailable`.
 
@@ -186,11 +206,21 @@ The JWT key is `--jwt-key` or `MURO_HTTP_JWT_KEY`. The flag wins.
 The bytes are the HMAC key, at most 256. A longer key exits 2. An
 empty key checks no bearer: a presented token is `auth-bad-token`,
 and a missing header stays `auth-absent`. The value must be `Bearer `
-plus three base64url segments. `alg` must be `HS256`. `none` and any
-other alg are `auth-bad-token`. The MAC compare is constant-time.
-The signature is checked before the payload. `sub` is a non-empty
-string of at most 128 bytes. `exp` and `nbf`, when present, are JSON
-integers compared with `time(NULL)`. A bad `sub`, `exp`, or `nbf` is
+plus three base64url segments. A final partial quartet with non-zero
+leftover bits is rejected. `alg` must be `HS256`. `none` and any
+other alg are `auth-bad-token`. `typ` may be absent. When present it
+must be `JWT` in any ASCII case. Any other `typ` is `auth-bad-token`.
+The MAC compare always runs over 32 bytes. A decoded signature of
+any other length is compared with a dummy and then rejected. The
+signature is checked before the payload. `sub` is a non-empty string
+of at most 128 bytes. `exp` and `nbf` are optional. The challenge
+SPEC says to verify `exp`. It does not say a missing `exp` is an
+error, and the upstream tests always send one. When present, each
+must be a JSON integer with no fraction and no exponent, so a float
+`exp` or `nbf` is `auth-bad-payload`. They are compared with
+`time(NULL)`. A token is rejected when `exp <= now` and when
+`nbf > now`. `nbf == now` is valid. When both claims are present the
+valid window is `nbf <= now < exp`. A bad `sub`, `exp`, or `nbf` is
 `auth-bad-payload`. The test key `muro-http-test-key` lives in the
 test sources. It is not a server default.
 
@@ -200,19 +230,21 @@ checked as UTF-8 before the first `decide`. A bad escape or
 ill-formed UTF-8 becomes `body-malformed`. That change is a fact.
 
 Row acts pass the row bytes into `httpRender`. The book prints the
-decimal `Content-Length` and concatenates the row. The host builds
-the JSON. Feed is a JSON array ordered by id. Read and create are
-`{"id":N,"text":"..."}`. Like is `{"id":N,"likes":M}`. The same
-subject twice is `like-new` (201) and then `like-again` (200), and
-the count stays 1. Acts 0, 6, and 7 ignore the row.
+decimal `Content-Length` and concatenates the row. Feed, create, and
+like bytes come from the store. Read bytes are built in the host
+from the stored text. Feed is a JSON array ordered by id. Read and
+create are `{"id":N,"text":"..."}`. Like is `{"id":N,"likes":M}`.
+The same subject twice is `like-new` (201) and then `like-again`
+(200), and the count stays 1. Acts 0, 6, and 7 ignore the row.
 
-Flags `--port`, `--idle-ms`, `--max-connections`, `--db`, and
-`--jwt-key` override `MURO_HTTP_PORT`, `MURO_HTTP_IDLE_MS`,
-`MURO_HTTP_MAX_CONNECTIONS`, `MURO_HTTP_DB`, and `MURO_HTTP_JWT_KEY`.
-The defaults are port 8080, 5000 ms, 128 connections, `:memory:`, and
-no key. Port 0 prints `listening 127.0.0.1 <port>`. SIGINT and
-SIGTERM close the sockets and exit 0. The process binds `127.0.0.1`
-only.
+Flags `--port`, `--idle-ms`, `--max-connections`, and `--jwt-key`
+override `MURO_HTTP_PORT`, `MURO_HTTP_IDLE_MS`,
+`MURO_HTTP_MAX_CONNECTIONS`, and `MURO_HTTP_JWT_KEY`. The database
+path is `--db`, then `MURO_HTTP_DB`, then `SQLITE_PATH`, then
+`:memory:`. The defaults are port 8080, 5000 ms, 128 connections,
+`:memory:`, and no key. Port 0 prints `listening 127.0.0.1 <port>`.
+SIGINT and SIGTERM close the sockets and exit 0. The process binds
+`127.0.0.1` only.
 
 `c/test_e2e` starts that binary on an ephemeral port. It checks
 `GET /health`, a malformed request, two requests on one connection, a
@@ -223,10 +255,14 @@ receive buffer that fills before the image consumes it. It also
 checks each challenge route: a good JWT, a bad signature, `alg`
 `none`, a missing bearer, a bad payload, a missing and a present id,
 a like and the same like again, valid and invalid JSON, and a
-database path that cannot be opened. The child drops
-`MURO_HTTP_DB` and `MURO_HTTP_JWT_KEY` and passes `--db` and
-`--jwt-key`, so a developer environment does not change the result.
-Those are tests.
+database path that cannot be opened, `exp == now`, `nbf == now`,
+a float `exp`, a float ignored claim, `typ` absent or `jwt` or
+`JWS`, a temp file whose create is still there after reopen, and
+the path order `--db`, then `MURO_HTTP_DB`, then `SQLITE_PATH`.
+A `:memory:` server is still checked. The child drops
+`MURO_HTTP_DB`, `SQLITE_PATH`, and `MURO_HTTP_JWT_KEY` and passes
+`--db` and `--jwt-key`, except in the path-order cases, so a
+developer environment does not change the result. Those are tests.
 
 The reduction equations in `render.muro` are the reduction evidence
 (refl) for the strings they name. There are eight. `render-empty-row`
@@ -302,11 +338,21 @@ prelude, so the socket loop includes neither `body.h` nor `render.h`.
   are not decoded.
 - A JWT claim name longer than 32 bytes is rejected. Header and
   payload JSON are decoded into a 4096-byte buffer.
-- The row buffer is 65536 bytes and the write buffer is 69632. A row
-  or a response that does not fit closes the socket. That close is a
-  host limit. A create that already inserted the row still closes.
-  The image's write range stays length 16. The host sends the rendered
-  buffer, then `evDone`.
+- The row buffer is 65536 bytes and the write buffer is 69632. A feed
+  or a read that does not fit closes the socket. Create and like
+  render inside the transaction. If that row does not fit, the store
+  rolls back and the fact is `db-down`, so `decide` answers 500.
+  The HTTP header on a row is under 256 bytes, so a row that fits in
+  the row buffer fits in the write buffer. If the rendered response
+  still does not fit after a committed write, the host sends 500 and
+  the body `internal`. No path leaves a committed write with no HTTP
+  status. The image's write range stays length 16. The host sends
+  the rendered buffer, then `evDone`.
+- `:memory:` is the default and is test-only. It cannot be WAL, so
+  it is not a durable database and it does not meet the challenge
+  rule that forbids an in-memory database. A file path does.
+  `synchronous=NORMAL` is the value read back on every open store,
+  including `:memory:`.
 - An authorization value longer than 16384 bytes is `auth-bad-token`.
 
 ## Check

@@ -16,16 +16,17 @@ static void usage(FILE *out) {
       "  --port N               listen port (0 picks one). default 8080\n"
       "  --idle-ms N            idle tick. default 5000\n"
       "  --max-connections N    accept cap. default 128, max 1024\n"
-      "  --db PATH              SQLite file. default :memory:\n"
+      "  --db PATH              SQLite file. Overrides MURO_HTTP_DB and SQLITE_PATH.\n"
+      "                         Default :memory: is test-only and is not WAL.\n"
       "  --jwt-key SECRET       HS256 key, raw bytes, at most 256\n"
       "\n"
       "Environment, used when the flag is absent: MURO_HTTP_PORT,\n"
-      "MURO_HTTP_IDLE_MS, MURO_HTTP_MAX_CONNECTIONS, MURO_HTTP_DB,\n"
-      "MURO_HTTP_JWT_KEY.\n"
+      "MURO_HTTP_IDLE_MS, MURO_HTTP_MAX_CONNECTIONS, MURO_HTTP_JWT_KEY.\n"
+      "The database path is --db, then MURO_HTTP_DB, then SQLITE_PATH,\n"
+      "then :memory:. A file that is not wal stays down. The process\n"
+      "still listens. An empty key checks no bearer.\n"
       "\n"
-      "The process binds 127.0.0.1 only. SIGINT and SIGTERM stop it.\n"
-      "A database that cannot be opened stays down and the process\n"
-      "still listens. An empty key checks no bearer.\n",
+      "The process binds 127.0.0.1 only. SIGINT and SIGTERM stop it.\n",
       out);
 }
 
@@ -79,6 +80,14 @@ int main(int argc, char **argv) {
   if (take_env("MURO_HTTP_PORT", 0, 65535, &cfg.port) < 0) return 2;
   if (take_env("MURO_HTTP_IDLE_MS", 1, 86400000, &cfg.idle_ms) < 0) return 2;
   if (take_env("MURO_HTTP_MAX_CONNECTIONS", 1, 1024, &cfg.max_conn) < 0) return 2;
+  env_db = getenv("SQLITE_PATH");
+  if (env_db) {
+    if (!env_db[0]) {
+      fprintf(stderr, "muro-httpd: bad SQLITE_PATH\n");
+      return 2;
+    }
+    cfg.db_path = env_db;
+  }
   env_db = getenv("MURO_HTTP_DB");
   if (env_db) {
     if (!env_db[0]) {

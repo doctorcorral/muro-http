@@ -45,8 +45,8 @@ c/test_sess: c/test_sess.o c/session.o c/shim.o
 c/test_render: c/test_render.o c/render.o c/tag_pin.o c/conn.o c/shim.o
 	$(CC) $(LDFLAGS) -o $@ c/test_render.o c/render.o c/tag_pin.o c/conn.o c/shim.o
 
-c/test_e2e: c/test_e2e.o
-	$(CC) $(LDFLAGS) -o $@ c/test_e2e.o
+c/test_e2e: c/test_e2e.o c/jwt.o
+	$(CC) $(LDFLAGS) -o $@ c/test_e2e.o c/jwt.o
 
 c/test_body: c/test_body.o c/body.o c/shim.o
 	$(CC) $(LDFLAGS) -o $@ c/test_body.o c/body.o c/shim.o

@@ -70,6 +70,94 @@ static void expect(const char *name, const char *token, int auth, const char *su
   }
 }
 
+static const char b64tab[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+
+static int b64url_enc(const uint8_t *in, size_t n, char *dst, size_t cap) {
+  size_t i = 0;
+  size_t o = 0;
+  while (i + 2 < n) {
+    unsigned v = ((unsigned)in[i] << 16) | ((unsigned)in[i + 1] << 8) | (unsigned)in[i + 2];
+    if (o + 4 >= cap) return -1;
+    dst[o++] = b64tab[(v >> 18) & 63];
+    dst[o++] = b64tab[(v >> 12) & 63];
+    dst[o++] = b64tab[(v >> 6) & 63];
+    dst[o++] = b64tab[v & 63];
+    i += 3;
+  }
+  if (i < n) {
+    unsigned v = (unsigned)in[i] << 16;
+    int rem = (int)(n - i);
+    if (rem == 2) v |= (unsigned)in[i + 1] << 8;
+    if (o + (rem == 2 ? 3 : 2) >= cap) return -1;
+    dst[o++] = b64tab[(v >> 18) & 63];
+    dst[o++] = b64tab[(v >> 12) & 63];
+    if (rem == 2) dst[o++] = b64tab[(v >> 6) & 63];
+  }
+  if (o >= cap) return -1;
+  dst[o] = 0;
+  return (int)o;
+}
+
+static int b64_val(char c) {
+  const char *p = strchr(b64tab, c);
+  if (!p) return -1;
+  return (int)(p - b64tab);
+}
+
+static int sign_token(char *dst, size_t cap, const char *header, const char *payload) {
+  char hb[256];
+  char pb[800];
+  char sb[64];
+  char mac_in[1100];
+  uint8_t mac[32];
+  int hn;
+  int pn;
+  int sn;
+  int n;
+  if (!header) header = "{\"alg\":\"HS256\",\"typ\":\"JWT\"}";
+  hn = b64url_enc((const uint8_t *)header, strlen(header), hb, sizeof hb);
+  pn = b64url_enc((const uint8_t *)payload, strlen(payload), pb, sizeof pb);
+  if (hn < 0 || pn < 0) return -1;
+  n = snprintf(mac_in, sizeof mac_in, "%s.%s", hb, pb);
+  if (n < 0 || (size_t)n >= sizeof mac_in) return -1;
+  jwt_hmac_sha256((const uint8_t *)key, strlen(key), (const uint8_t *)mac_in, (size_t)n, mac);
+  sn = b64url_enc(mac, 32, sb, sizeof sb);
+  if (sn < 0) return -1;
+  n = snprintf(dst, cap, "%s.%s", mac_in, sb);
+  if (n < 0 || (size_t)n >= cap) return -1;
+  return n;
+}
+
+static void expect_raw(const char *name, const char *token, int auth, const char *sub) {
+  expect(name, token, auth, sub);
+}
+
+static void expect_claims(const char *name, const char *header, const char *payload, int auth,
+                          const char *sub) {
+  char tok[1400];
+  if (sign_token(tok, sizeof tok, header, payload) < 0) {
+    bad(name);
+    return;
+  }
+  expect_raw(name, tok, auth, sub);
+}
+
+/* Flip a leftover bit in the last character of a partial quartet.
+   rem 1 leaves 4 bits. rem 2 leaves 2 bits. */
+static int flip_tail(char *seg, int leftover_mask) {
+  size_t n = strlen(seg);
+  int v;
+  int flipped;
+  if (n == 0) return -1;
+  v = b64_val(seg[n - 1]);
+  if (v < 0) return -1;
+  flipped = v | leftover_mask;
+  if (flipped == v) flipped = v | (leftover_mask == 1 ? 2 : 1);
+  if ((flipped & ~leftover_mask) != (v & ~leftover_mask)) return -1;
+  seg[n - 1] = b64tab[flipped & 63];
+  return flipped == v ? -1 : 0;
+}
+
 int main(void) {
   uint8_t dig[32];
   JwtResult r;
@@ -107,6 +195,93 @@ int main(void) {
     int n = snprintf(hdr, sizeof hdr, "Bearer %s", ada);
     jwt_classify((const uint8_t *)hdr, (size_t)n, (const uint8_t *)"other", 5, now, &r);
     if (r.auth != AUTH_BAD_TOKEN) bad("other key");
+  }
+  {
+    char tok[800];
+    if (sign_token(tok, sizeof tok, NULL, "{\"sub\":\"ada\"}") < 0 || strcmp(tok, ada) != 0)
+      bad("sign ada");
+  }
+  {
+    char payload[80];
+    snprintf(payload, sizeof payload, "{\"sub\":\"ada\",\"exp\":%lld}", (long long)now);
+    expect_claims("exp-eq", NULL, payload, AUTH_BAD_PAYLOAD, NULL);
+    snprintf(payload, sizeof payload, "{\"sub\":\"ada\",\"exp\":%lld}", (long long)(now + 1));
+    expect_claims("exp-next", NULL, payload, AUTH_OK, "ada");
+    snprintf(payload, sizeof payload, "{\"sub\":\"ada\",\"nbf\":%lld}", (long long)now);
+    expect_claims("nbf-eq", NULL, payload, AUTH_OK, "ada");
+    snprintf(payload, sizeof payload, "{\"sub\":\"ada\",\"nbf\":%lld}", (long long)(now + 1));
+    expect_claims("nbf-next", NULL, payload, AUTH_BAD_PAYLOAD, NULL);
+    snprintf(payload, sizeof payload, "{\"sub\":\"ada\",\"nbf\":%lld,\"exp\":%lld}", (long long)now,
+             (long long)(now + 1));
+    expect_claims("window", NULL, payload, AUTH_OK, "ada");
+    snprintf(payload, sizeof payload, "{\"sub\":\"ada\",\"nbf\":%lld,\"exp\":%lld}", (long long)now,
+             (long long)now);
+    expect_claims("window-empty", NULL, payload, AUTH_BAD_PAYLOAD, NULL);
+  }
+  expect_claims("float-iat", NULL, "{\"sub\":\"ada\",\"iat\":1.5}", AUTH_OK, "ada");
+  expect_claims("float-neg", NULL, "{\"sub\":\"ada\",\"x\":-2.5e+1}", AUTH_OK, "ada");
+  expect_claims("float-nest", NULL, "{\"sub\":\"ada\",\"aud\":[1.5,2e1],\"m\":{\"k\":-0.5}}", AUTH_OK,
+                "ada");
+  expect_claims("float-big", NULL, "{\"sub\":\"ada\",\"big\":123456789012345678901234567890}",
+                AUTH_OK, "ada");
+  expect_claims("float-exp", NULL, "{\"sub\":\"ada\",\"exp\":1.5}", AUTH_BAD_PAYLOAD, NULL);
+  expect_claims("float-exp-e", NULL, "{\"sub\":\"ada\",\"exp\":1e2}", AUTH_BAD_PAYLOAD, NULL);
+  expect_claims("float-nbf", NULL, "{\"sub\":\"ada\",\"nbf\":1.0}", AUTH_BAD_PAYLOAD, NULL);
+  expect_claims("bad-num", NULL, "{\"sub\":\"ada\",\"x\":01}", AUTH_BAD_PAYLOAD, NULL);
+  expect_claims("header-float", "{\"alg\":\"HS256\",\"typ\":\"JWT\",\"kid\":1.5}", "{\"sub\":\"ada\"}",
+                AUTH_OK, "ada");
+  expect_claims("typ-lower", "{\"alg\":\"HS256\",\"typ\":\"jwt\"}", "{\"sub\":\"ada\"}", AUTH_OK,
+                "ada");
+  expect_claims("typ-mixed", "{\"alg\":\"HS256\",\"typ\":\"Jwt\"}", "{\"sub\":\"ada\"}", AUTH_OK,
+                "ada");
+  expect_claims("typ-absent", "{\"alg\":\"HS256\"}", "{\"sub\":\"ada\"}", AUTH_OK, "ada");
+  expect_claims("typ-jws", "{\"alg\":\"HS256\",\"typ\":\"JWS\"}", "{\"sub\":\"ada\"}", AUTH_BAD_TOKEN,
+                NULL);
+  {
+    const char *hdr_json = "{\"alg\":\"HS256\",\"typ\":\"JWT\"}";
+    const char *pay_json = "{\"sub\":\"ada\"}";
+    char hb[128];
+    char pb[128];
+    char sb[64];
+    char mac_in[300];
+    char tok[400];
+    uint8_t mac[32];
+    int hn = b64url_enc((const uint8_t *)hdr_json, strlen(hdr_json), hb, sizeof hb);
+    int pn = b64url_enc((const uint8_t *)pay_json, strlen(pay_json), pb, sizeof pb);
+    int n;
+    int sn;
+    if (hn < 0 || pn < 0 || flip_tail(pb, 0x0f) < 0) bad("payload bits");
+    else {
+      n = snprintf(mac_in, sizeof mac_in, "%s.%s", hb, pb);
+      jwt_hmac_sha256((const uint8_t *)key, strlen(key), (const uint8_t *)mac_in, (size_t)n, mac);
+      sn = b64url_enc(mac, 32, sb, sizeof sb);
+      if (sn < 0) bad("payload bits sig");
+      else {
+        snprintf(tok, sizeof tok, "%s.%s", mac_in, sb);
+        expect_raw("payload-bits", tok, AUTH_BAD_PAYLOAD, NULL);
+        if (flip_tail(sb, 0x03) < 0) bad("sig bits flip");
+        else {
+          snprintf(tok, sizeof tok, "%s.%s", mac_in, sb);
+          expect_raw("sig-bits", tok, AUTH_BAD_TOKEN, NULL);
+        }
+      }
+    }
+    if (sign_token(tok, sizeof tok, NULL, "{\"sub\":\"ada\"}") < 0) bad("short sig sign");
+    else {
+      size_t tn = strlen(tok);
+      if (tn > 0) tok[tn - 1] = 0;
+      expect_raw("short-sig", tok, AUTH_BAD_TOKEN, NULL);
+    }
+    if (sign_token(tok, sizeof tok, NULL, "{\"sub\":\"ada\"}") < 0) bad("long sig sign");
+    else {
+      size_t tn = strlen(tok);
+      if (tn + 1 >= sizeof tok) bad("long sig room");
+      else {
+        tok[tn] = 'A';
+        tok[tn + 1] = 0;
+        expect_raw("long-sig", tok, AUTH_BAD_TOKEN, NULL);
+      }
+    }
   }
   if (failures) {
     fprintf(stderr, "%d failures\n", failures);

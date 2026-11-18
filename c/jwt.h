@@ -10,9 +10,16 @@
    that is not a Bearer token, or whose signature does not match, is
    bad-token. The key is the raw bytes, not base64. A missing key
    (key_n == 0) rejects every presented token and still reports an
-   empty value as absent. now is unix seconds; a negative now rejects
-   a token that carries exp or nbf. sub is the decoded subject, at
-   most 128 bytes, and only when auth is AUTH_OK. */
+   empty value as absent. now is unix seconds. sub is the decoded
+   subject, at most 128 bytes, and only when auth is AUTH_OK.
+   alg must be HS256. typ may be absent. When present it must be
+   JWT in any ASCII case. exp and nbf may be absent. When present
+   each must be a JSON integer with no fraction and no exponent, so
+   a float exp or nbf is bad-payload. A negative now rejects a token
+   that carries exp or nbf. exp <= now is bad-payload. nbf > now is
+   bad-payload, and nbf == now is valid. The MAC compare always
+   covers 32 bytes. A final base64url quartet with non-zero leftover
+   bits is rejected. */
 
 typedef struct JwtResult {
   int auth;
