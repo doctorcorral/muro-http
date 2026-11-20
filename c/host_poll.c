@@ -2,7 +2,9 @@
    file. The idle tick is an absolute deadline: an earlier ready
    socket does not stretch it. ms == 0 disarms the tick.
    The Makefile defines _GNU_SOURCE, which exposes POLLRDHUP on Linux.
-   That flag is optional. POLLIN still reports a peer FIN. */
+   That flag is optional. POLLIN still reports a peer FIN.
+   Ready events are collected from a rotating cursor so a wait that
+   fills `max` still visits high-index fds on the next wait. */
 
 #include "host_poll.h"
 
@@ -19,9 +21,10 @@ struct HostPoll {
   int cap;
   int timer_on;
   uint64_t timer_at;
+  int next_scan;
 };
 
-static uint64_t mono_ms(void) {
+uint64_t host_poll_now_ms(void) {
   struct timespec ts;
   clock_gettime(CLOCK_MONOTONIC, &ts);
   return (uint64_t)ts.tv_sec * 1000ull + (uint64_t)ts.tv_nsec / 1000000ull;
@@ -38,6 +41,10 @@ static int find_fd(const HostPoll *p, int fd) {
 static void drop_at(HostPoll *p, int i) {
   p->n -= 1;
   if (i < p->n) p->pf[i] = p->pf[p->n];
+  /* Swap-from-end leaves indices after i in place. Only wrap the
+     cursor when it now sits past the last live slot. */
+  if (p->n <= 0) p->next_scan = 0;
+  else if (p->next_scan >= p->n) p->next_scan = 0;
 }
 
 static short interest(int read, int write) {
@@ -112,7 +119,7 @@ int host_poll_arm(HostPoll *p, unsigned ms) {
     return 0;
   }
   p->timer_on = 1;
-  p->timer_at = mono_ms() + (uint64_t)ms;
+  p->timer_at = host_poll_now_ms() + (uint64_t)ms;
   return 0;
 }
 
@@ -120,7 +127,7 @@ static int wait_timeout(const HostPoll *p) {
   uint64_t now;
   uint64_t left;
   if (!p->timer_on) return -1;
-  now = mono_ms();
+  now = host_poll_now_ms();
   if (p->timer_at <= now) return 0;
   left = p->timer_at - now;
   if (left > 86400000ull) return 86400000;
@@ -138,6 +145,12 @@ static void fill_ev(HostEv *e, const struct pollfd *pf) {
 #ifdef POLLRDHUP
   if (r & POLLRDHUP) e->hangup = 1;
 #endif
+  /* POLLHUP is unmaskable. A write-only watch that gets hangup
+     without POLLOUT has nothing to do; report error so the loop
+     closes the fd instead of spinning. A read interest still
+     reports hangup alone so a peer FIN can become evEof and the
+     pending response can be written. */
+  if (e->hangup && !(pf->events & POLLIN) && !e->writable) e->error = 1;
 }
 
 int host_poll_wait(HostPoll *p, HostEv *out, int max) {
@@ -150,6 +163,8 @@ int host_poll_wait(HostPoll *p, HostEv *out, int max) {
   int count;
   int timer_due;
   int room;
+  int start;
+  int seen;
   if (!p || !out || max <= 0) return -1;
   if (max > 64) max = 64;
   /* poll with no fds is not portable. A negative fd waits for the
@@ -167,16 +182,23 @@ int host_poll_wait(HostPoll *p, HostEv *out, int max) {
   timeout = wait_timeout(p);
   n = poll(pf, nfds, timeout);
   if (n < 0) return errno == EINTR ? 0 : -1;
-  timer_due = p->timer_on && mono_ms() >= p->timer_at;
+  timer_due = p->timer_on && host_poll_now_ms() >= p->timer_at;
   room = max;
   if (timer_due && room > 0) room -= 1;
   count = 0;
   if (n > 0 && p->n > 0) {
-    for (i = 0; i < p->n && count < room; i++) {
+    start = p->next_scan;
+    if (start < 0 || start >= p->n) start = 0;
+    for (seen = 0; seen < p->n && count < room; seen++) {
+      i = start + seen;
+      if (i >= p->n) i -= p->n;
       if (p->pf[i].revents == 0) continue;
       fill_ev(&out[count], &p->pf[i]);
       count += 1;
     }
+    p->next_scan = start + seen;
+    if (p->next_scan >= p->n) p->next_scan -= p->n;
+    if (p->next_scan < 0 || p->next_scan >= p->n) p->next_scan = 0;
   }
   /* Socket events come first. A byte that arrived in this wait can
      refresh a deadline before the tick is delivered. */
