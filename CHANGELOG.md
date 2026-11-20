@@ -2,6 +2,24 @@
 
 ## 0.1.0-dev — unreleased
 
+- The HTTP/1.1 core is the books under `priv/muro/http/` and the C
+  host behind `c/muro_http.h`. `classify` returns status and
+  keep-alive. Method, target, path, query, version, headers, and body
+  are zero-copy slices. HTTP/1.1 with the headers finished requires
+  exactly one `Host`. The image calls a handler (`Request -> Response`)
+  instead of `decide`. The host owns sockets, buffers, the connection
+  table, the clock, and `poll`. It does not choose a status, a header,
+  or a body. `httpRender` takes a status, a reason, extra headers, a
+  body, and keep. `--bind` and `MURO_HTTP_BIND` select the IPv4 listen
+  address. The default remains `127.0.0.1`.
+- The challenge server is `examples/challenge/` (`decide.muro`,
+  `route.muro`, `body.muro`, SQLite, JWT, JSON). `c/muro-httpd` is
+  still that binary and still serves `/health`, `/feed`, `/posts`, and
+  `/posts/:id/like`. `examples/hello/hello.c` is a second server on
+  the same header: GET answers `hello\n`, POST echoes the body, and
+  there is no SQLite. `c/test_hello`, `c/test_route`, and `c/test_tags`
+  run from `make c-check` and `make c-sanitize`. The pin stays
+  0.21.14. The library version stays `0.1.0-dev`.
 - A write-only `POLLHUP` without `POLLOUT` closes that slot instead
   of spinning the poll loop (the macOS case when a peer aborts
   mid-response). A peer FIN while the host is still reading is still

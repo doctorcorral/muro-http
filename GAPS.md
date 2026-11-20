@@ -22,8 +22,9 @@ marked unused.
 `-Wno-unused-function`.
 
 Word comparisons and byte reads allocate nothing. `methodView`,
-`targetView`, `pathView`, and `versionView` are only `sliceUntil`,
-`sliceAfter`, and `slice`.
+`targetView`, `pathView`, `queryView`, and `versionView` are only
+`sliceUntil`, `sliceAfter`, and `slice`. `queryView` is the bytes
+after `?`, or empty when the target has no `?`.
 
 ## What classify allocates
 
@@ -65,37 +66,46 @@ the accumulator twice calls a helper. The helper does not allocate.
 
 ## What remains
 
-`authAt` and `authLen` each call `scan` twice, once for the mark and
-once for the offset or the length. `authValue` calls `scan` once.
-Those helpers are off the counted `classify` path.
+`findHeader`, `headerCount`, `headerName`, and `headerValue` walk
+the header block a second time. That walk is an unboxed `Hd`. It is
+off the counted `classify` path. `classify` itself is status and
+keep-alive. It does not return a verb, a path shape, or an id.
+HTTP/1.1 with the headers finished requires exactly one `Host`.
+HTTP/1.0 may omit it. A duplicate `Host` is malformed for both.
+The host check runs only after the blank line, so a partial request
+stays need-more.
 
 C, Rust, and Zig refuse `Opt` of unboxed data (`c:unboxed`). This book
 does not build that option. An `Opt` of a byte or a word is a value.
 
-`idNumber` still matches `id-missing` and `id-present`. `idClassOf`
-returns only `id-none`, `id-bad`, or `id-unknown`, so compiling the
-generated Elixir warns that those two clauses never match. They stay.
-Those constructors are host facts for `decide`.
+The core no longer has `idNumber`. `MuroHttp.Request` and
+`MuroHttp.Conn` do not warn on `:id_missing` or `:id_present`.
+`decide.muro` still names those constructors. They are facts the
+challenge handler passes in, not results of the classifier. Route
+ids come from `routeId` and `routeIdn` in
+`priv/muro/challenge/route.muro`. CI does not pass
+`--warnings-as-errors`.
 
-`mix compile --warnings-as-errors` fails on that generated code.
-`MuroHttp.Request.idNumber/1` (`lib/muro_http/request.ex`) and
-`MuroHttp.Conn.idNumber/1` (`lib/muro_http/conn.ex`) each warn that
-the `:id_missing` and `:id_present` clauses will never match, because
-`idClassOf` has type `id-bad or id-none or id-unknown`. This is
-pre-existing. It is a muro codegen follow-up: the emitter should not
-write a clause for a constructor the function cannot return, or the
-book should stop matching constructors `idClassOf` never produces.
-This PR does not edit those generated clauses. CI does not pass
-`--warnings-as-errors`. `mix test` and `mix muro.gen --check` do not
-either.
+`bodyView` is the raw body `Slice`. `priv/muro/challenge/body.muro`
+is a separate book. It does not import `decide.muro` or
+`std:bool.muro`. A `def` is a global C symbol (gap 6). `conn.o`
+already emits `not`, `and`, and `or` from that import, and it
+already contains every `def` from `request.muro`. Linking
+`request.o` with `conn.o` duplicates those symbols. A book linked
+beside `conn.o` must not import `std:bool.muro` and must not import
+`request.muro`. `decide.muro` and `route.muro` do neither.
+`bodyClass` allocates 0. Four equations reduce, all of them before
+the scan. A refl through `jbScan` does not finish. `c/test_body`
+checks the scanner. The challenge handler calls `bodyClass` only
+for `POST /posts`.
 
-`classify` still returns `body-none` and the raw body `Slice`.
-`priv/muro/http/body.muro` is a separate book. It does not import
-`decide.muro` or `std:bool.muro`, because a `def` is a global C
-symbol (gap 6) and `conn.o` already emits those. `bodyClass` allocates
-0. Four equations reduce, all of them before the scan. A refl through
-`jbScan` does not finish. `c/test_body` checks the scanner. The host
-calls `bodyClass` only for `POST /posts`.
+A miss from `findHeader` is the out-of-range empty. The C emitter
+turns that into the static empty of the translation unit that
+defined `muro__slice_sub`, which is not the including file's copy.
+The host treats a header as present when the pointer lies inside
+the request buffer, including a zero-length value. Comparing the
+pointer with the including file's `muro__empty_bytes` does not
+detect a miss.
 
 ## The connection stepper, on muro 0.21.14
 
@@ -136,8 +146,9 @@ function:
 - `piece-req`, `piece-bad`, or `piece-chunk` from the classifier tag
 - an immediate `reply-bad` for an open malformed request, or for a
   half-closed need-more or malformed request
-- `reply-ok` or `reply-bad` from a decide code, or no reply while the
-  image is still observing
+- `reply-ok` or `reply-bad` from the reply word, or no reply while
+  the observe bit is set. The core host passes `reply-ok` and leaves
+  that bit clear. The challenge observe loop does not use it.
 - keep (`send` pick 0) or close (`send` pick 1) after an open reply,
   including a write error, and only at the keep-or-close position.
   A write end at talk is a refusal: pick 1 there is the idle timeout
@@ -179,67 +190,62 @@ the constructor tag to the name string the stepper compares
 It is not the choice.
 
 `c/shim.c` is the arena. The C test drivers call the image. Classify,
-decide, the write range, keep-alive, the idle timer, the half-close
-flag, and the pipelined offset stay in `conn.muro`.
+the handler phase, the write range, keep-alive, the idle timer, the
+half-close flag, and the pipelined offset stay in `conn.muro`. The
+image does not call `decide`. A classify step allocates 1. A reply
+step allocates 0.
 
-`c/host.c` is the socket loop. `c/host_poll.c` waits with `poll(2)`.
-`c/httpd.c` is `main`. They own the file descriptors, the buffers,
-and the clock. They perform the action `step` returns. They do not
-choose it. A read error closes the fd. It is not `evError`. That
-event holds in the read phase. A full receive buffer that the image
-did not consume is a host limit. Closing it is not a status.
+`c/host.c` is the socket loop behind `c/muro_http.h`. `c/host_poll.c`
+waits with `poll(2)`. `examples/challenge/httpd.c` and
+`examples/hello/hello.c` are each a `main`. The core owns the file
+descriptors, the buffers, the connection table, and the clock. It
+performs the action `step` returns. It does not choose a status, a
+header, or a body. A read error closes the fd. It is not `evError`.
+That event holds in the read phase. A full receive buffer that the
+image did not consume is a host limit. Closing it is not a status.
 
-The db event carries real facts. The first ask passes `db-unknown`
-and `like-unknown`, with auth, body, and the classifier's id already
-filled. Auth is the HS256 class of the `Authorization` value. The
-body class for `POST /posts` is the emitted `bodyClass`, after the
-host has turned a bad unescape or bad UTF-8 into `body-malformed`.
-`decide` returns `act-observe` when a query is still required. The
-host then runs one SQLite statement and passes the terminal facts.
-`id-present` is that lookup. A failed open, or a failed statement,
-is `db-down`. If the image asks a third time, the host closes.
+SQLite, the JWT check, and `decide` live in the challenge handler.
+The first `decide` passes `db-unknown` and `like-unknown`, with auth,
+body, and the route id already filled. Auth is the HS256 class of
+the `Authorization` value, found with `findHeader`. The body class
+for `POST /posts` is the emitted `bodyClass`, after the handler has
+turned a bad unescape or bad UTF-8 into `body-malformed`. `decide`
+returns `act-observe` when a query is still required. The handler
+then runs one SQLite statement and calls `decide` again. `id-present`
+is that lookup. A failed open, or a failed statement, is `db-down`.
+If the second `decide` is still observe, the handler closes. The
+stepper sees one reply, with the observe bit clear.
 
 ## The response bytes are emitted
 
-`priv/muro/http/render.muro` is `httpRender`. `--backend c` writes
-`c/generated/render.c`. Do not hand-edit that file. The book does
-not import `decide.muro`. Gap 6 is why: a `def` is a global C symbol
-with no book prefix, and `conn.muro` already emits `decide`. The
-tags are `U64`s in `priv/muro/challenge/decide.muro` constructor
-order. `c/decision_tags.h` copies those numbers. The
-`_Static_assert`s in `c/test_render.c` only compare that header with
-itself. The same driver calls the emitted `verbFrom`, `pathFrom`,
-`idFrom`, `authFrom`, `bodyFrom`, `likeFrom`, and `dbFrom` helpers
-and checks that each constructor tag equals the header constant.
-That is a test. Status, error, and act have no `*From` helper, so
-those header numbers are not checked against the emitter. The
-feature that would remove the copy is still gap 6.
+`priv/muro/http/render.muro` is `httpRender(status, reason, extra,
+body, keep)`, plus the literals `httpMalformed` and `httpInternal`.
+`--backend c` writes `c/generated/render.c`. Do not hand-edit that
+file. The book does not import `decide.muro`. Gap 6 is why: a `def`
+is a global C symbol with no book prefix. `conn.o` must not be linked
+with another copy of those symbols. The challenge maps decide tags
+to an HTTP status in `examples/challenge/app.c`.
+`examples/challenge/decision_tags.h` copies the constructor numbers.
+`c/test_tags` calls the emitted `verbFrom`, `pathFrom`, `idFrom`,
+`authFrom`, `bodyFrom`, `likeFrom`, and `dbFrom` helpers and checks
+each tag against that header. Status, error, and act have no `*From`
+helper, so those header numbers are not checked against the emitter.
+The feature that would remove the copy is still gap 6.
 
-`httpRender` is total. Codes 0 through 6 are 200, 201, 400, 401, 404,
-500, and 503. Any other code, including `st-observe`, is
-`500 Internal Server Error`. The image does not write `st-observe`.
-That arm exists so the function has no hole. `act-health` is the body
-`ok`. `act-error` is the error token (`not-found`, `malformed`,
-`missing-bearer`, `db`, and the rest). `act-observe` is the body
-`observe`. Acts 1 through 5 append the row argument and a decimal
-`Content-Length`. The book does not build the JSON. The host does.
-Any other act is an empty text body. `keep` of 1 is
-`Connection: close`. Any other keep is `Connection: keep-alive`.
-Each fixed suffix literal carries its own `Content-Length`. The row
-suffix prints the length of the row.
+`httpRender` writes the status line, `Connection`, `Content-Length`,
+the handler's extra header block, a blank line, and the body. `keep`
+of 1 is `Connection: close`. Any other keep is `Connection:
+keep-alive`. Common codes (200, 201, 204, 400, 401, 404, 405, 500,
+503) are digit literals. Any other code goes through `rdShow`. The
+handler supplies the reason and must not supply `Connection` or
+`Content-Length`.
 
-muro checks eight equations by reduction (`refl`): health with
-keep-alive, health with close, malformed, missing-bearer, not-found,
-db, an empty row (`application/json`, length 0), and code 7 with the
-health act. That last one is the total arm: status 500 and body
-`ok`. Evidence is not a run. The decimal walk for a positive length
-does not finish, so `[]` and a ten-byte row are not equations.
-`c/test_render` checks the eight reduction strings and those two
-rows in the emitted C, and checks that `Content-Length` matches the
-body for codes 0..7, errors 0..12, acts 0..7, and both keep values
-(1664 renders). That sweep is a test. On this pin, health render
-allocates 2, an empty row allocates 5, a two-byte row allocates 8,
-and a ten-byte row allocates 10.
+muro checks five equations by reduction (`refl`): empty keep, empty
+close, 204, `httpMalformed`, and `httpInternal`. Evidence is not a
+run. `rdShow` of 0 is the literal `0`, so an empty body reduces. A
+positive length does not finish, so a ten-byte body is not an
+equation. `c/test_render` checks the five strings and that longer
+body in the emitted C.
 
 `render.h` defines the same prelude as `conn.h`. `c/host.c` does not
 include it. `c/host_render.c` includes the emitted header and copies
@@ -303,12 +309,15 @@ arguments, and no `down`. The emitter accepted the whole protocol.
 `Move`s, and `--backend c` returns that offer by value.
 
 `conn.muro` is still the HTTP image. It does not name the session.
-Classify, decide, the write range, keep-alive, the idle timer, the
-half-close flag, and the pipelined offset stay there. A FIN during
-decide or write is that flag: the session's half-close is the peer's
-choice before the piece. The later keep-or-close choice is a stepper
-move, chosen by `admitChoice`. `shut` is the terminal image and has
-no live session, so a byte on it is not a new request.
+Classify, the handler phase, the write range, keep-alive, the idle
+timer, the half-close flag, and the pipelined offset stay there. A
+FIN during the handler phase or write is that flag: the session's
+half-close is the peer's choice before the piece. The later
+keep-or-close choice is a stepper move, chosen by `admitChoice`.
+`shut` is the terminal image and has no live session, so a byte on
+it is not a new request. The handler reply is event tag 6 with
+`reply-ok` and the observe bit clear. The challenge observe loop
+does not offer a stepper move.
 
 Init of this session takes no nat. A stepper that does takes `uint64_t`,
 so a negative cannot be supplied. A wrong key, a bad position, or an
@@ -319,15 +328,19 @@ The three books under `priv/muro/http/neg/` are still refused by
 `mix muro.check`. They are not in `muro.exs`.
 
 An unboxed field has to be a machine word, a `WBool`, a `Slice`, an
-`Opt` of those, or more unboxed data. `Verb`, `PathShape`, and
-`IdClass` are ordinary data, so `Conn` stores their tags as `U64`.
+`Opt` of those, or more unboxed data. `Conn` does not store a verb,
+a path, or an id. Those are the handler's. Unused words in the
+fifteen-word image stay 0. Word 8 is the origin: 0 is a handler
+response, 1 is the book's malformed response.
 
 A session payload of `Bytes` or `Slice` is refused. `Piece` and
 `Reply` are fieldless data. The buffer stays on the `Ev` of the image.
 
 `Classified` and `Decision` are ordinary data. Each constructor call
 allocates one object. A control step allocates 0. A step that
-classifies allocates 1. A step that calls `decide` allocates 1.
+classifies allocates 1. The image does not call `decide`, so a reply
+step allocates 0. The challenge handler's `decide` allocates 1, and
+the handler resets the arena before the next call.
 
 ExUnit skips a closed equation when an argument's normal form is a
 machine term (`argument 1 normal form is a machine term`). `step`
