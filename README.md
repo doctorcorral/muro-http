@@ -226,6 +226,59 @@ where the next request starts. The host does not read the socket
 while a response is in progress. The arena resets after that copy.
 Header walks do not reset it, so a handler may still hold slices.
 
+### Across connections
+
+`priv/muro/http/family.muro` states what spans connections. One key
+is one connection. `accept` opens on arrival and is never held.
+`reply` stays held while any earlier instance of that same connection
+is unresolved. An earlier accept counts, and so does an earlier
+reply. Another connection does not. `--backend fsm` emits the
+dispatcher as `MuroHttp.FamilyFsm.Conns`. `--backend c` omits a
+family, so `c/host.c` does not call it. The poll loop still admits
+one socket through `admitChoice` and `muro__sess_conn_step`.
+
+`mix muro.check` walks one fixed script: key `a` is accept, then
+reply, then reply, and key `b` is accept. These lines hold:
+
+- `drained`, on the one-reply meeting: 3 reachable states, 3
+  transitions. When the host has taken the reply, its inbox is empty.
+- `reply-order`: 3721 reachable states, 10521 transitions. An opened
+  reply has every earlier reply of that connection, known when it
+  opened, resolved.
+- `accept-free`: the same 3721 states. An accept is not held.
+- `reply-opens`: the same 3721 states. A held reply is later opened.
+
+That walk is a check of the generated dispatcher on the script. It
+is not a proof for every connection count. The pin proves the hold
+rule for any number of keys and any number of instances
+(`agda/Muro/Family.agda` in muro 0.22.14). This repository does not
+contain that proof. The program that writes the dispatcher is not
+proved. `test/family_test.exs` replays two connections on the
+emitted dispatcher: an accept and a reply on one connection open
+while the other connection is held, a later reply stays held until
+the earlier reply resolves, a session step on a held reply is
+refused, withdrawing the held reply does not open it, and a reply
+whose turn has finished is reported until `resolved`. A second send
+on `reply-out` is refused. That is the emitted machine.
+
+The same pin does not prove three properties of the poll loop.
+
+- `nconn` stays at most `max_conn`. The family has no numeric cap.
+  `accept_some` accepts while `nconn < max_conn`. `c/test_serve`
+  refuses a cap outside 1..1024. `c/test_e2e` fills the table.
+- An accepted connection is eventually closed. `reply-opens` is the
+  script above. A keep-alive connection stays open. The hold rule
+  does not make the host resolve.
+- A closed connection never arrives another reply. A later `reply`
+  of that key can still open. On one connection, `neg/write_closed.muro`
+  is refused, the stepper refuses a send after `end`, `admitChoice`
+  on phase closed refuses, and the image returns the closed state.
+  `close_slot` drops the fd. Those checks are not the family.
+
+An older reply that arrives after a newer one has opened runs beside
+it. The host does not do that. It does not read the next request
+while a response is in progress. The formula does not say so.
+
 ## The challenge example
 
 `c/muro-httpd` is that server with the challenge handler. `make`
@@ -380,6 +433,7 @@ in the emitted C, plus the challenge health bytes, a JSON array, a
 
 muro 0.21.15 and 0.21.16 add a temporal check and a synthesis cover.
 They do not change response bytes or this loop. The pin is 0.22.14.
+The cross-connection check is `priv/muro/http/family.muro`.
 
 The server end is `conn`. The client end `peer` is `dual conn`.
 
@@ -416,7 +470,9 @@ timeout, a bad request, half-close, bare FIN, and a chunk.
 views, `findHeader`), `conn.muro`, `session.muro`, `admit.muro`, and
 `render.muro` (`httpRender`, `httpMalformed`, `httpInternal`). It
 emits the challenge books `decide.muro`, `route.muro`, and
-`body.muro` (`bodyClass`, `textOff`, `textLen`).
+`body.muro` (`bodyClass`, `textOff`, `textLen`). `--backend fsm`
+emits `family.muro` as `MuroHttp.FamilyFsm`. That backend is the one
+that emits a keyed family. The C backend omits it.
 
 Hand-written core: `c/muro_http.h`, `c/host.c`, `c/host_poll.c`,
 `c/host_render.c`, `c/proto.c`, `c/admit_glue.c`, `c/shim.c`.

@@ -262,7 +262,55 @@ drift. The host then calls `muro_http_reset`.
 muro 0.21.15 and muro 0.21.16 do not change the response bytes.
 0.21.15 is a temporal check over a keyed family. 0.21.16 ranks a
 recursive `State` that does not declare `all-states`. Neither emits
-a socket loop. The pin is 0.22.14.
+a socket loop. The pin is 0.22.14. The cross-connection family is
+below.
+
+## Across connections
+
+`priv/muro/http/family.muro` is one key per connection. `accept` is
+never held. `reply` is held while an earlier instance of that
+connection is unresolved. `--backend fsm` emits
+`MuroHttp.FamilyFsm.Conns`. `--backend c` omits the family. The poll
+loop in `c/host.c` is not that dispatcher.
+
+The pin's `agda/Muro/Family.agda` proves the hold rule for any number
+of keys and any number of instances. An opened `reply` has every
+earlier instance of its connection, known when it opened, resolved,
+when that rule is `held while earlier unresolved`. Whether an
+instance is held depends only on its own key. A held instance has
+some opened instance of its key. The host is not obliged to resolve.
+`withdraw` drops a held instance and releases the same way `resolved`
+does. This repository does not contain that proof. The program that
+writes the dispatcher is not proved.
+
+`mix muro.check` walks a fixed script and prints:
+
+- `temporal drained: holds in 3 reachable states, 3 transitions`
+- `temporal reply-order: holds in 3721 reachable states, 10521 transitions`
+- `temporal accept-free: holds in 3721 reachable states, 10521 transitions`
+- `temporal reply-opens: holds in 3721 reachable states, 10521 transitions`
+
+That is a check of the generated dispatcher on the script. It is not
+the proof above. `test/family_test.exs` is a second check: two
+connections on the emitted dispatcher, a refused step on a held
+reply, a withdraw that does not open the reply, a finished reply
+reported until `resolved`, and one send on the reply turn.
+
+Not proved, and not stated as a formula, because this pin cannot
+discharge them for the poll loop:
+
+- `nconn` never exceeds `max_conn`. The family has no numeric cap.
+  The host tests that cap.
+- An accepted connection is eventually closed. `reply-opens` is the
+  script. A keep-alive connection stays in the table.
+- A closed connection never arrives another reply. A later `reply`
+  of that key can still open. The per-connection refusal is
+  `neg/write_closed.muro`, the stepper, `closed-refuses` in
+  `admit.muro`, and `close_slot`.
+
+An older reply that arrives late opens beside a newer one that is
+already running. The host does not read the next request while a
+response is in progress. The formula does not say that.
 
 ## Emitter gaps this book hit
 

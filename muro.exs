@@ -10,6 +10,8 @@
     {"priv/muro/http/admit.muro", "c/generated/admit.c", [kind: :c]},
     {"priv/muro/http/session.muro", MuroHttp.SessionFsm, "lib/muro_http/session_fsm.ex",
      [kind: :fsm]},
+    {"priv/muro/http/family.muro", MuroHttp.FamilyFsm, "lib/muro_http/family_fsm.ex",
+     [kind: :fsm]},
     {"priv/muro/http/conn.muro", "c/generated/conn.c", [kind: :c]},
     {"priv/muro/http/render.muro", "c/generated/render.c", [kind: :c]},
     {"priv/muro/challenge/body.muro", "c/generated/body.c", [kind: :c]},
