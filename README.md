@@ -139,11 +139,15 @@ builds it. `make c-check` compiles the C drivers and this binary with
 hand-written. It owns the sockets, the buffers, and the clock. It
 does not choose a move, a status, or a body.
 
-`c/host_poll.c` waits with kqueue on macOS and with epoll on Linux.
-The idle tick is a one-shot timer (`EVFILT_TIMER`, or `timerfd` on
-Linux). The host arms it for the soonest connection deadline. The
-image's timer field says whether that phase is waiting. A tick during
-decide or write is not delivered.
+`c/host_poll.c` waits with `poll(2)` on macOS and on Linux. The idle
+tick is the poll timeout, armed for the soonest connection deadline.
+An earlier ready socket does not move that deadline. The image's
+timer field says whether that phase is waiting. A tick during decide
+or write is not delivered. A socket that has sent only part of a
+header, or only part of a body, stays in the set. The loop keeps
+serving the other sockets. A close that still owes a status writes
+it and returns. That write does not wait for the peer, so one full
+send buffer cannot stall the table.
 
 Each accepted socket is one `Conn` and one session. Bytes, peer FIN,
 write progress, write done, write error, and the idle tick go through
@@ -255,7 +259,15 @@ SIGINT and SIGTERM close the sockets and exit 0. The process binds
 pipelined pair, `Connection: close`, an idle timeout, a peer FIN
 mid-request, a body that arrives after the headers, a response the
 socket takes in more than one write, the connection cap, and a
-receive buffer that fills before the image consumes it. It also
+receive buffer that fills before the image consumes it. One client
+writes a header a byte at a time and stops before the blank line.
+Another stops in the middle of a body. While those sockets stay
+open, other clients complete `GET /health`, an authenticated
+`GET /feed`, `POST /posts`, and `POST /posts/:id/like`. A malformed
+request on a further socket is answered and closed. The partial
+header is then finished on its own socket. SIGINT and SIGTERM each
+stop the process with status 0 while a partial header is still open.
+It also
 checks each challenge route: a good JWT, a bad signature, `alg`
 `none`, a missing bearer, a bad payload, a missing and a present id,
 a like and the same like again, valid and invalid JSON, and a
@@ -323,7 +335,7 @@ row bytes on the end of the response), and `body.muro` (`bodyClass`,
 `textOff`, `textLen`).
 
 Hand-written: `c/host.c`, `c/host_poll.c`, and `c/httpd.c` (sockets,
-kqueue or epoll, the fact loop); `c/store.c` (SQLite); `c/jwt.c`
+`poll(2)`, the fact loop); `c/store.c` (SQLite); `c/jwt.c`
 (SHA-256, HMAC-SHA256, base64url, the HS256 check); `c/json_text.c`
 (string unescape, the UTF-8 check, and the row JSON); `c/host_body.c`
 (the call into `bodyClass`). `body.h` and `conn.h` both define the

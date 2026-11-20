@@ -2,6 +2,16 @@
 
 ## 0.1.0-dev — unreleased
 
+- `c/host_poll.c` waits with `poll(2)` on macOS and on Linux. The idle
+  tick is that poll timeout, armed for the soonest connection
+  deadline. One socket that has sent only part of a header, or only
+  part of a body, does not stall the others. A close that still owes
+  a status writes it without waiting on that socket. `c/test_e2e`
+  keeps the earlier cases and adds the interleaved clients (`/health`,
+  authenticated `/feed`, `/posts`, `/posts/:id/like`, a malformed
+  request) plus SIGINT and SIGTERM while a partial header is open.
+  The macOS CI job runs the same `make c-check`. The pin stays
+  0.21.14. The library version stays `0.1.0-dev`.
 - A 500 sent because a connection closes after a committed create or
   like, before any status byte, says `Connection: close`.
 - `priv/muro/http/body.muro` is `bodyClass`, `textOff`, and
