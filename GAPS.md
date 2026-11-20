@@ -207,6 +207,10 @@ performs the action `step` returns. It does not choose a status, a
 header, or a body. A read error closes the fd. It is not `evError`.
 That event holds in the read phase. A full receive buffer that the
 image did not consume is a host limit. Closing it is not a status.
+A body declared longer than 16384 is streamed, so it does not sit
+in that buffer until the window fills. A header block longer than
+16384 is malformed in the book. An unfinished header that fills a
+smaller test window still closes with no status.
 
 SQLite, the JWT check, and `decide` live in the challenge handler.
 The first `decide` passes `db-unknown` and `like-unknown`, with auth,
@@ -222,8 +226,11 @@ stepper sees one reply, with the observe bit clear.
 
 ## The response bytes are emitted
 
-`priv/muro/http/render.muro` is `httpRender(status, reason, extra,
-body, keep)`, plus the literals `httpMalformed` and `httpInternal`.
+`priv/muro/http/render.muro` is `httpRender(status, reason, date,
+extra, body, keep, omit)`, plus `httpHead`, `httpChunked`,
+`httpDelim`, `httpChunk`, `httpLastChunk`, and the literals
+`httpMalformed`, `httpInternal`, `httpNotImplemented`,
+`httpTooLarge`, `httpExpect`, and `httpContinue`.
 `--backend c` writes `c/generated/render.c`. Do not hand-edit that
 file. The book does not import `decide.muro`. Gap 6 is why: a `def`
 is a global C symbol with no book prefix. `conn.o` must not be linked
@@ -236,30 +243,44 @@ each tag against that header. Status, error, and act have no `*From`
 helper, so those header numbers are not checked against the emitter.
 The feature that would remove the copy is still gap 6.
 
-`httpRender` writes the status line, `Connection`, `Content-Length`,
-the handler's extra header block, a blank line, and the body. `keep`
-of 1 is `Connection: close`. Any other keep is `Connection:
-keep-alive`. Common codes (200, 201, 204, 400, 401, 404, 405, 500,
-503) are digit literals. Any other code goes through `rdShow`. The
-handler supplies the reason. The host drops `Connection`,
-`Content-Length`, and `Transfer-Encoding` from the extra block, and
-rejects a reason or an extra block that contains a CR or LF outside
-a CRLF line ending. The book still writes `Connection` and
+`httpRender` writes the status line, `Date`, `Connection`,
+`Content-Length`, the handler's extra header block, a blank line,
+and the body unless `omit` is 1. `keep` of 1 is `Connection: close`.
+Any other keep is `Connection: keep-alive`. Common codes (200, 201,
+204, 400, 401, 404, 405, 500, 503) are digit literals. Any other
+code goes through `rdShow`. The handler supplies the reason. The
+host drops `Connection`, `Content-Length`, `Transfer-Encoding`, and
+`Date` from the extra block, and rejects a reason or an extra block
+that contains a CR or LF outside a CRLF line ending. The book still
+writes `Date`, `Connection`, and `Content-Length`. `httpChunked`
+writes `Transfer-Encoding: chunked` instead of a length.
+`httpDelim` writes neither. `httpHead` writes a declared length and
+no body bytes. `omit` 1 on `httpRender` drops the body and keeps
 `Content-Length`.
 
-muro checks five equations by reduction (`refl`): empty keep, empty
-close, 204, `httpMalformed`, and `httpInternal`. Evidence is not a
-run. `rdShow` of 0 is the literal `0`, so an empty body reduces. A
-positive length does not finish, so a ten-byte body is not an
-equation. `c/test_render` checks the five strings and that longer
-body in the emitted C.
+`render.muro` is emitted as C only, so ExUnit does not run it.
+`mix muro.gen` typechecks the empty keep, empty close, 204, `HEAD`
+of an empty body, the six dated literals (`httpMalformed`,
+`httpInternal`, `httpNotImplemented`, `httpTooLarge`, `httpExpect`,
+`httpContinue`), the last-chunk bytes `0\r\n\r\n`, the chunked
+header block, the close-delimited header block, and a declared
+length of 0. Evidence is not a run. `rdShow` of 0 is the literal
+`0`, so an empty body is an equation. A positive length does not
+finish, so a ten-byte body is not an equation, and neither is `HEAD`
+omit of a non-empty body or a positive chunk. `c/test_render` checks
+those in the emitted C, including the fixed date
+`Sun, 06 Nov 1994 08:49:37 GMT`. The host
+formats the live clock in `c/host_date.c` with `gmtime_r` and
+English weekday and month names. That formatter is not a book.
 
 `c/host_render.c` includes `render.h` and copies the slice into the
 host buffer, so the `httpRender` signature cannot drift. `conn.h` and
 `render.h` both put the prelude under `MURO__PRELUDE`, so one
 translation unit can include both. `c/host.c` calls
-`host_copy_response` and does not include `render.h`. The host then
-calls `muro_http_reset`.
+`host_copy_response`, `host_copy_head`, `host_copy_chunked`,
+`host_copy_delim`, `host_copy_chunk`,
+`host_copy_last`, and `host_copy_literal`. It does not include
+`render.h`. The host then calls `muro_http_reset`.
 
 muro 0.21.15 and muro 0.21.16 do not change the response bytes.
 0.21.15 is a temporal check over a keyed family. 0.21.16 ranks a

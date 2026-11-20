@@ -2,6 +2,59 @@
 
 ## 0.1.0-dev — unreleased
 
+- HTTP/1.1 methods. `GET`, `HEAD`, `POST`, `PUT`, `DELETE`, `OPTIONS`,
+  and `PATCH` reach the handler. `OPTIONS *` is in that set. Any other
+  method with target `*` is 400. A well-formed method outside the set
+  (`TRACE`, `CONNECT`) is 501 and does not reach the handler. A token
+  that is not a method is 400. `HEAD` keeps the headers the handler
+  built, including `Content-Length`, and the host writes no body.
+- Every response carries `Date` in IMF-fixdate. The host caches one
+  rendering per second. A handler `Date` is dropped. The library still
+  owns `Connection`, `Content-Length`, and `Transfer-Encoding`.
+- `Transfer-Encoding: chunked` is a request body. Extensions are
+  ignored. Trailers need a colon and are dropped. A chunk size that
+  does not fit in a `U64` is 400. `Transfer-Encoding`
+  together with `Content-Length` is 400 (RFC 9112 6.3). Any other
+  coding is 501. Chunked on HTTP/1.0 is 400. A handler that does not
+  know the length sends chunked to an HTTP/1.1 client and
+  close-delimited bytes to an HTTP/1.0 client. `HEAD` of an unknown
+  length does not call the pull and does not send
+  `Transfer-Encoding`.
+- A `Content-Length` above 16384 that has not all arrived, and a
+  chunked body that does not finish inside the window, is streamed.
+  `MuroHttpResponse.pull` writes a response the same way.
+  `muro_http_body_read` is the request side. The default max body is
+  8 MiB (`--max-body`, `MURO_HTTP_MAX_BODY`). Above that is 413. The
+  receive buffer stays 65536. A header block past 16384 is still 400.
+  A buffer that fills while the image still needs bytes closes with
+  no status.
+- `Expect: 100-continue` on HTTP/1.1 writes `100 Continue` before the
+  body is read, when the request is otherwise acceptable and the body
+  is not already in the buffer. Any other Expect value is 417.
+  HTTP/1.0 does not send 100 and does not send 417.
+- SIGINT and SIGTERM stop accepting, finish the request that is
+  already in the handler, close idle keep-alive connections, and exit
+  0 when the table is empty or `--drain-ms` has passed (default 1000,
+  `MURO_HTTP_DRAIN_MS`). The drain does not start while the handler
+  is blocked inside `muro_http_body_read`.
+- `examples/stream` serves a known-length pull, a chunked pull, and
+  an echo of the request body. `c/test_http11` drives it.
+- `mix test` reduces the new `Status` equations in `request.muro`:
+  `OPTIONS *`, `GET *`, an empty chunked body, `Transfer-Encoding`
+  with `Content-Length`, and chunked on HTTP/1.0. Method, coding,
+  and Expect codes are `U64`, so ExUnit skips them. `c/test_classify`
+  checks those codes and the chunk scanner. `render.muro` is emitted
+  as C only, same as before. Its new `refl`s typecheck under
+  `mix muro.gen`: `Date`, `HEAD` of an empty body, the
+  100/400/413/417/500/501 literals, the chunked and close-delimited
+  header blocks, a declared length of 0, and the last-chunk bytes
+  `0\r\n\r\n`. ExUnit does not run that book. A positive
+  `Content-Length` or chunk size walks `rdShow` or `hxShow` and is
+  not an equation. `c/test_render` checks those bytes, including
+  `HEAD` of `ok` and one chunk of `hi`. The clock, the poll loop,
+  the drain, and a body past the window are hand-written.
+  `c/test_http11` and `make c-sanitize` check those.
+
 - Pin muro 0.22.14. The library version stays `0.1.0-dev`.
   `mix muro.gen` rewrites the committed C and Elixir. The C prelude
   is under `MURO__PRELUDE`. `c/admit_glue.c` includes `session.h` and

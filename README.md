@@ -37,18 +37,43 @@ out-of-range empty. An empty value is a zero-length slice inside
 the buffer. `contentLength` is the parsed length when the header
 is well-formed.
 
-`HEADER_MAX` and `BODY_MAX` are 16384. `Transfer-Encoding` is rejected.
+A header block longer than 16384 is `status-malformed`. A
+`Content-Length` of 16384 that has not arrived stays
+`status-need-more`. A longer declared length that has not all
+arrived is `status-ok`: the host streams it. `bodyView` stays the
+bytes already in the buffer, and it is empty for a chunked body.
+The host decodes a finished chunked message, or streams one that
+does not finish inside the window.
+
+`Transfer-Encoding: chunked` is the only coding. Extensions are
+skipped. A trailer line needs a colon; the host drops the trailers.
+`Transfer-Encoding` together with `Content-Length` is
+`status-malformed` (RFC 9112 6.3). Chunked on HTTP/1.0 is
+`status-malformed`. A chunk size that does not fit in a `U64` is
+`status-malformed`. A coding other than `chunked` is not
+malformed. The host answers 501. A well-formed length above the
+configured max body is not malformed either. The host answers 413.
+
+Known methods are `GET`, `HEAD`, `POST`, `PUT`, `DELETE`, `OPTIONS`,
+and `PATCH`, case-sensitive. `OPTIONS` with target `*` is known. Any
+other method with target `*` is `status-malformed`. A well-formed
+method outside that set is not malformed. The host answers 501 and
+does not call the handler. `Expect: 100-continue` is one value. Any
+other Expect value is not malformed. On HTTP/1.1 the host answers
+417.
+
 A line without a colon, whitespace before the colon, a bad version,
 a missing space, a second `Content-Length`, a duplicate `Host`, or a
-length above the cap is `status-malformed`. Space or tab after the
-colon is still legal. HTTP/1.1 with the headers finished and not
-exactly one `Host` is `status-malformed` (RFC 9112). HTTP/1.0 may
-omit `Host`. A second `Host` is malformed for both. The previous
-challenge server accepted an HTTP/1.1 request that omitted `Host`.
-That request is now 400. A buffer that has not reached the header
-terminator, or that is shorter than `Content-Length`, is
-`status-need-more`. The host check runs only after the headers are
-done, so a partial request stays need-more. The function is total.
+`Content-Length` that does not fit in 32 bits is `status-malformed`.
+Space or tab after the colon is still legal. HTTP/1.1 with the
+headers finished and not exactly one `Host` is `status-malformed`
+(RFC 9112). HTTP/1.0 may omit `Host`. A second `Host` is malformed
+for both. The previous challenge server accepted an HTTP/1.1 request
+that omitted `Host`. That request is now 400. A buffer that has not
+reached the header terminator, or that is shorter than a
+`Content-Length` of at most 16384, is `status-need-more`. The host
+check runs only after the headers are done, so a partial request
+stays need-more. The function is total.
 
 Routing lives in the handler. The challenge routes are
 `priv/muro/challenge/route.muro` (`routeVerb`, `routePath`, `routeId`,
@@ -159,15 +184,18 @@ terminal image and has no live session.
 the bind host (NULL is `127.0.0.1`, IPv4 only), the port, the idle
 timeout, the connection cap (1 through 1024), and a log-name prefix.
 It does not carry a database path or a JWT key.
-`muro_http_config_init` sets port 8080, 5000 ms, and 128 connections.
+`muro_http_config_init` sets port 8080, 5000 ms, 128 connections,
+a max body of 8388608, and a drain of 1000 ms.
 `muro_http_config_env` reads `MURO_HTTP_BIND`, `MURO_HTTP_PORT`,
-`MURO_HTTP_IDLE_MS`, and `MURO_HTTP_MAX_CONNECTIONS`.
+`MURO_HTTP_IDLE_MS`, `MURO_HTTP_MAX_CONNECTIONS`,
+`MURO_HTTP_MAX_BODY`, and `MURO_HTTP_DRAIN_MS`.
 `muro_http_config_arg` consumes `--bind`, `--port`, `--idle-ms`,
-`--max-connections`, and `--help`. A bind host longer than 15
-characters, or one `inet_pton` rejects, makes `muro_http_serve`
-return -2. A connection cap outside 1..1024, or a listen failure,
-returns -1. SIGINT and SIGTERM return 0. Every successful listen
-prints `listening <host> <port>`, including port 0.
+`--max-connections`, `--max-body`, `--drain-ms`, and `--help`. A
+bind host longer than 15 characters, or one `inet_pton` rejects,
+makes `muro_http_serve` return -2. A connection cap outside
+1..1024, a negative max body or drain time, or a listen failure,
+returns -1. SIGINT and SIGTERM drain and return 0. Every successful
+listen prints `listening <host> <port>`, including port 0.
 
 The handler returns 0 to send the response, or -1 to close. Request
 slices point at the receive buffer. That buffer stays live while the
@@ -176,21 +204,64 @@ host frames the response, after the handler returns. `reason`,
 into the handler's stack does not. Extra headers are a block of
 `Name: value` lines. A CR or LF in the reason, or a line break that
 is not CRLF, is rejected. The host drops `Connection`,
-`Content-Length`, and `Transfer-Encoding` from that block and writes
-its own. `close_after` forces `Connection: close`. A status from 400
-through 599 does too. `owe_status` means a side effect has committed
-and a status must still leave the socket. Return -1 with
-`owe_status` set still sends the book's 500 before close when no
-status byte has been written. Return -1 with `owe_status` clear
-sends nothing. If the response does not fit, or the socket closes
-before any status byte, the host copies the book's `httpInternal`
-bytes. It does not choose them. A malformed request never calls the
-handler. The host copies `httpMalformed`.
+`Content-Length`, `Transfer-Encoding`, and `Date` from that block
+and writes its own. Every response gets `Date` in IMF-fixdate. The
+host caches that rendering for one second. `close_after` forces
+`Connection: close`. A status from 400 through 599 does too.
+`owe_status` means a side effect has committed and a status must
+still leave the socket. Return -1 with `owe_status` set still sends
+the book's 500 before close when no status byte has been written.
+Return -1 with `owe_status` clear sends nothing. If the response
+does not fit, or the socket closes before any status byte, the host
+copies the book's `httpInternal` bytes. It does not choose them. A
+malformed request never calls the handler. The host copies
+`httpMalformed`. 501, 413, and 417 are the same kind of copy
+(`httpNotImplemented`, `httpTooLarge`, `httpExpect`) and do not call
+the handler. `HEAD` sets the omit bit: the headers stay, including
+`Content-Length` when the length is known, and no body bytes are
+written.
+
+`req->body_in` reads the body. A buffered body is already in
+`req->body` as well. A streamed body has `req->body.n == 0` and
+`muro_http_body_read` pulls the rest, through `poll(2)` when the
+socket has nothing queued. One connection is in that read at a time.
+The other sockets wait. If the handler returns without reading a
+streamed body, and the response pull will not read it either, the
+host closes. That keeps unread body bytes from being parsed as the
+next request. `MuroHttpResponse.pull` is the response side. With
+`has_length`, the host writes `Content-Length` and then the pull's
+bytes. Without a length, HTTP/1.1 is chunked and HTTP/1.0 is the
+raw bytes followed by close. `HEAD` does not call `pull`. The
+default max body is 8388608. `0` rejects every positive length.
+`--max-body` and `MURO_HTTP_MAX_BODY` set it. Above the max is 413,
+before the handler, when the length is already known. A
+`Content-Length` of at most 16384 is read to the end by the image
+and then refused if it is over the max.
+
+`Expect: 100-continue` on an otherwise acceptable HTTP/1.1 request
+writes `HTTP/1.1 100 Continue` and `Date` before the body is read,
+unless the body is already in the buffer or the method is `HEAD`.
+The host does not send 100 on HTTP/1.0, and it does not turn that
+Expect into 417. Any other Expect value on HTTP/1.1 is 417 and the
+body is not read.
+
+SIGINT and SIGTERM set a flag. The loop then stops accepting,
+closes idle connections (idle, or read with an empty buffer), and
+lets a request that has already reached the handler finish. The
+process exits 0 when no connection remains or `drain_ms` has passed.
+The default is 1000. `--drain-ms` and `MURO_HTTP_DRAIN_MS` set it,
+from 0 through 86400000. A negative max body or drain time makes
+`muro_http_serve` return -1. The flag is noticed between polls. A
+handler blocked in `muro_http_body_read` runs to the end of that
+read, or until the drain deadline if the deadline was already
+armed. The listen socket stays open until the loop resumes.
 
 `c/host.c` owns the sockets, the buffers, the connection table, the
 clock, and `poll`. `make c-check` compiles it with
 `-Wall -Wextra -Werror -std=c11 -O2`, then runs the drivers. The loop
-does not choose a move, a status, a header, or a body.
+does not choose a session move. It does choose 100, 413, 417, and
+501 from the classifier's method, coding, length, and Expect fields,
+and it formats `Date`. The image still chooses a malformed request.
 
 `c/host_poll.c` waits with `poll(2)` on macOS and on Linux. The idle
 tick is the poll timeout, armed for the soonest connection deadline.
@@ -216,15 +287,25 @@ closes the socket and is not `evError`: that event holds while the
 phase is read. A write error is `evError`, and the image shuts.
 
 The write range in the image stays length 16. `priv/muro/http/render.muro`
-is `httpRender(status, reason, extraHeaders, body, keep)`. The book
-writes the status line, then `Connection`, then `Content-Length`,
-then the handler's extra headers, then the body. `--backend c` emits
-it. The host copies that slice into its own buffer and writes it,
-reports `evProgress` for the bytes the socket took, then `evDone`.
-Pipelined bytes stay in the receive buffer. `endOff` and `more` say
-where the next request starts. The host does not read the socket
-while a response is in progress. The arena resets after that copy.
-Header walks do not reset it, so a handler may still hold slices.
+is `httpRender(status, reason, date, extraHeaders, body, keep, omit)`.
+The book writes the status line, then `Date`, then `Connection`,
+then `Content-Length` or `Transfer-Encoding: chunked` or neither
+(close-delimited), then the handler's extra headers, then the body
+unless `omit` is 1. `--backend c` emits it. The host copies that
+slice into its own buffer and writes it, reports `evProgress` for
+the bytes the socket took, then `evDone`. A pulled body is more
+than one write: the image stays in write until the last byte, and
+`evDone` is that end. Pipelined bytes stay in the receive buffer.
+`endOff` and `more` say where the next request starts. For a body
+the host will stream, `endOff` is the end of the bytes already
+buffered, so that prefix is consumed and not parsed again. The host
+does not read the next request while a response is in progress. The
+arena resets after each copy, including each chunk. Header walks do
+not reset it, so a handler may still hold slices. A buffered
+response has to fit the 69632-byte write buffer. A larger body is a
+pull. A decoded chunked payload near 64 KiB can fail that copy and
+the host closes. The stream example uses a pull for a body that
+size.
 
 ### Reply order per key
 
@@ -378,25 +459,42 @@ Like is `{"id":N,"likes":M}`. The same subject twice is `like-new`
 (201) and then `like-again` (200), and the count stays 1. Health is
 the body `ok`. An error act is the plain token.
 
-Flags `--bind`, `--port`, `--idle-ms`, `--max-connections`, and
-`--jwt-key` override `MURO_HTTP_BIND`, `MURO_HTTP_PORT`,
-`MURO_HTTP_IDLE_MS`, `MURO_HTTP_MAX_CONNECTIONS`, and
-`MURO_HTTP_JWT_KEY`. The database path is `--db`, then `MURO_HTTP_DB`,
+Flags `--bind`, `--port`, `--idle-ms`, `--max-connections`,
+`--max-body`, `--drain-ms`, and `--jwt-key` override `MURO_HTTP_BIND`,
+`MURO_HTTP_PORT`, `MURO_HTTP_IDLE_MS`, `MURO_HTTP_MAX_CONNECTIONS`,
+`MURO_HTTP_MAX_BODY`, `MURO_HTTP_DRAIN_MS`, and `MURO_HTTP_JWT_KEY`. The database path is `--db`, then `MURO_HTTP_DB`,
 then `SQLITE_PATH`, then `:memory:`. The defaults are `127.0.0.1`,
 port 8080, 5000 ms, 128 connections, `:memory:`, and no key. Every
 successful listen prints `listening <host> <port>`, including port 0.
-SIGINT and SIGTERM close the sockets and exit 0.
+SIGINT and SIGTERM drain and exit 0.
 
 ## The hello example
 
 `examples/hello/hello.c` is a second server on `c/muro_http.h`.
 `make` builds `c/muro-hello`. It does not link SQLite. GET answers
-`hello\n`. POST echoes the body. Any other method is 405 `method\n`.
+`hello\n`. POST echoes the buffered body. A streamed body is
+discarded, so the echo is empty, and the connection can stay up.
+PUT, DELETE, OPTIONS, PATCH, and HEAD are 405 `method\n`. HEAD
+carries that `Content-Length` and no body. A method the library
+does not know is 501 and does not reach this handler.
 `GET /health` is that same hello. It is not the challenge route.
 `c/test_hello` checks those responses, a missing `Host` (the book's
 400 `malformed`), keep-alive, and `--bind 127.0.0.1` winning over
 `MURO_HTTP_BIND=nope`. A bind host that is not IPv4 exits 2 and does
 not listen.
+
+## The stream example
+
+`examples/stream/stream.c` is a third server, `c/muro-stream`. GET
+and HEAD `/` answer `ok\n`. GET and HEAD `/blob` pull 1 MiB + 1 of
+`x` with a known length. GET `/live` pulls `abc` with no length, so
+HTTP/1.1 is chunked and HTTP/1.0 is close-delimited. HEAD `/live`
+closes and writes no body. POST, PUT, and PATCH `/echo` pull the
+request body back out. DELETE `/echo` is 204. OPTIONS, including
+`OPTIONS *`, answers `Allow`. One pull is in progress at a time.
+`c/test_http11` drives this server: methods, `Date`, HEAD, chunked
+requests and responses, a body over 1 MiB in each direction, 413,
+100-continue, and SIGTERM while a 20000-byte body is still arriving.
 
 `c/test_e2e` starts `c/muro-httpd` on an ephemeral port. It checks
 `GET /health`, a malformed request, two requests on one connection, a
@@ -485,13 +583,15 @@ that emits a keyed family. The C backend omits it, and `c/host.c`
 does not call the dispatcher.
 
 Hand-written core: `c/muro_http.h`, `c/host.c`, `c/host_poll.c`,
-`c/host_render.c`, `c/proto.c`, `c/admit_glue.c`, `c/shim.c`.
+`c/host_render.c`, `c/host_date.c`, `c/host_stream.c`, `c/proto.c`,
+`c/admit_glue.c`, `c/shim.c`.
 Hand-written challenge, under `examples/challenge/`: `httpd.c` (main),
 `app.c` (the handler), `route_glue.c`, `store.c` (SQLite), `jwt.c`
 (SHA-256, HMAC-SHA256, base64url, the HS256 check), `json_text.c`
 (string unescape, the UTF-8 check, and the row JSON), and
 `host_body.c` (the call into `bodyClass`). `examples/hello/hello.c`
-is the second server. The prelude is under `MURO__PRELUDE`.
+is the second server. `examples/stream/stream.c` is the third. The
+prelude is under `MURO__PRELUDE`.
 `c/admit_glue.c` includes `admit.h` and `session.h` together.
 `conn.o` already
 contains `request.muro`. Do not also link `request.o`. `conn.o`
@@ -509,9 +609,12 @@ book linked beside it must not import that book. `decide.muro` and
   They return before `jbScan`. A refl that walks the scanner does not
   finish. One byte of that scan took the checker past 30 GB.
   `c/test_body.c` checks the scanner.
-- `render-empty-keep` reduces (`Content-Length: 0`). A positive
-  length walks `rdShow`, and that reduction does not finish.
-  `c/test_render` checks a ten-byte body in the emitted C.
+- `render-empty-keep` typechecks (`Content-Length: 0`). `render.muro`
+  is emitted as C only, so ExUnit does not run it. A positive length
+  walks `rdShow` and is not an equation. `c/test_render` checks a
+  ten-byte body, `HEAD` omit of a non-empty body, one chunk, and the
+  fixed date `Sun, 06 Nov 1994 08:49:37 GMT` in the emitted C. The
+  host clock (`gmtime_r`, English names) is not that equation.
 - The body book accepts any octet inside a JSON string, including a
   byte that is not UTF-8. The host turns that `body-ok` into
   `body-malformed` before `decide`. A `\u` surrogate
@@ -519,8 +622,11 @@ book linked beside it must not import that book. `decide.muro` and
   are not decoded.
 - A JWT claim name longer than 32 bytes is rejected. Header and
   payload JSON are decoded into a 4096-byte buffer.
-- The row buffer is 65536 bytes and the write buffer is 69632. A feed
-  or a read that does not fit closes the socket. Create and like
+- The receive buffer is 65536 bytes and the write buffer is 69632.
+  A header block past 16384 is 400. A body past 16384 is streamed,
+  up to the max body (default 8 MiB), and a larger length is 413. A
+  buffered response that does not fit the write buffer closes. A
+  feed or a read that does not fit closes the socket. Create and like
   render inside the transaction. If that row does not fit, the store
   rolls back and the fact is `db-down`, so `decide` answers 500.
   The HTTP header on a row is under 256 bytes, so a row that fits in
@@ -557,9 +663,10 @@ scanner, and the default fuel of 2000 is not enough.
 
 ## C driver
 
-`make c-check` compiles the drivers, `c/muro-httpd`, and `c/muro-hello`
-with `-Wall -Wextra -Werror -std=c11 -O2` and runs them. `c/test_hello`
-runs the hello server. `c/test_route` and `c/test_tags` check the
+`make c-check` compiles the drivers, `c/muro-httpd`, `c/muro-hello`,
+and `c/muro-stream` with `-Wall -Wextra -Werror -std=c11 -O2` and
+runs them. `c/test_hello` runs the hello server. `c/test_http11`
+runs the stream server. `c/test_route` and `c/test_tags` check the
 challenge route book and the decide constructor tags. `c/test_admit`
 is not
 in that target. It reads a trace on stdin. It is not a pass/fail
