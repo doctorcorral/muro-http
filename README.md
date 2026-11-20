@@ -1,6 +1,15 @@
-<p align="center">
-  <img src="assets/muro-http-logo.jpg" alt="muro-http" width="280">
-</p>
+<table>
+  <tr>
+    <td align="center">
+      <a href="https://github.com/doctorcorral/muro-http"><img src="assets/muro-http-logo.png" alt="muro-http" width="140"></a>
+    </td>
+    <td>
+      <h3>An HTTP/1.1 core written in muro.<br>Checked, then served from C.</h3>
+      <a href="https://github.com/doctorcorral/muro-http/actions/workflows/muro.yml"><img src="https://img.shields.io/github/actions/workflow/status/doctorcorral/muro-http/muro.yml?branch=main&style=flat-square&label=ci&labelColor=111111&color=e8e8e8" alt="CI"></a>
+      <a href="https://hex.pm/packages/muro"><img src="https://img.shields.io/badge/muro-0.22.14-e8e8e8?style=flat-square&labelColor=111111" alt="muro 0.22.14"></a>
+    </td>
+  </tr>
+</table>
 
 # muro-http
 
