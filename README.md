@@ -141,13 +141,19 @@ does not choose a move, a status, or a body.
 
 `c/host_poll.c` waits with `poll(2)` on macOS and on Linux. The idle
 tick is the poll timeout, armed for the soonest connection deadline.
-An earlier ready socket does not move that deadline. The image's
+An earlier ready socket does not move that deadline. Ready events
+are taken from a rotating cursor, so a wait that fills its event
+cap still visits high-index sockets on the next wait. A write-only
+`POLLHUP` without `POLLOUT` is an error and closes that slot; a
+peer FIN while the host is still reading becomes `evEof`, and a
+request that already arrived can still be answered. The image's
 timer field says whether that phase is waiting. A tick during decide
 or write is not delivered. A socket that has sent only part of a
 header, or only part of a body, stays in the set. The loop keeps
 serving the other sockets. A close that still owes a status writes
-it and returns. That write does not wait for the peer, so one full
-send buffer cannot stall the table.
+it and returns. That write does not wait for the peer: `EAGAIN`
+returns immediately, so one full send buffer cannot stall the table.
+The peer may miss that last status if its window is already full.
 
 Each accepted socket is one `Conn` and one session. Bytes, peer FIN,
 write progress, write done, write error, and the idle tick go through
