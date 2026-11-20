@@ -38,12 +38,15 @@ the buffer. `contentLength` is the parsed length when the header
 is well-formed.
 
 `HEADER_MAX` and `BODY_MAX` are 16384. `Transfer-Encoding` is rejected.
-A line without a colon, a bad version, a missing space, a second
-`Content-Length`, a duplicate `Host`, or a length above the cap is
-`status-malformed`. HTTP/1.1 with the headers finished and not exactly
-one `Host` is `status-malformed` (RFC 9112). HTTP/1.0 may omit `Host`.
-A second `Host` is malformed for both. A buffer that has not reached
-the header terminator, or that is shorter than `Content-Length`, is
+A line without a colon, whitespace before the colon, a bad version,
+a missing space, a second `Content-Length`, a duplicate `Host`, or a
+length above the cap is `status-malformed`. Space or tab after the
+colon is still legal. HTTP/1.1 with the headers finished and not
+exactly one `Host` is `status-malformed` (RFC 9112). HTTP/1.0 may
+omit `Host`. A second `Host` is malformed for both. The previous
+challenge server accepted an HTTP/1.1 request that omitted `Host`.
+That request is now 400. A buffer that has not reached the header
+terminator, or that is shorter than `Content-Length`, is
 `status-need-more`. The host check runs only after the headers are
 done, so a partial request stays need-more. The function is total.
 
@@ -153,26 +156,35 @@ terminal image and has no live session.
 `c/muro_http.h` is the reusable server. `muro_http_serve` takes a
 `MuroHttpConfig` and a handler `Request -> Response`. The config is
 the bind host (NULL is `127.0.0.1`, IPv4 only), the port, the idle
-timeout, the connection cap, and a log-name prefix. It does not carry
-a database path or a JWT key. `muro_http_config_init` sets port 8080,
-5000 ms, and 128 connections. `muro_http_config_env` reads
-`MURO_HTTP_BIND`, `MURO_HTTP_PORT`, `MURO_HTTP_IDLE_MS`, and
-`MURO_HTTP_MAX_CONNECTIONS`. `muro_http_config_arg` consumes `--bind`,
-`--port`, `--idle-ms`, `--max-connections`, and `--help`. A bind host
-longer than 15 characters, or one `inet_pton` rejects, makes
-`muro_http_serve` return -2. Listen failure returns -1. SIGINT and
-SIGTERM return 0. Port 0 prints `listening <host> <port>`.
+timeout, the connection cap (1 through 1024), and a log-name prefix.
+It does not carry a database path or a JWT key.
+`muro_http_config_init` sets port 8080, 5000 ms, and 128 connections.
+`muro_http_config_env` reads `MURO_HTTP_BIND`, `MURO_HTTP_PORT`,
+`MURO_HTTP_IDLE_MS`, and `MURO_HTTP_MAX_CONNECTIONS`.
+`muro_http_config_arg` consumes `--bind`, `--port`, `--idle-ms`,
+`--max-connections`, and `--help`. A bind host longer than 15
+characters, or one `inet_pton` rejects, makes `muro_http_serve`
+return -2. A connection cap outside 1..1024, or a listen failure,
+returns -1. SIGINT and SIGTERM return 0. Every successful listen
+prints `listening <host> <port>`, including port 0.
 
-The handler returns 0 to send the response, or -1 to close. Slices
-on the request point at the receive buffer and are valid only until
-the handler returns. Extra headers are a block that already ends in
-CRLF. The handler must not supply `Connection` or `Content-Length`.
-`close_after` forces `Connection: close`. `owe_status` means a side
-effect has committed and a status must still leave the socket. If
-that response does not fit, or the socket closes before any status
-byte, the host copies the book's `httpInternal` bytes. It does not
-choose them. A malformed request never calls the handler. The host
-copies `httpMalformed`.
+The handler returns 0 to send the response, or -1 to close. Request
+slices point at the receive buffer. That buffer stays live while the
+host frames the response, after the handler returns. `reason`,
+`headers`, and `body` must also stay live until that copy. A pointer
+into the handler's stack does not. Extra headers are a block of
+`Name: value` lines. A CR or LF in the reason, or a line break that
+is not CRLF, is rejected. The host drops `Connection`,
+`Content-Length`, and `Transfer-Encoding` from that block and writes
+its own. `close_after` forces `Connection: close`. A status from 400
+through 599 does too. `owe_status` means a side effect has committed
+and a status must still leave the socket. Return -1 with
+`owe_status` set still sends the book's 500 before close when no
+status byte has been written. Return -1 with `owe_status` clear
+sends nothing. If the response does not fit, or the socket closes
+before any status byte, the host copies the book's `httpInternal`
+bytes. It does not choose them. A malformed request never calls the
+handler. The host copies `httpMalformed`.
 
 `c/host.c` owns the sockets, the buffers, the connection table, the
 clock, and `poll`. `make c-check` compiles it with
@@ -309,9 +321,9 @@ Flags `--bind`, `--port`, `--idle-ms`, `--max-connections`, and
 `MURO_HTTP_IDLE_MS`, `MURO_HTTP_MAX_CONNECTIONS`, and
 `MURO_HTTP_JWT_KEY`. The database path is `--db`, then `MURO_HTTP_DB`,
 then `SQLITE_PATH`, then `:memory:`. The defaults are `127.0.0.1`,
-port 8080, 5000 ms, 128 connections, `:memory:`, and no key. Port 0
-prints `listening <host> <port>`. SIGINT and SIGTERM close the
-sockets and exit 0.
+port 8080, 5000 ms, 128 connections, `:memory:`, and no key. Every
+successful listen prints `listening <host> <port>`, including port 0.
+SIGINT and SIGTERM close the sockets and exit 0.
 
 ## The hello example
 
@@ -324,7 +336,7 @@ sockets and exit 0.
 `MURO_HTTP_BIND=nope`. A bind host that is not IPv4 exits 2 and does
 not listen.
 
-`c/test_e2e` starts that binary on an ephemeral port. It checks
+`c/test_e2e` starts `c/muro-httpd` on an ephemeral port. It checks
 `GET /health`, a malformed request, two requests on one connection, a
 pipelined pair, `Connection: close`, an idle timeout, a peer FIN
 mid-request, a body that arrives after the headers, a response the

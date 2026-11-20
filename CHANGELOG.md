@@ -2,6 +2,24 @@
 
 ## 0.1.0-dev — unreleased
 
+- HTTP/1.1 with the headers finished and not exactly one `Host` is
+  400. The previous challenge server accepted a request that omitted
+  `Host`. HTTP/1.0 may still omit it. A second `Host` is malformed
+  on both.
+- A field name with whitespace before the colon is 400. `classify`
+  and `findHeader` both reject it, so `Content-Length : 2` is not a
+  body length on one path and a header on the other. Space after the
+  colon is still legal.
+- A handler status from 400 through 599 is `reply-bad` and closes
+  the connection. A 2xx or 3xx stays `reply-ok` and can keep it.
+- The host rejects a reason or an extra header block that would
+  break CRLF framing, and drops handler `Connection`,
+  `Content-Length`, and `Transfer-Encoding`. The book still writes
+  `Connection` and `Content-Length`. Response pointers must stay
+  valid until that copy, which is after the handler returns.
+- `muro_http_serve` refuses `max_conn` outside 1..1024. Every
+  successful listen prints `listening <host> <port>`, including
+  port 0.
 - The HTTP/1.1 core is the books under `priv/muro/http/` and the C
   host behind `c/muro_http.h`. `classify` returns status and
   keep-alive. Method, target, path, query, version, headers, and body

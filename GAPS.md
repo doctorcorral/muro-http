@@ -72,8 +72,11 @@ off the counted `classify` path. `classify` itself is status and
 keep-alive. It does not return a verb, a path shape, or an id.
 HTTP/1.1 with the headers finished requires exactly one `Host`.
 HTTP/1.0 may omit it. A duplicate `Host` is malformed for both.
-The host check runs only after the blank line, so a partial request
-stays need-more.
+The previous challenge server accepted an HTTP/1.1 request that
+omitted `Host`. That request is now 400. Whitespace before a field
+colon is malformed on both `classify` and `findHeader`. Space after
+the colon is still legal. The host check runs only after the blank
+line, so a partial request stays need-more.
 
 C, Rust, and Zig refuse `Opt` of unboxed data (`c:unboxed`). This book
 does not build that option. An `Opt` of a byte or a word is a value.
@@ -130,8 +133,8 @@ one call of `muro__sess_conn_step`.
 `priv/muro/http/admit.muro` is that map. `--backend c` emits it as
 `admitChoice` in `c/generated/admit.c`. Do not hand-edit that file.
 The book is a total function over machine words. The inputs are the
-host event (phase, event tag, buffer length, classifier tag, decide
-code, observe bit, close-after bit) and the current session position
+host event (phase, event tag, buffer length, classifier tag, reply
+word, observe bit, close-after bit) and the current session position
 (`st.at`, `st.stuck`, `st.key`, and whether the stepper reports done).
 The output is an unboxed offer: a refusal, no moves, or up to five
 moves. Each move is five words (present, direction, value tag, pick
@@ -147,8 +150,9 @@ function:
 - an immediate `reply-bad` for an open malformed request, or for a
   half-closed need-more or malformed request
 - `reply-ok` or `reply-bad` from the reply word, or no reply while
-  the observe bit is set. The core host passes `reply-ok` and leaves
-  that bit clear. The challenge observe loop does not use it.
+  the observe bit is set. A handler status 400..599 is `reply-bad`.
+  The core host leaves the observe bit clear. The challenge observe
+  loop does not use it.
 - keep (`send` pick 0) or close (`send` pick 1) after an open reply,
   including a write error, and only at the keep-or-close position.
   A write end at talk is a refusal: pick 1 there is the idle timeout
@@ -237,7 +241,10 @@ the handler's extra header block, a blank line, and the body. `keep`
 of 1 is `Connection: close`. Any other keep is `Connection:
 keep-alive`. Common codes (200, 201, 204, 400, 401, 404, 405, 500,
 503) are digit literals. Any other code goes through `rdShow`. The
-handler supplies the reason and must not supply `Connection` or
+handler supplies the reason. The host drops `Connection`,
+`Content-Length`, and `Transfer-Encoding` from the extra block, and
+rejects a reason or an extra block that contains a CR or LF outside
+a CRLF line ending. The book still writes `Connection` and
 `Content-Length`.
 
 muro checks five equations by reduction (`refl`): empty keep, empty
@@ -315,9 +322,11 @@ FIN during the handler phase or write is that flag: the session's
 half-close is the peer's choice before the piece. The later
 keep-or-close choice is a stepper move, chosen by `admitChoice`.
 `shut` is the terminal image and has no live session, so a byte on
-it is not a new request. The handler reply is event tag 6 with
-`reply-ok` and the observe bit clear. The challenge observe loop
-does not offer a stepper move.
+it is not a new request. The handler reply is event tag 6. The
+symbol is still `aEvDb`, and the trace word is still `db`. A 2xx is
+`reply-ok`. A 4xx or 5xx is `reply-bad` and the image closes. The
+observe bit stays clear. The challenge observe loop does not offer
+a stepper move.
 
 Init of this session takes no nat. A stepper that does takes `uint64_t`,
 so a negative cannot be supplied. A wrong key, a bad position, or an

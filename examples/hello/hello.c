@@ -6,6 +6,10 @@
 
 #include <string.h>
 
+/* Pointers stored on resp must outlive this function. The host copies
+   them after the return. type is static. The reasons and the fixed
+   bodies are string literals. POST echoes the request body, which
+   stays live through that copy. A pointer into this stack would dangle. */
 static int on_req(const MuroHttpRequest *req, MuroHttpResponse *resp, void *user) {
   static const char type[] = "Content-Type: text/plain\r\n";
   (void)user;
