@@ -5,7 +5,8 @@
 #include <stdint.h>
 
 /* body.muro, called from its own translation unit. conn.h and
-   body.h both define the muro prelude, so the socket loop cannot
+   body.h both put the prelude under MURO__PRELUDE, so one
+   translation unit can include both. The socket loop does not
    include body.h. The results are BodyClass constructor order and
    the raw text span. They allocate in the shared bump arena. */
 

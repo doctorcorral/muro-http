@@ -1,6 +1,7 @@
-/* The emitted renderer. conn.h and render.h both define the muro
-   prelude, so the socket loop cannot include render.h. This file
-   does. It copies the slice and does not choose a status or a body. */
+/* The emitted renderer. This file includes render.h and copies the
+   slice. It does not choose a status or a body. conn.h and render.h
+   both put the prelude under MURO__PRELUDE, so one translation unit
+   can include both. */
 
 #include "shim.h"
 #include "render.h"

@@ -1,7 +1,7 @@
 /* decision_tags.h is a hand copy of constructor order. decide.h's
    *From helpers are the emitted map. This file checks one against
-   the other. It does not choose a response. decide.h cannot be
-   included next to conn.h (each generated header defines the prelude). */
+   the other. It does not choose a response. decide.h and conn.h both
+   put the prelude under MURO__PRELUDE. This file includes decide.h. */
 
 #include "shim.h"
 #include "decide.h"
