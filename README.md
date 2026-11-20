@@ -139,7 +139,7 @@ terminal image and has no live session.
 
 `c/muro-httpd` listens on `127.0.0.1` and runs that image. `make`
 builds it. `make c-check` compiles the C drivers and this binary with
-`-Wall -Wextra -Werror -std=c11`, then runs them. The loop is
+`-Wall -Wextra -Werror -std=c11 -O2`, then runs them. The loop is
 hand-written. It owns the sockets, the buffers, and the clock. It
 does not choose a move, a status, or a body.
 
@@ -408,7 +408,7 @@ scanner, and the default fuel of 2000 is not enough.
 ## C driver
 
 `make c-check` compiles the drivers and `c/muro-httpd` with
-`-Wall -Wextra -Werror -std=c11` and runs them. `c/test_admit` is not
+`-Wall -Wextra -Werror -std=c11 -O2` and runs them. `c/test_admit` is not
 in that target. It reads a trace on stdin. It is not a pass/fail
 driver.
 
@@ -418,10 +418,10 @@ driver.
 duplicated.
 
 ```sh
-cc -Wall -Wextra -Werror -std=c11 -I c -I c/generated -include c/shim.h \
+cc -Wall -Wextra -Werror -std=c11 -O2 -I c -I c/generated -include c/shim.h \
   -c -o c/test_classify.o c/test_classify.c
-cc -Wall -Wextra -Werror -std=c11 -I c -c -o c/shim.o c/shim.c
-cc -Wall -Wextra -Werror -std=c11 \
+cc -Wall -Wextra -Werror -std=c11 -O2 -I c -c -o c/shim.o c/shim.c
+cc -Wall -Wextra -Werror -std=c11 -O2 \
   -I c -I c/generated -include c/shim.h \
   -c -o c/request.o c/generated/request.c
 cc -o c/test_classify c/test_classify.o c/request.o c/shim.o
@@ -455,21 +455,21 @@ Their headers both define `struct muro__nat`, so `c/admit_glue.c`
 is the only file that includes `admit.h`.
 
 ```sh
-cc -Wall -Wextra -Werror -std=c11 -I c -I c/generated -include c/shim.h \
+cc -Wall -Wextra -Werror -std=c11 -O2 -I c -I c/generated -include c/shim.h \
   -c -o c/test_conn.o c/test_conn.c
-cc -Wall -Wextra -Werror -std=c11 -I c -c -o c/shim.o c/shim.c
-cc -Wall -Wextra -Werror -std=c11 \
+cc -Wall -Wextra -Werror -std=c11 -O2 -I c -c -o c/shim.o c/shim.c
+cc -Wall -Wextra -Werror -std=c11 -O2 \
   -I c -I c/generated -include c/shim.h \
   -c -o c/conn.o c/generated/conn.c
-cc -Wall -Wextra -Werror -std=c11 \
+cc -Wall -Wextra -Werror -std=c11 -O2 \
   -I c -I c/generated -include c/shim.h \
   -c -o c/session.o c/generated/session.c
-cc -Wall -Wextra -Werror -std=c11 \
+cc -Wall -Wextra -Werror -std=c11 -O2 \
   -I c -I c/generated -include c/shim.h \
   -c -o c/admit.o c/generated/admit.c
-cc -Wall -Wextra -Werror -std=c11 -I c -I c/generated \
+cc -Wall -Wextra -Werror -std=c11 -O2 -I c -I c/generated \
   -c -o c/admit_glue.o c/admit_glue.c
-cc -Wall -Wextra -Werror -std=c11 -I c -I c/generated \
+cc -Wall -Wextra -Werror -std=c11 -O2 -I c -I c/generated \
   -c -o c/proto.o c/proto.c
 cc -o c/test_conn c/test_conn.o c/conn.o c/session.o c/admit.o c/admit_glue.o c/proto.o c/shim.o
 ./c/test_conn
@@ -487,12 +487,12 @@ outside that count.
 prints `OK`.
 
 ```sh
-cc -Wall -Wextra -Werror -std=c11 \
+cc -Wall -Wextra -Werror -std=c11 -O2 \
   -I c -I c/generated -include c/shim.h \
   -c -o c/session.o c/generated/session.c
-cc -Wall -Wextra -Werror -std=c11 -I c -I c/generated \
+cc -Wall -Wextra -Werror -std=c11 -O2 -I c -I c/generated \
   -c -o c/test_sess.o c/test_sess.c
-cc -Wall -Wextra -Werror -std=c11 -I c -c -o c/shim.o c/shim.c
+cc -Wall -Wextra -Werror -std=c11 -O2 -I c -c -o c/shim.o c/shim.c
 cc -o c/test_sess c/test_sess.o c/session.o c/shim.o
 ./c/test_sess
 ```

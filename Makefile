@@ -1,6 +1,7 @@
 # Host objects and the emitted books. -include supplies muro__ALLOC.
 CC ?= cc
-CFLAGS ?= -Wall -Wextra -Werror -std=c11 -D_GNU_SOURCE -I c -I c/generated -include c/shim.h
+OPT ?= -O2
+CFLAGS ?= -Wall -Wextra -Werror -std=c11 $(OPT) -D_GNU_SOURCE -I c -I c/generated -include c/shim.h
 LDFLAGS ?=
 
 .PHONY: all c-check c-sanitize clean
