@@ -1,7 +1,7 @@
 <table>
   <tr>
     <td align="center">
-      <a href="https://github.com/doctorcorral/muro-http"><img src="assets/muro-http-logo.jpg" alt="muro-http" width="150"></a>
+      <a href="https://github.com/doctorcorral/muro-http"><img src="assets/muro-http-logo.png" alt="muro-http" width="140"></a>
     </td>
     <td>
       <h3>An HTTP/1.1 core written in muro.<br>Checked, then served from C.</h3>
