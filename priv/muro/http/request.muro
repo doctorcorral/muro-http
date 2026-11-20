@@ -18,7 +18,10 @@
 -- The scan is app-agnostic. It does not name a route. Method, target,
 -- path, query, version, header values, and the body are views.
 -- HTTP/1.1 needs one Host header. A second Host is malformed on any
--- version. HTTP/1.0 may omit Host. Transfer-Encoding is rejected.
+-- version. HTTP/1.0 may omit Host. A body declared longer than 16384
+-- is not buffered here: the host streams it. Chunked bodies are a
+-- separate scan. Transfer-Encoding together with Content-Length is
+-- malformed.
 import "std:bool.muro"
 
 data Status : Type where
@@ -78,9 +81,18 @@ def u64lt : run Π (x : U64) → Π (y : U64) → Bool :=
       | wtrue => true
       | wfalse => false
 
--- True when n > 16384. BODY_MAX itself is still a legal length.
+-- True when n > 16384. A header block of 16384 is still legal.
+-- A declared body longer than this is streamed, not rejected.
 def gt16384 : run Π (n : U64) → Bool :=
   λ (n : U64) → u64lt (toU64 16384) n
+
+-- floor((2^64-1)/10). A larger accumulator cannot take another digit.
+def clLim : run U64 :=
+  toU64 1844674407370955161
+
+-- floor((2^64-1)/16). A larger hex accumulator cannot take another digit.
+def hexLim : run U64 :=
+  toU64 1152921504606846975
 
 def byteAt : run Π (+ s : Slice) → Π (i : U64) → U8 :=
   λ (+ s : Slice) → λ (i : U64) →
@@ -202,6 +214,33 @@ def hasToken : run Π (+ s : Slice) → Π (+ w : Slice) → Bool :=
 def isDigit : run Π (+ b : U8) → Bool :=
   λ (+ b : U8) →
     and (not (u8lt b (toU8 48))) (not (u8lt (toU8 57) b))
+
+def isAlpha : run Π (+ b : U8) → Bool :=
+  λ (+ b : U8) →
+    or (and (not (u8lt b (toU8 65))) (not (u8lt (toU8 90) b)))
+      (and (not (u8lt b (toU8 97))) (not (u8lt (toU8 122) b)))
+
+-- RFC 9110 tchar marks, besides ALPHA and DIGIT.
+def isMark : run Π (+ b : U8) → Bool :=
+  λ (+ b : U8) →
+    or (u8eq b (toU8 33))
+      (or (u8eq b (toU8 35))
+        (or (u8eq b (toU8 36))
+          (or (u8eq b (toU8 37))
+            (or (u8eq b (toU8 38))
+              (or (u8eq b (toU8 39))
+                (or (u8eq b (toU8 42))
+                  (or (u8eq b (toU8 43))
+                    (or (u8eq b (toU8 45))
+                      (or (u8eq b (toU8 46))
+                        (or (u8eq b (toU8 94))
+                          (or (u8eq b (toU8 95))
+                            (or (u8eq b (toU8 96))
+                              (or (u8eq b (toU8 124))
+                                (u8eq b (toU8 126)))))))))))))))
+
+def isTchar : run Π (+ b : U8) → Bool :=
+  λ (+ b : U8) → or (or (isAlpha b) (isDigit b)) (isMark b)
 
 def leadWS : run Π (+ b : U8) → Bool :=
   λ (+ b : U8) → or (u8eq b (toU8 32)) (u8eq b (toU8 9))
@@ -336,8 +375,9 @@ def withBit : run Π (f : U64) → Π (bit : U64) → U64 :=
 def noBit : run Π (f : U64) → Π (bit : U64) → U64 :=
   λ (f : U64) → λ (bit : U64) → andi f (noti bit)
 
--- Bit 32 marks a rejected Content-Length. A legal value is at most
--- 16384, so the low bits are the length when that bit is clear.
+-- 2^32 marks a rejected Content-Length. A well-formed length is
+-- below that bit. Overflow, and any value that sets the bit, reject.
+-- A declared body longer than 16384 is streamed by the host.
 -- A closed word, so the C emit is a literal and not a Nat walk.
 def clBad : run U64 :=
   toU64 4294967296
@@ -345,11 +385,19 @@ def clBad : run U64 :=
 def clRejected : run Π (v : U64) → Bool :=
   λ (v : U64) → not (u64nil (andi v clBad))
 
+-- Reject before the multiply when another digit cannot fit in U64.
+-- clLim * 10 + 5 is 2^64-1. A larger digit overflows.
 def clPush : run Π (+ acc : U64) → Π (+ b : U8) → U64 :=
   λ (+ acc : U64) → λ (+ b : U8) →
-    match (gt16384 (addi (muli acc (toU64 10)) (asU64 (subi b (toU8 48))))) motive (λ _ → U64)
-      | true => clBad
-      | false => addi (muli acc (toU64 10)) (asU64 (subi b (toU8 48)))
+    match (clRejected acc) motive (λ _ → U64)
+      | true => acc
+      | false =>
+          (match (u64lt clLim acc) motive (λ _ → U64)
+            | true => clBad
+            | false =>
+                (match (and (u64eq acc clLim) (u8lt (toU8 53) b)) motive (λ _ → U64)
+                  | true => clBad
+                  | false => addi (muli acc (toU64 10)) (asU64 (subi b (toU8 48)))))
 
 def digitStep : run Π (+ b : U8) → Π (+ acc : U64) → U64 :=
   λ (+ b : U8) → λ (+ acc : U64) →
@@ -411,7 +459,8 @@ def stick : run Π (i : U64) → Π (ls : U64) → Π (ph : U64) → Π (fl : U6
   λ (i : U64) → λ (ls : U64) → λ (ph : U64) → λ (fl : U64) → λ (cl : U64) → λ (aS : U64) → λ (aL : U64) → λ (wh : U64) → λ (mark : U64) →
     hst i ls ph fl cl aS aL wh mark
 
--- 1 content-length, 2 host, 3 connection, 4 transfer-encoding, 5 other.
+-- 1 content-length, 2 host, 3 connection, 4 transfer-encoding,
+-- 6 expect, 5 other.
 def whichOf : run Π (+ name : Slice) → U64 :=
   λ (+ name : Slice) →
     match (nameEq name b"content-length") motive (λ _ → U64)
@@ -425,12 +474,17 @@ def whichOf : run Π (+ name : Slice) → U64 :=
                   | false =>
                       (match (nameEq name b"transfer-encoding") motive (λ _ → U64)
                         | true => toU64 4
-                        | false => toU64 5)))
+                        | false =>
+                            (match (nameEq name b"expect") motive (λ _ → U64)
+                              | true => toU64 6
+                              | false => toU64 5))))
 
 def valueSlice : run Π (+ buf : Slice) → Π (+ mark : U64) → Π (endI : U64) → Slice :=
   λ (+ buf : Slice) → λ (+ mark : U64) → λ (endI : U64) →
     trimmed (slice buf mark (subi endI mark))
 
+-- A second Content-Length rejects. Content-Length after
+-- Transfer-Encoding is the same request twice (bit 128).
 def clFlags : run Π (+ fl : U64) → Π (+ raw : Slice) → U64 :=
   λ (+ fl : U64) → λ (+ raw : Slice) →
     match (has fl (toU64 2)) motive (λ _ → U64)
@@ -438,7 +492,10 @@ def clFlags : run Π (+ fl : U64) → Π (+ raw : Slice) → U64 :=
       | false =>
           (match (clRejected (parseCL raw)) motive (λ _ → U64)
             | true => withBit fl (toU64 32)
-            | false => withBit fl (toU64 2))
+            | false =>
+                (match (has fl (toU64 4)) motive (λ _ → U64)
+                  | true => withBit (withBit fl (toU64 2)) (toU64 128)
+                  | false => withBit fl (toU64 2)))
 
 def clValue : run Π (fl : U64) → Π (cl : U64) → Π (+ raw : Slice) → U64 :=
   λ (fl : U64) → λ (cl : U64) → λ (+ raw : Slice) →
@@ -492,6 +549,178 @@ def finishLine : run Π (+ buf : Slice) → Π (+ i : U64) → Π (+ ls : U64) �
                       (match (has fl (toU64 1)) motive (λ _ → HSt)
                         | true => finishKnown buf i ls fl cl aS aL wh mark
                         | false => hst i ls (toU64 3) (withBit fl (toU64 32)) cl aS aL wh mark)))
+-- Transfer-Encoding token class. ph 0 before a token, 1 inside,
+-- 2 after it. fl: 1 bad, 2 a coding other than chunked, 4 one
+-- chunked, 8 chunked twice, 16 a comma still needs a token.
+unboxed data TeSt : Type where
+  teSt : Π (+ ph : U64) → Π (+ idx : U64) → Π (+ fl : U64) → TeSt
+
+def teStart : run TeSt :=
+  teSt (toU64 0) (toU64 0) (toU64 0)
+
+def chunkedByte : run Π (+ i : U64) → U8 :=
+  λ (+ i : U64) →
+    match (u64eq i (toU64 0)) motive (λ _ → U8)
+      | true => toU8 99
+      | false =>
+          (match (u64eq i (toU64 1)) motive (λ _ → U8)
+            | true => toU8 104
+            | false =>
+                (match (u64eq i (toU64 2)) motive (λ _ → U8)
+                  | true => toU8 117
+                  | false =>
+                      (match (u64eq i (toU64 3)) motive (λ _ → U8)
+                        | true => toU8 110
+                        | false =>
+                            (match (u64eq i (toU64 4)) motive (λ _ → U8)
+                              | true => toU8 107
+                              | false =>
+                                  (match (u64eq i (toU64 5)) motive (λ _ → U8)
+                                    | true => toU8 101
+                                    | false =>
+                                        (match (u64eq i (toU64 6)) motive (λ _ → U8)
+                                          | true => toU8 100
+                                          | false => toU8 0))))))
+
+def teChar : run Π (+ idx : U64) → Π (+ b : U8) → U64 :=
+  λ (+ idx : U64) → λ (+ b : U8) →
+    match (u64eq idx (toU64 8)) motive (λ _ → U64)
+      | true => toU64 8
+      | false =>
+          (match (u8eq (lower b) (chunkedByte idx)) motive (λ _ → U64)
+            | true => addi idx (toU64 1)
+            | false => toU64 8)
+
+def teClose : run Π (+ st : TeSt) → TeSt :=
+  λ (+ st : TeSt) →
+    match st motive (λ _ → TeSt)
+      | teSt _ph idx fl =>
+          (match (has fl (toU64 1)) motive (λ _ → TeSt)
+            | true => st
+            | false =>
+                (match (u64eq idx (toU64 7)) motive (λ _ → TeSt)
+                  | true =>
+                      (match (has fl (toU64 4)) motive (λ _ → TeSt)
+                        | true => teSt (toU64 2) idx (noBit (withBit fl (toU64 8)) (toU64 16))
+                        | false => teSt (toU64 2) idx (noBit (withBit fl (toU64 4)) (toU64 16)))
+                  | false =>
+                      (match (u64eq idx (toU64 0)) motive (λ _ → TeSt)
+                        | true => teSt (toU64 2) idx (withBit fl (toU64 1))
+                        | false => teSt (toU64 2) idx (noBit (withBit fl (toU64 2)) (toU64 16)))))
+
+def teComma : run Π (+ st : TeSt) → TeSt :=
+  λ (+ st : TeSt) →
+    match st motive (λ _ → TeSt)
+      | teSt _ph _idx fl =>
+          (match (has fl (toU64 1)) motive (λ _ → TeSt)
+            | true => st
+            | false => teSt (toU64 0) (toU64 0) (withBit fl (toU64 16)))
+
+def teBefore : run Π (+ fl : U64) → Π (+ b : U8) → TeSt :=
+  λ (+ fl : U64) → λ (+ b : U8) →
+    match (leadWS b) motive (λ _ → TeSt)
+      | true => teSt (toU64 0) (toU64 0) fl
+      | false =>
+          (match (u8eq b (toU8 44)) motive (λ _ → TeSt)
+            | true => teSt (toU64 0) (toU64 0) (withBit fl (toU64 1))
+            | false => teSt (toU64 1) (teChar (toU64 0) b) (noBit fl (toU64 16)))
+
+def teInside : run Π (+ idx : U64) → Π (+ fl : U64) → Π (+ b : U8) → TeSt :=
+  λ (+ idx : U64) → λ (+ fl : U64) → λ (+ b : U8) →
+    match (leadWS b) motive (λ _ → TeSt)
+      | true => teClose (teSt (toU64 1) idx fl)
+      | false =>
+          (match (u8eq b (toU8 44)) motive (λ _ → TeSt)
+            | true => teComma (teClose (teSt (toU64 1) idx fl))
+            | false =>
+                (match (isTchar b) motive (λ _ → TeSt)
+                  | true => teSt (toU64 1) (teChar idx b) fl
+                  | false => teSt (toU64 1) idx (withBit fl (toU64 1))))
+
+def teAfter : run Π (+ fl : U64) → Π (+ b : U8) → TeSt :=
+  λ (+ fl : U64) → λ (+ b : U8) →
+    match (leadWS b) motive (λ _ → TeSt)
+      | true => teSt (toU64 2) (toU64 0) fl
+      | false =>
+          (match (u8eq b (toU8 44)) motive (λ _ → TeSt)
+            | true => teSt (toU64 0) (toU64 0) (withBit fl (toU64 16))
+            | false => teSt (toU64 2) (toU64 0) (withBit fl (toU64 1)))
+
+def teByte : run Π (+ st : TeSt) → Π (+ b : U8) → TeSt :=
+  λ (+ st : TeSt) → λ (+ b : U8) →
+    match st motive (λ _ → TeSt)
+      | teSt ph idx fl =>
+          (match (has fl (toU64 1)) motive (λ _ → TeSt)
+            | true => st
+            | false =>
+                (match (u64eq ph (toU64 0)) motive (λ _ → TeSt)
+                  | true => teBefore fl b
+                  | false =>
+                      (match (u64eq ph (toU64 1)) motive (λ _ → TeSt)
+                        | true => teInside idx fl b
+                        | false => teAfter fl b)))
+
+def teFinish : run Π (+ st : TeSt) → TeSt :=
+  λ (+ st : TeSt) →
+    match st motive (λ _ → TeSt)
+      | teSt ph idx fl =>
+          (match (u64eq ph (toU64 1)) motive (λ _ → TeSt)
+            | true => teClose (teSt ph idx fl)
+            | false =>
+                (match (u64eq ph (toU64 0)) motive (λ _ → TeSt)
+                  | true => teSt ph idx (withBit fl (toU64 1))
+                  | false => st))
+
+def teFl : run Π (+ st : TeSt) → U64 :=
+  λ (+ st : TeSt) →
+    match st motive (λ _ → U64)
+      | teSt _ph _idx fl => fl
+
+-- 128 bad, 256 a coding other than a single chunked, 512 chunked.
+def teClass : run Π (+ fl : U64) → U64 :=
+  λ (+ fl : U64) →
+    match (has fl (toU64 1)) motive (λ _ → U64)
+      | true => toU64 128
+      | false =>
+          (match (has fl (toU64 2)) motive (λ _ → U64)
+            | true => toU64 256
+            | false =>
+                (match (has fl (toU64 8)) motive (λ _ → U64)
+                  | true => toU64 128
+                  | false =>
+                      (match (has fl (toU64 4)) motive (λ _ → U64)
+                        | true => toU64 512
+                        | false => toU64 128)))
+
+def teBits : run Π (+ raw : Slice) → U64 :=
+  λ (+ raw : Slice) →
+    match (isEmpty raw) motive (λ _ → U64)
+      | true => toU64 128
+      | false =>
+          teClass (teFl (teFinish (sliceFold TeSt teStart
+            (λ (b : U8) → λ (_r : Slice) → λ (st : TeSt) → teByte st b)
+            raw)))
+
+-- Bit 4 records Transfer-Encoding. A second field, a field after
+-- Content-Length, or HTTP/1.0 is bad (bit 128). Otherwise the value
+-- class is OR-ed in: 128 bad, 256 unknown, 512 chunked.
+def teApply : run Π (+ buf : Slice) → Π (+ fl : U64) → Π (+ raw : Slice) → U64 :=
+  λ (+ buf : Slice) → λ (+ fl : U64) → λ (+ raw : Slice) →
+    match (or (has fl (toU64 4)) (or (has fl (toU64 2)) (spanEq (versionTok buf) b"HTTP/1.0"))) motive (λ _ → U64)
+      | true => withBit (withBit fl (toU64 4)) (toU64 128)
+      | false => withBit (ori fl (teBits raw)) (toU64 4)
+
+-- 1024 saw Expect. 2048 the value is 100-continue. 4096 it is not,
+-- including a second Expect. The host checks 4096 first.
+def expApply : run Π (+ fl : U64) → Π (+ raw : Slice) → U64 :=
+  λ (+ fl : U64) → λ (+ raw : Slice) →
+    match (has fl (toU64 1024)) motive (λ _ → U64)
+      | true => withBit fl (toU64 4096)
+      | false =>
+          (match (nameEq (trimmed raw) b"100-continue") motive (λ _ → U64)
+            | true => withBit (withBit fl (toU64 1024)) (toU64 2048)
+            | false => withBit (withBit fl (toU64 1024)) (toU64 4096))
+
 def finishKnown : run Π (+ buf : Slice) → Π (+ i : U64) → Π (+ ls : U64) → Π (+ fl : U64) → Π (+ cl : U64) → Π (+ aS : U64) → Π (+ aL : U64) → Π (+ wh : U64) → Π (+ mark : U64) → HSt :=
   λ (+ buf : Slice) → λ (+ i : U64) → λ (+ ls : U64) → λ (+ fl : U64) → λ (+ cl : U64) → λ (+ aS : U64) → λ (+ aL : U64) → λ (+ wh : U64) → λ (+ mark : U64) →
     match (u64eq wh (toU64 1)) motive (λ _ → HSt)
@@ -504,8 +733,11 @@ def finishKnown : run Π (+ buf : Slice) → Π (+ i : U64) → Π (+ ls : U64) 
                   | true => nextLine i (finishConn (slice buf mark (subi (contentEnd buf i ls) mark)) fl) cl aS aL
                   | false =>
                       (match (u64eq wh (toU64 4)) motive (λ _ → HSt)
-                        | true => nextLine i (withBit fl (toU64 4)) cl aS aL
-                        | false => nextLine i fl cl aS aL)))
+                        | true => nextLine i (teApply buf fl (valueSlice buf mark (contentEnd buf i ls))) cl aS aL
+                        | false =>
+                            (match (u64eq wh (toU64 6)) motive (λ _ → HSt)
+                              | true => nextLine i (expApply fl (valueSlice buf mark (contentEnd buf i ls))) cl aS aL
+                              | false => nextLine i fl cl aS aL))))
 
 -- RFC 9112: no whitespace between the field name and the colon.
 -- A space or tab there must not be a Content-Length for one path
@@ -660,6 +892,314 @@ def bodyViewSt : run Π (+ st : HSt) → Π (+ s : Slice) → Slice :=
 def bodyView : run Π (+ s : Slice) → Slice :=
   λ (+ s : Slice) → bodyViewSt (scan s) s
 
+-- 0 a known method, 1 well-formed but not one we implement, 2 a bad
+-- token. GET HEAD POST PUT DELETE OPTIONS PATCH are known, and the
+-- match is case-sensitive. OPTIONS * is known. Any other method whose
+-- target is * is malformed. CONNECT and TRACE are 1.
+def methStep : run Π (+ b : U8) → Π (+ acc : U64) → U64 :=
+  λ (+ b : U8) → λ (+ acc : U64) →
+    match (u64eq acc (toU64 2)) motive (λ _ → U64)
+      | true => acc
+      | false =>
+          (match (isTchar b) motive (λ _ → U64)
+            | true => toU64 0
+            | false => toU64 2)
+
+def methFold : run Π (+ s : Slice) → U64 :=
+  λ (+ s : Slice) →
+    match (isEmpty s) motive (λ _ → U64)
+      | true => toU64 2
+      | false =>
+          sliceFold U64 (toU64 0)
+            (λ (b : U8) → λ (_r : Slice) → λ (acc : U64) → methStep b acc)
+            s
+
+def knownMethod : run Π (+ s : Slice) → Bool :=
+  λ (+ s : Slice) →
+    or (spanEq s b"GET")
+      (or (spanEq s b"HEAD")
+        (or (spanEq s b"POST")
+          (or (spanEq s b"PUT")
+            (or (spanEq s b"DELETE")
+              (or (spanEq s b"OPTIONS")
+                (spanEq s b"PATCH"))))))
+
+def methodCode : run Π (+ s : Slice) → U64 :=
+  λ (+ s : Slice) →
+    match (u64eq (methFold (methodView s)) (toU64 2)) motive (λ _ → U64)
+      | true => toU64 2
+      | false =>
+          (match (and (spanEq (targetView s) b"*") (not (spanEq (methodView s) b"OPTIONS"))) motive (λ _ → U64)
+            | true => toU64 2
+            | false =>
+                (match (knownMethod (methodView s)) motive (λ _ → U64)
+                  | true => toU64 0
+                  | false => toU64 1))
+
+def methodBad : run Π (+ s : Slice) → Bool :=
+  λ (+ s : Slice) → u64eq (methodCode s) (toU64 2)
+
+-- 0 none, 1 chunked, 2 unknown coding, 3 bad framing.
+def teBadSt : run Π (+ st : HSt) → Bool :=
+  λ (+ st : HSt) → has (scanFl st) (toU64 128)
+
+def teUnkSt : run Π (+ st : HSt) → Bool :=
+  λ (+ st : HSt) → and (has (scanFl st) (toU64 256)) (not (has (scanFl st) (toU64 128)))
+
+def teChunkSt : run Π (+ st : HSt) → Bool :=
+  λ (+ st : HSt) →
+    and (has (scanFl st) (toU64 512))
+      (and (not (has (scanFl st) (toU64 128))) (not (has (scanFl st) (toU64 256))))
+
+def teCodeSt : run Π (+ st : HSt) → U64 :=
+  λ (+ st : HSt) →
+    match (teBadSt st) motive (λ _ → U64)
+      | true => toU64 3
+      | false =>
+          (match (teUnkSt st) motive (λ _ → U64)
+            | true => toU64 2
+            | false =>
+                (match (teChunkSt st) motive (λ _ → U64)
+                  | true => toU64 1
+                  | false => toU64 0))
+
+def teCode : run Π (+ s : Slice) → U64 :=
+  λ (+ s : Slice) → teCodeSt (scan s)
+
+-- 0 none, 1 100-continue, 2 any other Expect value.
+def expectCodeSt : run Π (+ st : HSt) → U64 :=
+  λ (+ st : HSt) →
+    match (has (scanFl st) (toU64 4096)) motive (λ _ → U64)
+      | true => toU64 2
+      | false =>
+          (match (has (scanFl st) (toU64 2048)) motive (λ _ → U64)
+            | true => toU64 1
+            | false => toU64 0)
+
+def expectCode : run Π (+ s : Slice) → U64 :=
+  λ (+ s : Slice) → expectCodeSt (scan s)
+
+-- A body the header scan will not buffer. Headers must be finished,
+-- Content-Length must be past 16384, and those bytes must not all be
+-- here yet. 16384 itself stays on the buffered path.
+def streamLenSt : run Π (+ st : HSt) → Π (+ s : Slice) → Bool :=
+  λ (+ st : HSt) → λ (+ s : Slice) →
+    and (headersDone s) (and (bodyShortSt st s) (gt16384 (contentLengthSt st)))
+
+def hexVal : run Π (+ b : U8) → U64 :=
+  λ (+ b : U8) →
+    match (isDigit b) motive (λ _ → U64)
+      | true => asU64 (subi b (toU8 48))
+      | false =>
+          (match (and (not (u8lt (lower b) (toU8 97))) (not (u8lt (toU8 102) (lower b)))) motive (λ _ → U64)
+            | true => asU64 (subi (lower b) (toU8 87))
+            | false => toU64 16)
+
+def isHex : run Π (+ b : U8) → Bool :=
+  λ (+ b : U8) → u64lt (hexVal b) (toU64 16)
+
+-- Chunk framing over the bytes after the header block.
+-- ph: 0 size, 1 extension, 2 the LF after the size line, 3 data,
+-- 4 the CR after data, 5 the LF after data, 6 a trailer line,
+-- 7 the LF after a trailer line, 8 done, 9 bad.
+-- fl: 4 this is the last chunk, 8 a size digit was seen, 16 the
+-- trailer line has a colon, 32 the trailer line has a byte, 64 the
+-- trailer line is the blank line. Extensions are skipped. Trailers
+-- are checked for one colon and then dropped. A size that does not
+-- fit in U64 is bad. The host compares rem and total with max body.
+unboxed data Ck : Type where
+  ck : Π (+ ph : U64) → Π (+ acc : U64) → Π (+ rem : U64) → Π (+ total : U64) → Π (+ fl : U64) → Π (+ at : U64) → Ck
+
+def ckStart : run Ck :=
+  ck (toU64 0) (toU64 0) (toU64 0) (toU64 0) (toU64 0) (toU64 0)
+
+def ckFail : run Π (+ total : U64) → Π (+ at : U64) → Ck :=
+  λ (+ total : U64) → λ (+ at : U64) →
+    ck (toU64 9) (toU64 0) (toU64 0) total (toU64 0) at
+
+def ckSize : run Π (+ acc : U64) → Π (+ total : U64) → Π (+ fl : U64) → Π (+ at : U64) → Π (+ b : U8) → Ck :=
+  λ (+ acc : U64) → λ (+ total : U64) → λ (+ fl : U64) → λ (+ at : U64) → λ (+ b : U8) →
+    match (isHex b) motive (λ _ → Ck)
+      | true =>
+          (match (u64lt hexLim acc) motive (λ _ → Ck)
+            | true => ckFail total (addi at (toU64 1))
+            | false => ck (toU64 0) (addi (muli acc (toU64 16)) (hexVal b)) (toU64 0) total (withBit fl (toU64 8)) (addi at (toU64 1)))
+      | false =>
+          (match (u8eq b (toU8 59)) motive (λ _ → Ck)
+            | true =>
+                (match (has fl (toU64 8)) motive (λ _ → Ck)
+                  | true => ck (toU64 1) (toU64 0) acc total (noBit fl (toU64 8)) (addi at (toU64 1))
+                  | false => ckFail total (addi at (toU64 1)))
+            | false =>
+                (match (u8eq b (toU8 13)) motive (λ _ → Ck)
+                  | true =>
+                      (match (has fl (toU64 8)) motive (λ _ → Ck)
+                        | true =>
+                            (match (u64nil acc) motive (λ _ → Ck)
+                              | true => ck (toU64 2) (toU64 0) acc total (withBit (noBit fl (toU64 8)) (toU64 4)) (addi at (toU64 1))
+                              | false => ck (toU64 2) (toU64 0) acc total (noBit fl (toU64 8)) (addi at (toU64 1)))
+                        | false => ckFail total (addi at (toU64 1)))
+                  | false => ckFail total (addi at (toU64 1))))
+
+def ckExt : run Π (+ rem : U64) → Π (+ total : U64) → Π (+ fl : U64) → Π (+ at : U64) → Π (+ b : U8) → Ck :=
+  λ (+ rem : U64) → λ (+ total : U64) → λ (+ fl : U64) → λ (+ at : U64) → λ (+ b : U8) →
+    match (u8eq b (toU8 13)) motive (λ _ → Ck)
+      | true =>
+          (match (u64nil rem) motive (λ _ → Ck)
+            | true => ck (toU64 2) (toU64 0) rem total (withBit fl (toU64 4)) (addi at (toU64 1))
+            | false => ck (toU64 2) (toU64 0) rem total fl (addi at (toU64 1)))
+      | false =>
+          (match (u8eq b (toU8 10)) motive (λ _ → Ck)
+            | true => ckFail total (addi at (toU64 1))
+            | false => ck (toU64 1) (toU64 0) rem total fl (addi at (toU64 1)))
+
+def ckSizeLf : run Π (+ rem : U64) → Π (+ total : U64) → Π (+ fl : U64) → Π (+ at : U64) → Π (+ b : U8) → Ck :=
+  λ (+ rem : U64) → λ (+ total : U64) → λ (+ fl : U64) → λ (+ at : U64) → λ (+ b : U8) →
+    match (u8eq b (toU8 10)) motive (λ _ → Ck)
+      | true =>
+          (match (has fl (toU64 4)) motive (λ _ → Ck)
+            | true => ck (toU64 6) (toU64 0) rem total fl (addi at (toU64 1))
+            | false => ck (toU64 3) (toU64 0) rem total fl (addi at (toU64 1)))
+      | false => ckFail total (addi at (toU64 1))
+
+def ckData : run Π (+ rem : U64) → Π (+ total : U64) → Π (+ fl : U64) → Π (+ at : U64) → Ck :=
+  λ (+ rem : U64) → λ (+ total : U64) → λ (+ fl : U64) → λ (+ at : U64) →
+    match (u64nil rem) motive (λ _ → Ck)
+      | true => ckFail total at
+      | false =>
+          (match (u64nil (subi rem (toU64 1))) motive (λ _ → Ck)
+            | true => ck (toU64 4) (toU64 0) (toU64 0) (addi total (toU64 1)) fl (addi at (toU64 1))
+            | false => ck (toU64 3) (toU64 0) (subi rem (toU64 1)) (addi total (toU64 1)) fl (addi at (toU64 1)))
+
+def ckDataCr : run Π (+ total : U64) → Π (+ fl : U64) → Π (+ at : U64) → Π (+ b : U8) → Ck :=
+  λ (+ total : U64) → λ (+ fl : U64) → λ (+ at : U64) → λ (+ b : U8) →
+    match (u8eq b (toU8 13)) motive (λ _ → Ck)
+      | true => ck (toU64 5) (toU64 0) (toU64 0) total fl (addi at (toU64 1))
+      | false => ckFail total (addi at (toU64 1))
+
+def ckDataLf : run Π (+ total : U64) → Π (+ fl : U64) → Π (+ at : U64) → Π (+ b : U8) → Ck :=
+  λ (+ total : U64) → λ (+ fl : U64) → λ (+ at : U64) → λ (+ b : U8) →
+    match (u8eq b (toU8 10)) motive (λ _ → Ck)
+      | true => ck (toU64 0) (toU64 0) (toU64 0) total (noBit (noBit fl (toU64 8)) (toU64 4)) (addi at (toU64 1))
+      | false => ckFail total (addi at (toU64 1))
+
+def ckTr : run Π (+ total : U64) → Π (+ fl : U64) → Π (+ at : U64) → Π (+ b : U8) → Ck :=
+  λ (+ total : U64) → λ (+ fl : U64) → λ (+ at : U64) → λ (+ b : U8) →
+    match (u8eq b (toU8 13)) motive (λ _ → Ck)
+      | true =>
+          (match (has fl (toU64 32)) motive (λ _ → Ck)
+            | true =>
+                (match (has fl (toU64 16)) motive (λ _ → Ck)
+                  | true => ck (toU64 7) (toU64 0) (toU64 0) total (noBit fl (toU64 64)) (addi at (toU64 1))
+                  | false => ckFail total (addi at (toU64 1)))
+            | false => ck (toU64 7) (toU64 0) (toU64 0) total (withBit fl (toU64 64)) (addi at (toU64 1)))
+      | false =>
+          (match (u8eq b (toU8 10)) motive (λ _ → Ck)
+            | true => ckFail total (addi at (toU64 1))
+            | false =>
+                (match (u8eq b (toU8 58)) motive (λ _ → Ck)
+                  | true => ck (toU64 6) (toU64 0) (toU64 0) total (withBit (withBit fl (toU64 16)) (toU64 32)) (addi at (toU64 1))
+                  | false => ck (toU64 6) (toU64 0) (toU64 0) total (withBit fl (toU64 32)) (addi at (toU64 1))))
+
+def ckTrLf : run Π (+ total : U64) → Π (+ fl : U64) → Π (+ at : U64) → Π (+ b : U8) → Ck :=
+  λ (+ total : U64) → λ (+ fl : U64) → λ (+ at : U64) → λ (+ b : U8) →
+    match (u8eq b (toU8 10)) motive (λ _ → Ck)
+      | true =>
+          (match (has fl (toU64 64)) motive (λ _ → Ck)
+            | true => ck (toU64 8) (toU64 0) (toU64 0) total fl (addi at (toU64 1))
+            | false => ck (toU64 6) (toU64 0) (toU64 0) total (noBit (noBit (noBit fl (toU64 16)) (toU64 32)) (toU64 64)) (addi at (toU64 1)))
+      | false => ckFail total (addi at (toU64 1))
+
+def ckByte : run Π (+ st : Ck) → Π (+ b : U8) → Ck :=
+  λ (+ st : Ck) → λ (+ b : U8) →
+    match st motive (λ _ → Ck)
+      | ck ph acc rem total fl at =>
+          (match (or (u64eq ph (toU64 8)) (u64eq ph (toU64 9))) motive (λ _ → Ck)
+            | true => st
+            | false =>
+                (match (u64eq ph (toU64 0)) motive (λ _ → Ck)
+                  | true => ckSize acc total fl at b
+                  | false =>
+                      (match (u64eq ph (toU64 1)) motive (λ _ → Ck)
+                        | true => ckExt rem total fl at b
+                        | false =>
+                            (match (u64eq ph (toU64 2)) motive (λ _ → Ck)
+                              | true => ckSizeLf rem total fl at b
+                              | false =>
+                                  (match (u64eq ph (toU64 3)) motive (λ _ → Ck)
+                                    | true => ckData rem total fl at
+                                    | false =>
+                                        (match (u64eq ph (toU64 4)) motive (λ _ → Ck)
+                                          | true => ckDataCr total fl at b
+                                          | false =>
+                                              (match (u64eq ph (toU64 5)) motive (λ _ → Ck)
+                                                | true => ckDataLf total fl at b
+                                                | false =>
+                                                    (match (u64eq ph (toU64 6)) motive (λ _ → Ck)
+                                                      | true => ckTr total fl at b
+                                                      | false => ckTrLf total fl at b))))))))
+
+def ckPh : run Π (+ st : Ck) → U64 :=
+  λ (+ st : Ck) →
+    match st motive (λ _ → U64)
+      | ck ph _acc _rem _total _fl _at => ph
+
+def ckAt : run Π (+ st : Ck) → U64 :=
+  λ (+ st : Ck) →
+    match st motive (λ _ → U64)
+      | ck _ph _acc _rem _total _fl at => at
+
+def ckRem : run Π (+ st : Ck) → U64 :=
+  λ (+ st : Ck) →
+    match st motive (λ _ → U64)
+      | ck _ph _acc rem _total _fl _at => rem
+
+def ckTotal : run Π (+ st : Ck) → U64 :=
+  λ (+ st : Ck) →
+    match st motive (λ _ → U64)
+      | ck _ph _acc _rem total _fl _at => total
+
+def ckDone : run Π (+ st : Ck) → Bool :=
+  λ (+ st : Ck) → u64eq (ckPh st) (toU64 8)
+
+def ckBad : run Π (+ st : Ck) → Bool :=
+  λ (+ st : Ck) → u64eq (ckPh st) (toU64 9)
+
+def bodyTail : run Π (+ s : Slice) → Slice :=
+  λ (+ s : Slice) →
+    match (headersDone s) motive (λ _ → Slice)
+      | true => slice s (headerEnd s) (subi (sliceLen s) (headerEnd s))
+      | false => b""
+
+def tailLen : run Π (+ s : Slice) → U64 :=
+  λ (+ s : Slice) →
+    match (headersDone s) motive (λ _ → U64)
+      | true => subi (sliceLen s) (headerEnd s)
+      | false => toU64 0
+
+def chunkScan : run Π (+ s : Slice) → Ck :=
+  λ (+ s : Slice) →
+    sliceFold Ck ckStart
+      (λ (b : U8) → λ (_r : Slice) → λ (st : Ck) → ckByte st b)
+      (bodyTail s)
+
+-- One scan. Bad framing is malformed. A finished body is ok. A tail
+-- already longer than 16384 is ok so the host can stream it. Anything
+-- shorter, including a header block with no chunk bytes yet, waits.
+def chunkStatus : run Π (+ s : Slice) → Status :=
+  λ (+ s : Slice) →
+    match (chunkScan s) motive (λ _ → Status)
+      | ck ph _acc _rem _total _fl _at =>
+          (match (u64eq ph (toU64 9)) motive (λ _ → Status)
+            | true => status-malformed
+            | false =>
+                (match (u64eq ph (toU64 8)) motive (λ _ → Status)
+                  | true => status-ok
+                  | false =>
+                      (match (u64lt (toU64 16384) (tailLen s)) motive (λ _ → Status)
+                        | true => status-ok
+                        | false => status-need-more)))
+
 def statusOfSt : run Π (+ st : HSt) → Π (+ s : Slice) → Status :=
   λ (+ st : HSt) → λ (+ s : Slice) →
     match (headersDone s) motive (λ _ → Status)
@@ -671,12 +1211,18 @@ def statusOfSt : run Π (+ st : HSt) → Π (+ s : Slice) → Status :=
                   | true =>
                       (match (headersOkSt st) motive (λ _ → Status)
                         | true =>
-                            (match (or (sawTESt st) (or (has (scanFl st) (toU64 32)) (hostBadSt st s))) motive (λ _ → Status)
+                            (match (or (methodBad s) (or (teBadSt st) (hostBadSt st s))) motive (λ _ → Status)
                               | true => status-malformed
                               | false =>
-                                  (match (bodyShortSt st s) motive (λ _ → Status)
-                                    | true => status-need-more
-                                    | false => status-ok))
+                                  (match (teChunkSt st) motive (λ _ → Status)
+                                    | true => chunkStatus s
+                                    | false =>
+                                        (match (streamLenSt st s) motive (λ _ → Status)
+                                          | true => status-ok
+                                          | false =>
+                                              (match (bodyShortSt st s) motive (λ _ → Status)
+                                                | true => status-need-more
+                                                | false => status-ok))))
                         | false => status-malformed)
                   | false => status-malformed))
       | false =>
@@ -693,6 +1239,50 @@ def classifySt : run Π (+ st : HSt) → Π (+ s : Slice) → Classified :=
 
 def classify : run Π (+ s : Slice) → Classified :=
   λ (+ s : Slice) → classifySt (scan s) s
+
+-- First byte after this request. A finished chunked message ends at
+-- the last chunk byte. A body the host will stream ends at the last
+-- byte currently buffered, so that prefix is not parsed again.
+-- Everything else is the old headerEnd + Content-Length.
+def framedEndSt : run Π (+ st : HSt) → Π (+ s : Slice) → U64 :=
+  λ (+ st : HSt) → λ (+ s : Slice) →
+    match (teChunkSt st) motive (λ _ → U64)
+      | true =>
+          (match (chunkScan s) motive (λ _ → U64)
+            | ck ph _acc _rem _total _fl at =>
+                (match (u64eq ph (toU64 8)) motive (λ _ → U64)
+                  | true => addi (headerEnd s) at
+                  | false => sliceLen s))
+      | false =>
+          (match (streamLenSt st s) motive (λ _ → U64)
+            | true => sliceLen s
+            | false => addi (bodyAt s) (bodyLenSt st s))
+
+def framedEnd : run Π (+ s : Slice) → U64 :=
+  λ (+ s : Slice) → framedEndSt (scan s) s
+
+-- 1 when the host must copy the buffered prefix and read the rest
+-- from the socket. 0 when this buffer already holds the message,
+-- or the message is not one the host streams.
+def streamTakeSt : run Π (+ st : HSt) → Π (+ s : Slice) → U64 :=
+  λ (+ st : HSt) → λ (+ s : Slice) →
+    match (streamLenSt st s) motive (λ _ → U64)
+      | true => toU64 1
+      | false =>
+          (match (and (headersDone s) (teChunkSt st)) motive (λ _ → U64)
+            | true =>
+                (match (chunkScan s) motive (λ _ → U64)
+                  | ck ph _acc _rem _total _fl _at =>
+                      (match (or (u64eq ph (toU64 8)) (u64eq ph (toU64 9))) motive (λ _ → U64)
+                        | true => toU64 0
+                        | false =>
+                            (match (u64lt (toU64 16384) (tailLen s)) motive (λ _ → U64)
+                              | true => toU64 1
+                              | false => toU64 0)))
+            | false => toU64 0)
+
+def streamTake : run Π (+ s : Slice) → U64 :=
+  λ (+ s : Slice) → streamTakeSt (scan s) s
 
 -- Header walk. Mode 0 counts. Mode 1 stores the first value whose
 -- name matches, ignoring ASCII case. The name is the raw span, the
@@ -836,7 +1426,41 @@ def keep-10 : evidence {keepOf b"GET /health HTTP/1.0\r\n\r\n" ≡ keep-no : Kee
 
 def keep-close : evidence {keepOf b"GET /health HTTP/1.1\r\nConnection: close\r\n\r\n" ≡ keep-no : Keep} := refl
 
-def te-bad : evidence {statusOf b"GET /health HTTP/1.1\r\nHost: t\r\nTransfer-Encoding: chunked\r\n\r\n" ≡ status-malformed : Status} := refl
+def te-need : evidence {statusOf b"POST /p HTTP/1.1\r\nHost: t\r\nTransfer-Encoding: chunked\r\n\r\n" ≡ status-need-more : Status} := refl
+
+def te-cl-bad : evidence {statusOf b"POST /p HTTP/1.1\r\nHost: t\r\nContent-Length: 1\r\nTransfer-Encoding: chunked\r\n\r\n" ≡ status-malformed : Status} := refl
+
+def te-http10 : evidence {statusOf b"POST /p HTTP/1.0\r\nTransfer-Encoding: chunked\r\n\r\n" ≡ status-malformed : Status} := refl
+
+def meth-head : evidence {methodCode b"HEAD /x HTTP/1.1\r\nHost: t\r\n\r\n" ≡ toU64 0 : U64} := refl
+
+def meth-put : evidence {methodCode b"PUT /x HTTP/1.1\r\nHost: t\r\n\r\n" ≡ toU64 0 : U64} := refl
+
+def meth-trace : evidence {methodCode b"TRACE /x HTTP/1.1\r\nHost: t\r\n\r\n" ≡ toU64 1 : U64} := refl
+
+def meth-bad : evidence {methodCode b"G(ET /x HTTP/1.1\r\nHost: t\r\n\r\n" ≡ toU64 2 : U64} := refl
+
+def meth-star : evidence {methodCode b"OPTIONS * HTTP/1.1\r\nHost: t\r\n\r\n" ≡ toU64 0 : U64} := refl
+
+def meth-get-star : evidence {methodCode b"GET * HTTP/1.1\r\nHost: t\r\n\r\n" ≡ toU64 2 : U64} := refl
+
+def opt-star : evidence {statusOf b"OPTIONS * HTTP/1.1\r\nHost: t\r\n\r\n" ≡ status-ok : Status} := refl
+
+def get-star : evidence {statusOf b"GET * HTTP/1.1\r\nHost: t\r\n\r\n" ≡ status-malformed : Status} := refl
+
+def te-chunk : evidence {teCode b"POST /p HTTP/1.1\r\nHost: t\r\nTransfer-Encoding: chunked\r\n\r\n" ≡ toU64 1 : U64} := refl
+
+def te-gzip : evidence {teCode b"POST /p HTTP/1.1\r\nHost: t\r\nTransfer-Encoding: gzip\r\n\r\n" ≡ toU64 2 : U64} := refl
+
+def exp-100 : evidence {expectCode b"POST /p HTTP/1.1\r\nHost: t\r\nExpect: 100-continue\r\nContent-Length: 1\r\n\r\n" ≡ toU64 1 : U64} := refl
+
+def exp-two : evidence {expectCode b"POST /p HTTP/1.1\r\nHost: t\r\nExpect: 100-continue\r\nExpect: 100-continue\r\n\r\n" ≡ toU64 2 : U64} := refl
+
+def ck-empty : evidence {ckDone (chunkScan b"POST /p HTTP/1.1\r\nHost: t\r\nTransfer-Encoding: chunked\r\n\r\n0\r\n\r\n") ≡ true : Bool} := refl
+
+def ck-hi : evidence {ckTotal (chunkScan b"POST /p HTTP/1.1\r\nHost: t\r\nTransfer-Encoding: chunked\r\n\r\n2\r\nhi\r\n0\r\n\r\n") ≡ toU64 2 : U64} := refl
+
+def te-ok : evidence {statusOf b"POST /p HTTP/1.1\r\nHost: t\r\nTransfer-Encoding: chunked\r\n\r\n0\r\n\r\n" ≡ status-ok : Status} := refl
 
 def glued-bad : evidence {statusOf b"GET/feed HTTP/1.1\r\n\r\n" ≡ status-malformed : Status} := refl
 

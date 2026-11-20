@@ -5,6 +5,7 @@
 #include "shim.h"
 #include "render.h"
 #include "host_render.h"
+#include "host_date.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -85,14 +86,16 @@ static int count_lit(const uint8_t *p, size_t n, const char *lit) {
   return c;
 }
 
+static const char DATE[] = "Sun, 06 Nov 1994 08:49:37 GMT";
+
 static void expect_copy(const char *name, uint64_t status, const char *reason, const char *extra,
                         const char *body, uint64_t keep, int want_ok) {
   uint8_t dst[2048];
   size_t got = 99;
   size_t n = host_copy_response(dst, sizeof dst, status, (const uint8_t *)reason,
-                                reason ? strlen(reason) : 0, (const uint8_t *)extra,
-                                extra ? strlen(extra) : 0, (const uint8_t *)body,
-                                body ? strlen(body) : 0, keep, &got);
+                                reason ? strlen(reason) : 0, (const uint8_t *)DATE, 29,
+                                (const uint8_t *)extra, extra ? strlen(extra) : 0,
+                                (const uint8_t *)body, body ? strlen(body) : 0, keep, 0, &got);
   if (!want_ok) {
     if (n != 0 || got != 0) bad(name);
     return;
@@ -104,6 +107,8 @@ static void expect_copy(const char *name, uint64_t status, const char *reason, c
   if (reason && strstr(reason, "OK") && !has_lit(dst, n, "OK")) bad(name);
   if (extra && strstr(extra, "X-Trace") && !has_lit(dst, n, "X-Trace: 1")) bad(name);
   if (count_lit(dst, n, "Content-Length:") != 1) bad(name);
+  if (count_lit(dst, n, "Date:") != 1) bad(name);
+  if (!has_lit(dst, n, DATE)) bad(name);
   if (has_lit(dst, n, "Content-Length: 0") && body && body[0]) bad(name);
   if (has_lit(dst, n, "Transfer-Encoding")) bad(name);
   if (keep == 0 && has_lit(dst, n, "Connection: close")) bad(name);
@@ -112,7 +117,7 @@ static void expect_copy(const char *name, uint64_t status, const char *reason, c
 
 static void expect_render(const char *name, uint64_t status, const char *reason, const char *extra,
                           const char *body, uint64_t keep, const char *lit) {
-  muro__slice s = httpRender(status, of(reason), of(extra), of(body), keep);
+  muro__slice s = httpRender(status, of(reason), of(DATE), of(extra), of(body), keep, 0);
   expect_eq(name, s, lit);
 }
 
@@ -122,30 +127,60 @@ int main(void) {
   muro__slice row;
   size_t cl = 0;
   size_t body = 0;
-  expect_eq("malformed", httpMalformed(),
-            "HTTP/1.1 400 Bad Request\r\nConnection: close\r\nContent-Length: 9\r\n"
+  char stamped[30];
+  expect_eq("malformed", httpMalformed(of(DATE)),
+            "HTTP/1.1 400 Bad Request\r\nDate: Sun, 06 Nov 1994 08:49:37 GMT\r\n"
+            "Connection: close\r\nContent-Length: 9\r\n"
             "Content-Type: text/plain; charset=utf-8\r\n\r\nmalformed");
-  expect_eq("internal", httpInternal(),
-            "HTTP/1.1 500 Internal Server Error\r\nConnection: close\r\nContent-Length: 8\r\n"
+  expect_eq("internal", httpInternal(of(DATE)),
+            "HTTP/1.1 500 Internal Server Error\r\nDate: Sun, 06 Nov 1994 08:49:37 GMT\r\n"
+            "Connection: close\r\nContent-Length: 8\r\n"
             "Content-Type: text/plain; charset=utf-8\r\n\r\ninternal");
+  expect_eq("unimplemented", httpNotImplemented(of(DATE)),
+            "HTTP/1.1 501 Not Implemented\r\nDate: Sun, 06 Nov 1994 08:49:37 GMT\r\n"
+            "Connection: close\r\nContent-Length: 13\r\n"
+            "Content-Type: text/plain; charset=utf-8\r\n\r\nunimplemented");
+  expect_eq("too-large", httpTooLarge(of(DATE)),
+            "HTTP/1.1 413 Content Too Large\r\nDate: Sun, 06 Nov 1994 08:49:37 GMT\r\n"
+            "Connection: close\r\nContent-Length: 9\r\n"
+            "Content-Type: text/plain; charset=utf-8\r\n\r\ntoo large");
+  expect_eq("expect", httpExpect(of(DATE)),
+            "HTTP/1.1 417 Expectation Failed\r\nDate: Sun, 06 Nov 1994 08:49:37 GMT\r\n"
+            "Connection: close\r\nContent-Length: 11\r\n"
+            "Content-Type: text/plain; charset=utf-8\r\n\r\nexpectation");
+  expect_eq("continue", httpContinue(of(DATE)),
+            "HTTP/1.1 100 Continue\r\nDate: Sun, 06 Nov 1994 08:49:37 GMT\r\n\r\n");
   expect_render("health-keep", 200, "OK", type, "ok", 0,
-                "HTTP/1.1 200 OK\r\nConnection: keep-alive\r\nContent-Length: 2\r\n"
+                "HTTP/1.1 200 OK\r\nDate: Sun, 06 Nov 1994 08:49:37 GMT\r\n"
+                "Connection: keep-alive\r\nContent-Length: 2\r\n"
                 "Content-Type: text/plain; charset=utf-8\r\n\r\nok");
   expect_render("health-close", 200, "OK", type, "ok", 1,
-                "HTTP/1.1 200 OK\r\nConnection: close\r\nContent-Length: 2\r\n"
+                "HTTP/1.1 200 OK\r\nDate: Sun, 06 Nov 1994 08:49:37 GMT\r\n"
+                "Connection: close\r\nContent-Length: 2\r\n"
                 "Content-Type: text/plain; charset=utf-8\r\n\r\nok");
   expect_render("empty-keep", 200, "OK", type, "", 0,
-                "HTTP/1.1 200 OK\r\nConnection: keep-alive\r\nContent-Length: 0\r\n"
+                "HTTP/1.1 200 OK\r\nDate: Sun, 06 Nov 1994 08:49:37 GMT\r\n"
+                "Connection: keep-alive\r\nContent-Length: 0\r\n"
                 "Content-Type: text/plain; charset=utf-8\r\n\r\n");
   expect_render("no-content", 204, "No Content", "", "", 0,
-                "HTTP/1.1 204 No Content\r\nConnection: keep-alive\r\nContent-Length: 0\r\n\r\n");
+                "HTTP/1.1 204 No Content\r\nDate: Sun, 06 Nov 1994 08:49:37 GMT\r\n"
+                "Connection: keep-alive\r\nContent-Length: 0\r\n\r\n");
   expect_render("json", 200, "OK", json, "[]", 0,
-                "HTTP/1.1 200 OK\r\nConnection: keep-alive\r\nContent-Length: 2\r\n"
+                "HTTP/1.1 200 OK\r\nDate: Sun, 06 Nov 1994 08:49:37 GMT\r\n"
+                "Connection: keep-alive\r\nContent-Length: 2\r\n"
                 "Content-Type: application/json; charset=utf-8\r\n\r\n[]");
   expect_render("method", 405, "Method Not Allowed", type, "method\n", 0,
-                "HTTP/1.1 405 Method Not Allowed\r\nConnection: keep-alive\r\nContent-Length: 7\r\n"
+                "HTTP/1.1 405 Method Not Allowed\r\nDate: Sun, 06 Nov 1994 08:49:37 GMT\r\n"
+                "Connection: keep-alive\r\nContent-Length: 7\r\n"
                 "Content-Type: text/plain; charset=utf-8\r\n\r\nmethod\n");
-  row = httpRender(201, of("Created"), of(json), of("1234567890"), 0);
+  row = httpRender(200, of("OK"), of(DATE), of(""), of("ok"), 0, 1);
+  if (!content_length(row, &cl, &body) || cl != 2 || body != 0) bad("head-omit");
+  muro_http_reset();
+  row = httpChunk(of("hi"));
+  expect_eq("chunk-hi", row, "2\r\nhi\r\n");
+  expect_eq("chunk-last", httpLastChunk(), "0\r\n\r\n");
+  if (host_date_format(784111777, stamped) != 0 || strcmp(stamped, DATE) != 0) bad("imf-date");
+  row = httpRender(201, of("Created"), of(DATE), of(json), of("1234567890"), 0, 0);
   if (!content_length(row, &cl, &body) || cl != 10 || body != 10 || !contains(row, "1234567890"))
     bad("row-ten");
   muro_http_reset();
@@ -154,7 +189,8 @@ int main(void) {
   expect_copy("extra-lf", 200, "OK", "X-Trace: 1\n", "ab", 0, 0);
   expect_copy("extra-ws", 200, "OK", "X-Trace : 1\r\n", "ab", 0, 0);
   expect_copy("extra-owned", 200, "OK",
-              "Content-Length: 0\r\nConnection: close\r\nTransfer-Encoding: chunked\r\nX-Trace: 1\r\n",
+              "Content-Length: 0\r\nConnection: close\r\nTransfer-Encoding: chunked\r\n"
+              "Date: Mon, 01 Jan 2000 00:00:00 GMT\r\nX-Trace: 1\r\n",
               "ab", 0, 1);
   expect_copy("extra-good", 200, "OK", "X-Trace: 1\r\n", "ab", 0, 1);
   expect_copy("extra-bare", 200, "OK", "X-Trace: 1", "ab", 0, 1);

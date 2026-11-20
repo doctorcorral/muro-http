@@ -91,7 +91,7 @@ def keepBit : run Π (+ fin : U64) → Π (k : Keep) → U64 :=
       | false => keepTag k
 
 def endAt : run Π (+ buf : Slice) → U64 :=
-  λ (+ buf : Slice) → addi (bodyAt buf) (bodyLen buf)
+  λ (+ buf : Slice) → framedEnd buf
 
 def moreAt : run Π (+ buf : Slice) → U64 :=
   λ (+ buf : Slice) →

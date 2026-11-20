@@ -10,9 +10,20 @@
    them after the return. type is static. The reasons and the fixed
    bodies are string literals. POST echoes the request body, which
    stays live through that copy. A pointer into this stack would dangle. */
+/* A streamed body is not the next request. Drain it so the connection
+   can stay up. The echo still uses the buffered view, which is empty
+   when the body did not fit the window. */
+static void drain_body(const MuroHttpRequest *req) {
+  uint8_t tmp[1024];
+  if (!req->body_in) return;
+  while (muro_http_body_read(req->body_in, tmp, sizeof tmp) > 0) {
+  }
+}
+
 static int on_req(const MuroHttpRequest *req, MuroHttpResponse *resp, void *user) {
   static const char type[] = "Content-Type: text/plain\r\n";
   (void)user;
+  drain_body(req);
   resp->headers = type;
   resp->headers_len = sizeof type - 1;
   if (req->method.n == 3 && memcmp(req->method.p, "GET", 3) == 0) {

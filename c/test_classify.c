@@ -69,6 +69,18 @@ static unsigned long classify_of(const char *name, const char *raw, uint8_t st, 
   return n;
 }
 
+static int is_true(Bool *b) { return b && b->muro__field_tag == 0; }
+
+static void expect_chunk(const char *name, const char *raw, int done, int bad_frame, uint64_t total) {
+  Ck ck;
+  muro_http_reset();
+  ck = chunkScan(of(raw));
+  if (done != is_true(ckDone(ck))) bad(name, "done");
+  if (bad_frame != is_true(ckBad(ck))) bad(name, "bad");
+  if (ckTotal(ck) != total) bad(name, "total");
+  if (muro_http_allocs() != 0) bad(name, "alloc");
+}
+
 static void expect_view(const char *name, const char *raw, const char *method, const char *path,
                         const char *query, const char *version, const char *body, int body_empty) {
   muro__slice s = of(raw);
@@ -137,8 +149,8 @@ int main(void) {
   classify_of("http10-dup", "GET /health HTTP/1.0\r\nHost: a\r\nHost: b\r\n\r\n", ST_BAD, 0, 0);
   classify_of("close", "GET /health HTTP/1.1\r\nHost: t\r\nConnection: close\r\n\r\n", ST_OK, 1,
               K_NO);
-  classify_of("te", "GET /health HTTP/1.1\r\nHost: t\r\nTransfer-Encoding: chunked\r\n\r\n", ST_BAD,
-              0, 0);
+  classify_of("te", "POST /p HTTP/1.1\r\nHost: t\r\nTransfer-Encoding: chunked\r\n\r\n", ST_NEED, 0,
+              0);
   classify_of("glued-line", "GET/feed HTTP/1.1\r\n\r\n", ST_BAD, 0, 0);
   classify_of("partial", "GET /health HTTP/1.1\r\n", ST_NEED, 0, 0);
   classify_of("need-body", "POST /posts HTTP/1.1\r\nHost: t\r\nContent-Length: 2\r\n\r\n", ST_NEED,
@@ -183,6 +195,129 @@ int main(void) {
   if (c->muro__as.classified.muro__f_1->muro__field_tag != K_YES) bad("no-space", "keep");
   muro_http_reset();
   if (!same(methodView(g), "GET/feed\r") || !inside(methodView(g), g)) bad("no-space", "method");
+
+  {
+    const char *hi =
+        "POST /p HTTP/1.1\r\nHost: t\r\nTransfer-Encoding: chunked\r\n\r\n2\r\nhi\r\n0\r\n\r\n";
+    const char *ext =
+        "POST /p HTTP/1.1\r\nHost: t\r\nTransfer-Encoding: chunked\r\n\r\n5;foo=1\r\nhello\r\n0\r\n\r\n";
+    const char *trail =
+        "POST /p HTTP/1.1\r\nHost: t\r\nTransfer-Encoding: chunked\r\n\r\n2\r\nhi\r\n0\r\nX-A: b\r\n\r\n";
+    const char *pipe =
+        "POST /p HTTP/1.1\r\nHost: t\r\nTransfer-Encoding: chunked\r\n\r\n0\r\n\r\nGET /x HTTP/1.1\r\n";
+    char big[160];
+    char cap[160];
+    muro_http_reset();
+    if (methodCode(of("HEAD /x HTTP/1.1\r\nHost: t\r\n\r\n")) != 0) bad("meth", "head");
+    muro_http_reset();
+    if (methodCode(of("PUT /x HTTP/1.1\r\nHost: t\r\n\r\n")) != 0) bad("meth", "put");
+    muro_http_reset();
+    if (methodCode(of("DELETE /x HTTP/1.1\r\nHost: t\r\n\r\n")) != 0) bad("meth", "delete");
+    muro_http_reset();
+    if (methodCode(of("OPTIONS /x HTTP/1.1\r\nHost: t\r\n\r\n")) != 0) bad("meth", "options");
+    muro_http_reset();
+    if (methodCode(of("PATCH /x HTTP/1.1\r\nHost: t\r\n\r\n")) != 0) bad("meth", "patch");
+    muro_http_reset();
+    if (methodCode(of("TRACE /x HTTP/1.1\r\nHost: t\r\n\r\n")) != 1) bad("meth", "trace");
+    muro_http_reset();
+    if (methodCode(of("CONNECT x HTTP/1.1\r\nHost: t\r\n\r\n")) != 1) bad("meth", "connect");
+    muro_http_reset();
+    if (methodCode(of("get /x HTTP/1.1\r\nHost: t\r\n\r\n")) != 1) bad("meth", "lower");
+    muro_http_reset();
+    if (methodCode(of("G(ET /x HTTP/1.1\r\nHost: t\r\n\r\n")) != 2) bad("meth", "bad");
+    muro_http_reset();
+    if (methodCode(of("OPTIONS * HTTP/1.1\r\nHost: t\r\n\r\n")) != 0) bad("meth", "star");
+    muro_http_reset();
+    if (methodCode(of("GET * HTTP/1.1\r\nHost: t\r\n\r\n")) != 2) bad("meth", "get-star");
+    classify_of("opt-star", "OPTIONS * HTTP/1.1\r\nHost: t\r\n\r\n", ST_OK, 1, K_YES);
+    classify_of("get-star", "GET * HTTP/1.1\r\nHost: t\r\n\r\n", ST_BAD, 0, 0);
+    classify_of("meth-bad", "G(ET /x HTTP/1.1\r\nHost: t\r\n\r\n", ST_BAD, 0, 0);
+    classify_of("trace-ok", "TRACE /x HTTP/1.1\r\nHost: t\r\n\r\n", ST_OK, 1, K_YES);
+    classify_of("put-ok", "PUT /x HTTP/1.1\r\nHost: t\r\n\r\n", ST_OK, 1, K_YES);
+    muro_http_reset();
+    if (teCode(of("POST /p HTTP/1.1\r\nHost: t\r\nTransfer-Encoding: chunked\r\n\r\n")) != 1)
+      bad("te", "chunked");
+    muro_http_reset();
+    if (teCode(of("POST /p HTTP/1.1\r\nHost: t\r\nTransfer-Encoding: Chunked\r\n\r\n")) != 1)
+      bad("te", "case");
+    muro_http_reset();
+    if (teCode(of("POST /p HTTP/1.1\r\nHost: t\r\nTransfer-Encoding: gzip\r\n\r\n")) != 2)
+      bad("te", "gzip");
+    muro_http_reset();
+    if (teCode(of("POST /p HTTP/1.1\r\nHost: t\r\nTransfer-Encoding: chunked, gzip\r\n\r\n")) != 2)
+      bad("te", "list");
+    muro_http_reset();
+    if (teCode(of("POST /p HTTP/1.1\r\nHost: t\r\nTransfer-Encoding: chunked, chunked\r\n\r\n")) != 3)
+      bad("te", "twice");
+    muro_http_reset();
+    if (teCode(of("POST /p HTTP/1.1\r\nHost: t\r\nTransfer-Encoding: chunked;q=1\r\n\r\n")) != 3)
+      bad("te", "param");
+    classify_of("te-cl",
+                "POST /p HTTP/1.1\r\nHost: t\r\nTransfer-Encoding: chunked\r\nContent-Length: 1\r\n\r\n",
+                ST_BAD, 0, 0);
+    classify_of("cl-te",
+                "POST /p HTTP/1.1\r\nHost: t\r\nContent-Length: 1\r\nTransfer-Encoding: chunked\r\n\r\n",
+                ST_BAD, 0, 0);
+    classify_of("te-10", "POST /p HTTP/1.0\r\nTransfer-Encoding: chunked\r\n\r\n", ST_BAD, 0, 0);
+    classify_of("te-two",
+                "POST /p HTTP/1.1\r\nHost: t\r\nTransfer-Encoding: chunked\r\nTransfer-Encoding: "
+                "chunked\r\n\r\n",
+                ST_BAD, 0, 0);
+    classify_of("te-gzip", "POST /p HTTP/1.1\r\nHost: t\r\nTransfer-Encoding: gzip\r\n\r\n", ST_OK, 1,
+                K_YES);
+    classify_of("te-hi", hi, ST_OK, 1, K_YES);
+    muro_http_reset();
+    if (bodyView(of(hi)).n != 0) bad("te-hi", "body view");
+    muro_http_reset();
+    if (expectCode(of("POST /p HTTP/1.1\r\nHost: t\r\nExpect: 100-continue\r\nContent-Length: "
+                      "1\r\n\r\n")) != 1)
+      bad("exp", "100");
+    muro_http_reset();
+    if (expectCode(of("POST /p HTTP/1.1\r\nHost: t\r\nExpect: 100-Continue\r\nContent-Length: "
+                      "1\r\n\r\n")) != 1)
+      bad("exp", "case");
+    muro_http_reset();
+    if (expectCode(of(
+            "POST /p HTTP/1.1\r\nHost: t\r\nExpect: 100-continue\r\nExpect: 100-continue\r\n\r\n")) !=
+        2)
+      bad("exp", "two");
+    muro_http_reset();
+    if (expectCode(of("POST /p HTTP/1.1\r\nHost: t\r\nExpect:\r\n\r\n")) != 2) bad("exp", "empty");
+    expect_chunk("ck-hi", hi, 1, 0, 2);
+    expect_chunk("ck-ext", ext, 1, 0, 5);
+    expect_chunk("ck-trail", trail, 1, 0, 2);
+    expect_chunk("ck-bad-size",
+                 "POST /p HTTP/1.1\r\nHost: t\r\nTransfer-Encoding: chunked\r\n\r\nz\r\n", 0, 1, 0);
+    expect_chunk("ck-overflow",
+                 "POST /p HTTP/1.1\r\nHost: t\r\nTransfer-Encoding: chunked\r\n\r\n"
+                 "fffffffffffffffff\r\n",
+                 0, 1, 0);
+    expect_chunk("ck-nocolon",
+                 "POST /p HTTP/1.1\r\nHost: t\r\nTransfer-Encoding: chunked\r\n\r\n0\r\nFoo\r\n\r\n",
+                 0, 1, 0);
+    classify_of("ck-bad-status",
+                "POST /p HTTP/1.1\r\nHost: t\r\nTransfer-Encoding: chunked\r\n\r\nz\r\n", ST_BAD, 0,
+                0);
+    muro_http_reset();
+    if (framedEnd(of(hi)) != strlen(hi)) bad("frame", "chunk");
+    muro_http_reset();
+    if (framedEnd(of(pipe)) >= strlen(pipe)) bad("frame", "pipe");
+    muro_http_reset();
+    if (framedEnd(of(post)) != strlen(post)) bad("frame", "post");
+    snprintf(big, sizeof big, "POST /p HTTP/1.1\r\nHost: t\r\nContent-Length: 16385\r\n\r\n");
+    classify_of("stream-cl", big, ST_OK, 1, K_YES);
+    muro_http_reset();
+    if (contentLength(of(big)) != 16385) bad("stream-cl", "length");
+    muro_http_reset();
+    if (streamTake(of(big)) != 1) bad("stream-cl", "take");
+    snprintf(cap, sizeof cap, "POST /p HTTP/1.1\r\nHost: t\r\nContent-Length: 16384\r\n\r\n");
+    classify_of("cap-cl", cap, ST_NEED, 0, 0);
+    muro_http_reset();
+    if (streamTake(of(cap)) != 0) bad("cap-cl", "take");
+    classify_of("cl-overflow",
+                "POST /p HTTP/1.1\r\nHost: t\r\nContent-Length: 99999999999999999999\r\n\r\n",
+                ST_BAD, 0, 0);
+  }
 
   if (failures != 0) {
     fprintf(stderr, "FAIL %d\n", failures);
