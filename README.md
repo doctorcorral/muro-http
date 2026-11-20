@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="assets/muro-http-logo.jpg" alt="muro-http" width="280">
+</p>
+
 # muro-http
 
 `muro-http` is a separate library. It is not part of muro's standard
