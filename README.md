@@ -132,8 +132,8 @@ It does not choose talk versus timeout, open versus FIN, the piece
 constructor, an immediate reply, the handler reply, or the
 keep-or-close bit. `c/admit_glue.c` unpacks the unboxed offer and
 turns the book's constructor tag into the name string the stepper
-compares. Those two generated headers both define `struct muro__nat`,
-so they cannot be included from one translation unit.
+compares. The prelude is under `MURO__PRELUDE`, so that file includes
+`session.h` and `admit.h` in one translation unit.
 `c/test_conn` calls `proto_admit` before the HTTP image. A refused
 move does not run the image.
 
@@ -226,15 +226,16 @@ where the next request starts. The host does not read the socket
 while a response is in progress. The arena resets after that copy.
 Header walks do not reset it, so a handler may still hold slices.
 
-### Across connections
+### Reply order per key
 
-`priv/muro/http/family.muro` states what spans connections. One key
-is one connection. `accept` opens on arrival and is never held.
-`reply` stays held while any earlier instance of that same connection
-is unresolved. An earlier accept counts, and so does an earlier
-reply. Another connection does not. `--backend fsm` emits the
-dispatcher as `MuroHttp.FamilyFsm.Conns`. `--backend c` omits a
-family, so `c/host.c` does not call it. The poll loop still admits
+`priv/muro/http/family.muro` is a hold rule over a fixed script. It
+is not the poll loop. One key is one connection. `accept` opens on
+arrival and is never held. `reply` stays held while any earlier
+instance of that same key is unresolved. An earlier accept counts,
+and so does an earlier reply. Another key does not. The rule does
+not order replies across different connections. `--backend fsm` emits
+the dispatcher as `MuroHttp.FamilyFsm.Conns`. `--backend c` omits a
+family, so `c/host.c` never calls it. The poll loop still admits
 one socket through `admitChoice` and `muro__sess_conn_step`.
 
 `mix muro.check` walks one fixed script: key `a` is accept, then
@@ -243,23 +244,30 @@ reply, then reply, and key `b` is accept. These lines hold:
 - `drained`, on the one-reply meeting: 3 reachable states, 3
   transitions. When the host has taken the reply, its inbox is empty.
 - `reply-order`: 3721 reachable states, 10521 transitions. An opened
-  reply has every earlier reply of that connection, known when it
-  opened, resolved.
-- `accept-free`: the same 3721 states. An accept is not held.
-- `reply-opens`: the same 3721 states. A held reply is later opened.
+  reply has every earlier reply of that key, known when it opened,
+  resolved.
+- `accept-free`: the same 3721 states and 10521 transitions. An
+  accept is not held.
+- `reply-opens`: the same 3721 states and 10521 transitions. A held
+  reply is later opened. This is the script. It has no fairness
+  filter.
 
-That walk is a check of the generated dispatcher on the script. It
-is not a proof for every connection count. The pin proves the hold
-rule for any number of keys and any number of instances
+`reply-order`, `accept-free`, and `reply-opens` share one graph.
+3721 and 10521 are a regression pin of that script. 10521 is the
+successor table, not a breadth-first parent map. A different count
+means the script, the meeting, the hold rule, or the checker
+explored a different graph. The walk is not a proof for every key
+count, and it is not a bound on live sockets. The pin proves the
+hold rule for any number of keys and any number of instances
 (`agda/Muro/Family.agda` in muro 0.22.14). This repository does not
 contain that proof. The program that writes the dispatcher is not
-proved. `test/family_test.exs` replays two connections on the
-emitted dispatcher: an accept and a reply on one connection open
-while the other connection is held, a later reply stays held until
-the earlier reply resolves, a session step on a held reply is
-refused, withdrawing the held reply does not open it, and a reply
-whose turn has finished is reported until `resolved`. A second send
-on `reply-out` is refused. That is the emitted machine.
+proved. `test/family_test.exs` replays two keys on the emitted
+dispatcher, in host order: accept, then reply. An accept on one key
+opens while the other key has a live reply. A later reply stays held
+until the earlier reply of that key resolves. A session step on a
+held reply is refused. Withdrawing the held reply does not open it.
+A reply whose turn has finished is reported until `resolved`. A
+second send on `reply-out` is refused. That is the emitted machine.
 
 The same pin does not prove three properties of the poll loop.
 
@@ -433,7 +441,8 @@ in the emitted C, plus the challenge health bytes, a JSON array, a
 
 muro 0.21.15 and 0.21.16 add a temporal check and a synthesis cover.
 They do not change response bytes or this loop. The pin is 0.22.14.
-The cross-connection check is `priv/muro/http/family.muro`.
+The per-key reply-order check is `priv/muro/http/family.muro`. It is
+a hold rule over a fixed script, not this loop.
 
 The server end is `conn`. The client end `peer` is `dual conn`.
 
@@ -472,7 +481,8 @@ views, `findHeader`), `conn.muro`, `session.muro`, `admit.muro`, and
 emits the challenge books `decide.muro`, `route.muro`, and
 `body.muro` (`bodyClass`, `textOff`, `textLen`). `--backend fsm`
 emits `family.muro` as `MuroHttp.FamilyFsm`. That backend is the one
-that emits a keyed family. The C backend omits it.
+that emits a keyed family. The C backend omits it, and `c/host.c`
+does not call the dispatcher.
 
 Hand-written core: `c/muro_http.h`, `c/host.c`, `c/host_poll.c`,
 `c/host_render.c`, `c/proto.c`, `c/admit_glue.c`, `c/shim.c`.

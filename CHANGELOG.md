@@ -7,21 +7,24 @@
   is under `MURO__PRELUDE`. `c/admit_glue.c` includes `session.h` and
   `admit.h` together and asserts the flat constructor words
   (`piece-chunk` through `reply-bad` are 0 through 4).
-- `priv/muro/http/family.muro` is one key per connection in the poll
-  loop. `accept` is never held. `reply` is held while an earlier
-  instance of that connection is unresolved. `--backend fsm` emits
+- `priv/muro/http/family.muro` is a hold rule over a fixed script,
+  not the poll loop. One key is one connection. `accept` is never
+  held. `reply` is held while an earlier instance of that key is
+  unresolved. Another key does not wait. The rule does not order
+  replies across different connections. `--backend fsm` emits
   `MuroHttp.FamilyFsm`. `--backend c` omits the family, so `c/host.c`
-  is not the dispatcher. `mix muro.check` reports `drained` in 3
+  never calls the dispatcher. `mix muro.check` reports `drained` in 3
   states and 3 transitions, and `reply-order`, `accept-free`, and
-  `reply-opens` each in 3721 states and 10521 transitions. That walk
-  is the fixed script. The pin proves the hold rule for any number of
-  keys and instances. This repository does not contain that proof.
-  `test/family_test.exs` checks the emitted dispatcher on two
-  connections. Not proved: `nconn` at most `max_conn`, an accepted
-  connection eventually closing, and a closed connection never
-  arriving another reply. An older reply that arrives late can run
-  beside a newer one. The host does not read the next request while
-  a response is in progress.
+  `reply-opens` each in 3721 states and 10521 transitions. Those
+  three share one graph. The counts are a regression pin of the
+  script. The pin proves the hold rule for any number of keys and
+  instances. This repository does not contain that proof.
+  `test/family_test.exs` checks the emitted dispatcher on two keys,
+  accepting before it replies. Not proved: `nconn` at most
+  `max_conn`, an accepted connection eventually closing, and a closed
+  connection never arriving another reply. An older reply that
+  arrives late can run beside a newer one. The host does not read
+  the next request while a response is in progress.
 - HTTP/1.1 with the headers finished and not exactly one `Host` is
   400. The previous challenge server accepted a request that omitted
   `Host`. HTTP/1.0 may still omit it. A second `Host` is malformed

@@ -254,24 +254,27 @@ positive length does not finish, so a ten-byte body is not an
 equation. `c/test_render` checks the five strings and that longer
 body in the emitted C.
 
-`render.h` defines the same prelude as `conn.h`. `c/host.c` does not
-include it. `c/host_render.c` includes the emitted header and copies
-the slice into the host buffer, so the `httpRender` signature cannot
-drift. The host then calls `muro_http_reset`.
+`c/host_render.c` includes `render.h` and copies the slice into the
+host buffer, so the `httpRender` signature cannot drift. `conn.h` and
+`render.h` both put the prelude under `MURO__PRELUDE`, so one
+translation unit can include both. `c/host.c` calls
+`host_copy_response` and does not include `render.h`. The host then
+calls `muro_http_reset`.
 
 muro 0.21.15 and muro 0.21.16 do not change the response bytes.
 0.21.15 is a temporal check over a keyed family. 0.21.16 ranks a
 recursive `State` that does not declare `all-states`. Neither emits
-a socket loop. The pin is 0.22.14. The cross-connection family is
-below.
+a socket loop. The pin is 0.22.14. The per-key family is below.
 
-## Across connections
+## Reply order per key
 
-`priv/muro/http/family.muro` is one key per connection. `accept` is
-never held. `reply` is held while an earlier instance of that
-connection is unresolved. `--backend fsm` emits
-`MuroHttp.FamilyFsm.Conns`. `--backend c` omits the family. The poll
-loop in `c/host.c` is not that dispatcher.
+`priv/muro/http/family.muro` is a hold rule over a fixed script. It
+is not `host_poll`. One key is one connection. `accept` is never
+held. `reply` is held while an earlier instance of that key is
+unresolved. Another key does not wait. The rule does not order
+replies across different connections. `--backend fsm` emits
+`MuroHttp.FamilyFsm.Conns`. `--backend c` omits the family.
+`c/host.c` never calls that dispatcher.
 
 The pin's `agda/Muro/Family.agda` proves the hold rule for any number
 of keys and any number of instances. An opened `reply` has every
@@ -290,11 +293,15 @@ writes the dispatcher is not proved.
 - `temporal accept-free: holds in 3721 reachable states, 10521 transitions`
 - `temporal reply-opens: holds in 3721 reachable states, 10521 transitions`
 
-That is a check of the generated dispatcher on the script. It is not
-the proof above. `test/family_test.exs` is a second check: two
-connections on the emitted dispatcher, a refused step on a held
-reply, a withdraw that does not open the reply, a finished reply
-reported until `resolved`, and one send on the reply turn.
+The three family lines share one graph. 3721 states and 10521
+successor-table entries are a regression pin of the script (key `a`
+is accept, then reply, then reply; key `b` is accept). A different
+count means that graph changed. It is not the proof above, and it
+is not a bound on live sockets. `test/family_test.exs` is a second
+check: two keys on the emitted dispatcher, in host order (accept
+before reply), a refused step on a held reply, a withdraw that does
+not open the reply, a finished reply reported until `resolved`, and
+one send on the reply turn.
 
 Not proved, and not stated as a formula, because this pin cannot
 discharge them for the poll loop:
