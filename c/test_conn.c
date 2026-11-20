@@ -119,10 +119,12 @@ static unsigned long take(const char *name, Conn *st, Proto *proto, Ev ev) {
     Classified *c = classify(buf);
     status = c->muro__as.classified.muro__f_0->muro__field_tag;
   }
-  /* Tag 6 is the handler reply. It is reply-ok. The HTTP status is
-     not a protocol refusal. reply -1 would offer no reply at all. */
+  /* Tag 6 is the handler reply. n1 is 1 for HTTP 400..599, admitted
+     as reply-bad. Any other status is reply-ok. reply -1 would offer
+     no reply at all. */
   if (proto_live(proto) && !proto_done(proto) && phase == PH_DECIDE && tag == 6) {
-    reply = 0;
+    uint64_t bad_reply = ev.muro__as.ev.muro__f_3;
+    reply = bad_reply == 0 ? 0 : 1;
     observe = 0;
   }
   if (proto_admit(proto, phase, tag, buf.n, status, reply, observe, close_after) != 1) {
@@ -479,6 +481,53 @@ static void check_fin(void) {
   proto_free(proto);
 }
 
+static int last_ctor(Proto *proto, const char *want) {
+  ProtoMove mv;
+  int n = proto_move_count(proto);
+  if (n < 1 || !proto_move_at(proto, n - 1, &mv) || !mv.ctor) return 0;
+  return strcmp(mv.ctor, want) == 0;
+}
+
+/* reply-bad is the Reply word. The session then chooses keep or
+   close, so it is not done until the write ends with keep set. */
+static void check_reply_bad(void) {
+  Conn st;
+  Proto *proto;
+  unsigned long n;
+  muro_http_reset();
+  st = begin();
+  proto = open_proto("reply-bad");
+  if (!proto) return;
+  n = take("reply-bad-req", &st, proto, evBytes(of(health)));
+  if (n != 1) bad("reply-bad", "classify allocs");
+  if (proto_done(proto)) bad("reply-bad", "done before reply");
+  n = take("reply-bad-reply", &st, proto, evReplyOf(1, 1));
+  if (n != 0) bad("reply-bad", "reply allocs");
+  want("reply-bad", st, 0, PH_WRITE);
+  want("reply-bad", st, 2, 1);
+  if (!last_ctor(proto, "reply-bad")) bad("reply-bad", "reply-ok");
+  if (proto_done(proto)) bad("reply-bad", "done before the close choice");
+  n = take("reply-bad-done", &st, proto, evDone());
+  if (n != 0) bad("reply-bad", "done allocs");
+  want("reply-bad-done", st, 0, PH_CLOSED);
+  if (!proto_done(proto)) bad("reply-bad", "session open after close");
+  proto_free(proto);
+
+  muro_http_reset();
+  st = begin();
+  proto = open_proto("reply-n1");
+  if (!proto) return;
+  take("reply-n1-req", &st, proto, evBytes(of(health)));
+  take("reply-n1", &st, proto, evReplyOf(0, 1));
+  want("reply-n1", st, 0, PH_WRITE);
+  want("reply-n1", st, 2, 1);
+  if (!last_ctor(proto, "reply-bad")) bad("reply-n1", "reply-ok");
+  take("reply-n1-done", &st, proto, evDone());
+  want("reply-n1-done", st, 0, PH_CLOSED);
+  if (!proto_done(proto)) bad("reply-n1", "session open after close");
+  proto_free(proto);
+}
+
 int main(void) {
   check_begin();
   check_need();
@@ -493,6 +542,7 @@ int main(void) {
   check_ignore_tick_while_writing();
   check_gate();
   check_fin();
+  check_reply_bad();
   if (failures != 0) {
     fprintf(stderr, "%d failures\n", failures);
     return 1;

@@ -370,7 +370,7 @@ int main(int argc, char **argv) {
              0);
   expect_one(host, port, "echo", "POST /echo HTTP/1.1\r\nHost: t\r\nContent-Length: 4\r\n\r\nping", 200,
              "ping", 0);
-  expect_one(host, port, "method", "PUT / HTTP/1.1\r\nHost: t\r\n\r\n", 405, "method\n", 0);
+  expect_one(host, port, "method", "PUT / HTTP/1.1\r\nHost: t\r\n\r\n", 405, "method\n", 1);
   expect_one(host, port, "no-host", "GET / HTTP/1.1\r\n\r\n", 400, "malformed", 1);
   fd = dial(host, port);
   if (fd < 0) {

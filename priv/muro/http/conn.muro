@@ -14,7 +14,9 @@
 -- timer: 0 disarmed, 1 armed
 -- Ev tag: 0 bytes, 1 eof, 2 progress, 3 done, 4 error, 5 tick, 6 reply
 -- A reply event is the handler's answer. n0 is 1 when that answer
--- forces Connection: close. progress stores the delta in n0.
+-- forces Connection: close. n1 is 1 when the HTTP status is 4xx or
+-- 5xx: that also forces close, and the host admits reply-bad.
+-- progress stores the delta in n0.
 -- writeLen is 16 for every response. The shim owns the bytes; the
 -- range is writeOff and writeLen. Field 6 is the origin: 0 handler,
 -- 1 protocol malformed. The book chooses the 400. The shim does not.
@@ -144,6 +146,14 @@ def forceKeep : run Π (+ half : U64) → Π (+ keep : U64) → Π (+ bit : U64)
       | true => toU64 1
       | false => keep
 
+-- A 4xx or 5xx reply (n1 not zero) closes, the same as a half-close
+-- or an explicit close-after bit.
+def replyKeep : run Π (+ half : U64) → Π (+ keep : U64) → Π (+ bit : U64) → Π (+ bad : U64) → U64 :=
+  λ (+ half : U64) → λ (+ keep : U64) → λ (+ bit : U64) → λ (+ bad : U64) →
+    match (u64nil bad) motive (λ _ → U64)
+      | true => forceKeep half keep bit
+      | false => toU64 1
+
 def onRead : run Π (+ phase : U64) → Π (+ half : U64) → Π (+ keep : U64) → Π (+ idc : U64) → Π (+ action : U64) → Π (+ timer : U64) → Π (+ code : U64) → Π (+ err : U64) → Π (+ act : U64) → Π (+ off : U64) → Π (+ len : U64) → Π (+ endOff : U64) → Π (+ more : U64) → Π (+ tag : U64) → Π (+ buf : Slice) → Conn :=
   λ (+ phase : U64) → λ (+ half : U64) → λ (+ keep : U64) → λ (+ idc : U64) → λ (+ action : U64) → λ (+ timer : U64) → λ (+ code : U64) → λ (+ err : U64) → λ (+ act : U64) → λ (+ off : U64) → λ (+ len : U64) → λ (+ endOff : U64) → λ (+ more : U64) → λ (+ tag : U64) → λ (+ buf : Slice) →
     match (u64eq tag (toU64 0)) motive (λ _ → Conn)
@@ -157,13 +167,13 @@ def onRead : run Π (+ phase : U64) → Π (+ half : U64) → Π (+ keep : U64) 
                   | false => hold phase half keep idc action timer code err act off len endOff more))
 
 -- A reply leaves handle for write. Origin stays 0: the handler chose
--- the bytes. n0 1, or a half-close, forces keep. EOF stays in handle
--- so the handler still runs, and the response closes.
-def onHandle : run Π (+ phase : U64) → Π (+ half : U64) → Π (+ keep : U64) → Π (+ idc : U64) → Π (+ action : U64) → Π (+ timer : U64) → Π (+ code : U64) → Π (+ err : U64) → Π (+ act : U64) → Π (+ off : U64) → Π (+ len : U64) → Π (+ endOff : U64) → Π (+ more : U64) → Π (+ tag : U64) → Π (+ n0 : U64) → Conn :=
-  λ (+ phase : U64) → λ (+ half : U64) → λ (+ keep : U64) → λ (+ idc : U64) → λ (+ action : U64) → λ (+ timer : U64) → λ (+ code : U64) → λ (+ err : U64) → λ (+ act : U64) → λ (+ off : U64) → λ (+ len : U64) → λ (+ endOff : U64) → λ (+ more : U64) → λ (+ tag : U64) → λ (+ n0 : U64) →
+-- the bytes. n0 1, n1 1, or a half-close, forces keep. EOF stays in
+-- handle so the handler still runs, and the response closes.
+def onHandle : run Π (+ phase : U64) → Π (+ half : U64) → Π (+ keep : U64) → Π (+ idc : U64) → Π (+ action : U64) → Π (+ timer : U64) → Π (+ code : U64) → Π (+ err : U64) → Π (+ act : U64) → Π (+ off : U64) → Π (+ len : U64) → Π (+ endOff : U64) → Π (+ more : U64) → Π (+ tag : U64) → Π (+ n0 : U64) → Π (+ n1 : U64) → Conn :=
+  λ (+ phase : U64) → λ (+ half : U64) → λ (+ keep : U64) → λ (+ idc : U64) → λ (+ action : U64) → λ (+ timer : U64) → λ (+ code : U64) → λ (+ err : U64) → λ (+ act : U64) → λ (+ off : U64) → λ (+ len : U64) → λ (+ endOff : U64) → λ (+ more : U64) → λ (+ tag : U64) → λ (+ n0 : U64) → λ (+ n1 : U64) →
     match (u64eq tag (toU64 6)) motive (λ _ → Conn)
       | true =>
-          conn (toU64 2) half (forceKeep half keep n0) (toU64 0) (toU64 2) (toU64 0) (toU64 0) (toU64 0) (toU64 0) (toU64 0) respLen endOff more
+          conn (toU64 2) half (replyKeep half keep n0 n1) (toU64 0) (toU64 2) (toU64 0) (toU64 0) (toU64 0) (toU64 0) (toU64 0) respLen endOff more
       | false =>
           (match (u64eq tag (toU64 1)) motive (λ _ → Conn)
             | true => conn phase (toU64 1) (toU64 1) idc (toU64 4) (toU64 0) code err act off len endOff more
@@ -205,7 +215,7 @@ def stepAt : run Π (+ phase : U64) → Π (+ half : U64) → Π (+ keep : U64) 
             | true => onRead phase half keep idc action timer code err act off len endOff more tag buf
             | false =>
                 (match (u64eq phase (toU64 1)) motive (λ _ → Conn)
-                  | true => onHandle phase half keep idc action timer code err act off len endOff more tag n0
+                  | true => onHandle phase half keep idc action timer code err act off len endOff more tag n0 n1
                   | false =>
                       (match (u64eq phase (toU64 2)) motive (λ _ → Conn)
                         | true => onWrite phase half keep idc action timer code err act off len endOff more tag n0
@@ -303,8 +313,12 @@ def evError : run Ev :=
 def evTick : run Ev :=
   ev (toU64 5) b"" (toU64 0) (toU64 0) (toU64 0) (toU64 0) (toU64 0)
 
+def evReplyOf : run Π (+ closeAfter : U64) → Π (+ bad : U64) → Ev :=
+  λ (+ closeAfter : U64) → λ (+ bad : U64) →
+    ev (toU64 6) b"" closeAfter bad (toU64 0) (toU64 0) (toU64 0)
+
 def evReply : run Π (+ closeAfter : U64) → Ev :=
-  λ (+ closeAfter : U64) → ev (toU64 6) b"" closeAfter (toU64 0) (toU64 0) (toU64 0) (toU64 0)
+  λ (+ closeAfter : U64) → evReplyOf closeAfter (toU64 0)
 
 def evReplyOk : run Ev :=
   evReply (toU64 0)
@@ -500,3 +514,18 @@ def after-close-do : evidence {sawAfterDo ≡ do-close : Do} := refl
 def after-close-tick-do : evidence {sawAfterTick ≡ do-close : Do} := refl
 
 def after-close-mode : evidence {sawAfterMode ≡ mode-closed : Mode} := refl
+
+def sawBadReply : run Mode :=
+  mode (step (step begin (evBytes healthReq)) (evReplyOf (toU64 1) (toU64 1)))
+
+def sawBadReplyDone : run Mode :=
+  mode (step (step (step begin (evBytes healthReq)) (evReplyOf (toU64 1) (toU64 1))) evDone)
+
+def sawBadN1 : run Mode :=
+  mode (step (step (step begin (evBytes healthReq)) (evReplyOf (toU64 0) (toU64 1))) evDone)
+
+def reply-bad-write : evidence {sawBadReply ≡ mode-write : Mode} := refl
+
+def reply-bad-done : evidence {sawBadReplyDone ≡ mode-closed : Mode} := refl
+
+def reply-bad-n1 : evidence {sawBadN1 ≡ mode-closed : Mode} := refl

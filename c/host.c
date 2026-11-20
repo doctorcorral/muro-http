@@ -301,10 +301,11 @@ static int step_ev(Server *sv, Slot *s, Ev ev) {
     Classified *c = classify(buf);
     status = c->muro__as.classified.muro__f_0->muro__field_tag;
   }
-  /* A finished handler is a successful protocol reply. The HTTP
-     status, including 4xx and 5xx, stays in the bytes. */
+  /* n1 is 1 for an HTTP status 400..599. That is reply-bad and
+     closes the connection. Any other handler status is reply-ok. */
   if (proto_live(s->proto) && !proto_done(s->proto) && phase == PH_DECIDE && tag == EV_REPLY) {
-    reply = 0;
+    uint64_t bad_reply = ev.muro__as.ev.muro__f_3;
+    reply = bad_reply == 0 ? 0 : 1;
     observe = 0;
   }
   admitted = proto_admit(s->proto, phase, tag, buf.n, status, reply, observe, half || keep);
@@ -377,7 +378,8 @@ static int fill_request(Slot *s, MuroHttpRequest *req) {
 static int begin_reply(Server *sv, Slot *s, const MuroHttpResponse *resp) {
   int half = (int)field(s->st, 1);
   int keep = (int)field(s->st, 2);
-  int bit = resp->close_after ? 1 : 0;
+  int bad = (resp->status >= 400 && resp->status <= 599) ? 1 : 0;
+  int bit = (resp->close_after || bad) ? 1 : 0;
   uint64_t eff = (half || keep || bit) ? 1u : 0u;
   size_t got = 0;
   size_t n;
@@ -392,6 +394,7 @@ static int begin_reply(Server *sv, Slot *s, const MuroHttpResponse *resp) {
   if (n == 0 && resp->owe_status) {
     n = host_copy_internal(s->out, s->out_cap, NULL);
     bit = 1;
+    bad = 1;
     if (n > 0) fprintf(stderr, "%s: response is %zu bytes after commit; sending 500\n", sv->name, got);
   }
   if (n == 0) {
@@ -402,7 +405,7 @@ static int begin_reply(Server *sv, Slot *s, const MuroHttpResponse *resp) {
   s->out_off = 0;
   s->rendered = 1;
   s->owe = resp->owe_status ? 1 : 0;
-  if (!step_ev(sv, s, evReply((uint64_t)bit))) return -1;
+  if (!step_ev(sv, s, evReplyOf((uint64_t)bit, (uint64_t)bad))) return -1;
   return 0;
 }
 

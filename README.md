@@ -68,9 +68,10 @@ same state. Its action is close, which asks for no read and no write.
 
 Events from the shim are bytes, peer eof, write progress, write done,
 write error, an idle tick, and a handler reply. The reply event is
-tag 6. Its `n0` is the handler's close-after bit. The core host
-always reports that reply as `reply-ok` with the observe bit clear:
-an HTTP 4xx or 5xx is still a completed handler response. Actions
+tag 6. Its `n0` is the handler's close-after bit. `n1` is 1 when the
+HTTP status is 4xx or 5xx. That forces close, and the host admits
+`reply-bad`. Any other status is `reply-ok` with the observe bit
+clear. Actions
 back are hold, want read, write, close, and call the handler. The
 call-handler action is still named `do-decide` and the phase is
 still `mode-decide`, so the admission map and the session traces

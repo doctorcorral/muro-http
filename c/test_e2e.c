@@ -378,14 +378,14 @@ static void check_keepalive(int port) {
     return;
   }
   if (status != 200 || strcmp(body, "ok") != 0 || conn_close) fail("keep-alive", "first response");
-  if (send_all(fd, "GET /missing HTTP/1.1\r\nHost: t\r\n\r\n") < 0 ||
+  if (send_all(fd, "GET /health HTTP/1.1\r\nHost: t\r\n\r\n") < 0 ||
       read_response(fd, buf, sizeof buf, used, &used, &status, &conn_close, body, sizeof body - 1,
                     &body_n) < 0) {
     fail("keep-alive", "second");
     close(fd);
     return;
   }
-  if (status != 404 || strcmp(body, "not-found") != 0 || conn_close) fail("keep-alive", "second response");
+  if (status != 200 || strcmp(body, "ok") != 0 || conn_close) fail("keep-alive", "second response");
   if (!still_open(fd)) fail("keep-alive", "closed after two requests");
   close(fd);
 }
@@ -414,14 +414,14 @@ static void check_pipeline(int port) {
     close(fd);
     return;
   }
-  if (status != 200 || strcmp(body, "ok") != 0) fail("pipeline", "first response");
+  if (status != 200 || strcmp(body, "ok") != 0 || conn_close) fail("pipeline", "first response");
   if (read_response(fd, buf, sizeof buf, used, &used, &status, &conn_close, body, sizeof body - 1,
                     &body_n) < 0) {
     fail("pipeline", "second");
     close(fd);
     return;
   }
-  if (status != 404 || strcmp(body, "not-found") != 0) fail("pipeline", "second response");
+  if (status != 404 || strcmp(body, "not-found") != 0 || !conn_close) fail("pipeline", "second response");
   close(fd);
 }
 
@@ -869,97 +869,97 @@ static void check_routes(int port) {
   if (sign_hs(tok, sizeof tok, NULL, payload) < 0) fail("exp-eq", "sign");
   else {
     post_json(req, sizeof req, tok, "{\"text\":\"nope\"}");
-    check_one(port, "exp-eq", req, 401, "bad-payload", 0, 0);
+    check_one(port, "exp-eq", req, 401, "bad-payload", 1, 1);
   }
   snprintf(payload, sizeof payload, "{\"sub\":\"ada\",\"nbf\":%lld}", (long long)edge_now);
   if (sign_hs(tok, sizeof tok, NULL, payload) < 0) fail("nbf-eq", "sign");
   else {
     post_json(req, sizeof req, tok, "{}");
-    check_one(port, "nbf-eq", req, 400, "body-required", 0, 0);
+    check_one(port, "nbf-eq", req, 400, "body-required", 1, 1);
   }
   if (sign_hs(tok, sizeof tok, NULL, "{\"sub\":\"ada\",\"iat\":1.5}") < 0) fail("float-iat", "sign");
   else {
     post_json(req, sizeof req, tok, "{}");
-    check_one(port, "float-iat", req, 400, "body-required", 0, 0);
+    check_one(port, "float-iat", req, 400, "body-required", 1, 1);
   }
   if (sign_hs(tok, sizeof tok, NULL, "{\"sub\":\"ada\",\"exp\":1.5}") < 0) fail("float-exp", "sign");
   else {
     post_json(req, sizeof req, tok, "{\"text\":\"nope\"}");
-    check_one(port, "float-exp", req, 401, "bad-payload", 0, 0);
+    check_one(port, "float-exp", req, 401, "bad-payload", 1, 1);
   }
   if (sign_hs(tok, sizeof tok, "{\"alg\":\"HS256\",\"typ\":\"jwt\"}", "{\"sub\":\"ada\"}") < 0)
     fail("typ-lower", "sign");
   else {
     post_json(req, sizeof req, tok, "{}");
-    check_one(port, "typ-lower", req, 400, "body-required", 0, 0);
+    check_one(port, "typ-lower", req, 400, "body-required", 1, 1);
   }
   if (sign_hs(tok, sizeof tok, "{\"alg\":\"HS256\"}", "{\"sub\":\"ada\"}") < 0) fail("typ-absent", "sign");
   else {
     post_json(req, sizeof req, tok, "{}");
-    check_one(port, "typ-absent", req, 400, "body-required", 0, 0);
+    check_one(port, "typ-absent", req, 400, "body-required", 1, 1);
   }
   if (sign_hs(tok, sizeof tok, "{\"alg\":\"HS256\",\"typ\":\"JWS\"}", "{\"sub\":\"ada\"}") < 0)
     fail("typ-jws", "sign");
   else {
     post_json(req, sizeof req, tok, "{\"text\":\"nope\"}");
-    check_one(port, "typ-jws", req, 401, "bad-token", 0, 0);
+    check_one(port, "typ-jws", req, 401, "bad-token", 1, 1);
   }
   post_json(req, sizeof req, NULL, "{}");
-  check_one(port, "post-no-auth", req, 401, "missing-bearer", 0, 0);
+  check_one(port, "post-no-auth", req, 401, "missing-bearer", 1, 1);
   post_json(req, sizeof req, tok_bad, "{\"text\":\"hi\"}");
-  check_one(port, "post-bad-token", req, 401, "bad-token", 0, 0);
+  check_one(port, "post-bad-token", req, 401, "bad-token", 1, 1);
   post_json(req, sizeof req, tok_none, "{\"text\":\"hi\"}");
-  check_one(port, "post-alg-none", req, 401, "bad-token", 0, 0);
+  check_one(port, "post-alg-none", req, 401, "bad-token", 1, 1);
   snprintf(req, sizeof req,
            "POST /posts HTTP/1.1\r\nAuthorization: bearer %s\r\nContent-Length: 13\r\nHost: t\r\n\r\n"
            "{\"text\":\"hi\"}",
            tok_ada);
-  check_one(port, "post-lower-bearer", req, 401, "bad-token", 0, 0);
+  check_one(port, "post-lower-bearer", req, 401, "bad-token", 1, 1);
   check_one(port, "post-empty-bearer",
             "POST /posts HTTP/1.1\r\nAuthorization: Bearer \r\nContent-Length: 13\r\nHost: t\r\n\r\n"
             "{\"text\":\"hi\"}",
-            401, "bad-token", 0, 0);
+            401, "bad-token", 1, 1);
   post_json(req, sizeof req, tok_empty_sub, "{\"text\":\"hi\"}");
-  check_one(port, "post-empty-sub", req, 401, "bad-payload", 0, 0);
+  check_one(port, "post-empty-sub", req, 401, "bad-payload", 1, 1);
   post_json(req, sizeof req, tok_sub_num, "{\"text\":\"hi\"}");
-  check_one(port, "post-sub-num", req, 401, "bad-payload", 0, 0);
+  check_one(port, "post-sub-num", req, 401, "bad-payload", 1, 1);
   post_json(req, sizeof req, tok_expired, "{\"text\":\"hi\"}");
-  check_one(port, "post-expired", req, 401, "bad-payload", 0, 0);
+  check_one(port, "post-expired", req, 401, "bad-payload", 1, 1);
   post_json(req, sizeof req, tok_nbf_far, "{\"text\":\"hi\"}");
-  check_one(port, "post-nbf", req, 401, "bad-payload", 0, 0);
+  check_one(port, "post-nbf", req, 401, "bad-payload", 1, 1);
   post_json(req, sizeof req, tok_exp_only, "{\"text\":\"hi\"}");
-  check_one(port, "post-no-sub", req, 401, "bad-payload", 0, 0);
+  check_one(port, "post-no-sub", req, 401, "bad-payload", 1, 1);
   post_json(req, sizeof req, tok_ada, "{}");
-  check_one(port, "post-empty-obj", req, 400, "body-required", 0, 0);
+  check_one(port, "post-empty-obj", req, 400, "body-required", 1, 1);
   post_json(req, sizeof req, tok_ada, "{");
-  check_one(port, "post-trunc", req, 400, "malformed", 0, 0);
+  check_one(port, "post-trunc", req, 400, "malformed", 1, 1);
   post_json(req, sizeof req, tok_ada, "{\"text\":\"\"}");
-  check_one(port, "post-empty-text", req, 400, "body-required", 0, 0);
+  check_one(port, "post-empty-text", req, 400, "body-required", 1, 1);
   post_json(req, sizeof req, tok_ada, "{\"text\":1}");
-  check_one(port, "post-num", req, 400, "body-required", 0, 0);
+  check_one(port, "post-num", req, 400, "body-required", 1, 1);
   post_json(req, sizeof req, tok_ada, "{\"a\":{\"text\":\"hi\"}}");
-  check_one(port, "post-nested", req, 400, "body-required", 0, 0);
+  check_one(port, "post-nested", req, 400, "body-required", 1, 1);
   post_json(req, sizeof req, tok_ada, "{\"\\u0074ext\":\"hi\"}");
-  check_one(port, "post-key-esc", req, 400, "body-required", 0, 0);
+  check_one(port, "post-key-esc", req, 400, "body-required", 1, 1);
   post_json(req, sizeof req, tok_ada, "{\"text\":\"a\",\"text\":\"b\"}");
-  check_one(port, "post-dup", req, 400, "malformed", 0, 0);
+  check_one(port, "post-dup", req, 400, "malformed", 1, 1);
   post_json(req, sizeof req, tok_ada, "{\"text\":\"\\uD800\"}");
-  check_one(port, "post-surrogate", req, 400, "malformed", 0, 0);
+  check_one(port, "post-surrogate", req, 400, "malformed", 1, 1);
   post_json(req, sizeof req, tok_ada, "{\"text\":\"hi\"}x");
-  check_one(port, "post-trail", req, 400, "malformed", 0, 0);
+  check_one(port, "post-trail", req, 400, "malformed", 1, 1);
   post_json(req, sizeof req, tok_ada, "{\"text\":\"hi\",}");
-  check_one(port, "post-comma", req, 400, "malformed", 0, 0);
+  check_one(port, "post-comma", req, 400, "malformed", 1, 1);
   post_json(req, sizeof req, tok_ada, "{\"text\":\"\xff\"}");
-  check_one(port, "post-utf8", req, 400, "malformed", 0, 0);
+  check_one(port, "post-utf8", req, 400, "malformed", 1, 1);
   post_json(req, sizeof req, tok_ada, "{\"text\":\"\n\"}");
-  check_one(port, "post-control", req, 400, "malformed", 0, 0);
+  check_one(port, "post-control", req, 400, "malformed", 1, 1);
   memset(longbody, 'x', sizeof longbody);
   memcpy(longbody, "{\"text\":\"", 9);
   memcpy(longbody + 9 + 1100, "\"}", 2);
   longbody[9 + 1100 + 2] = 0;
   post_json(req, sizeof req, tok_ada, longbody);
   if (strlen(longbody) <= 1024) fail("post-long", "fixture");
-  check_one(port, "post-long", req, 400, "body-long", 0, 0);
+  check_one(port, "post-long", req, 400, "body-long", 1, 1);
   post_json(req, sizeof req, tok_ada, "{\"text\":\"hi\"}");
   check_one(port, "create", req, 201, "{\"id\":1,\"text\":\"hi\"}", 0, 0);
   post_json(req, sizeof req, tok_exp, "{\"text\":\"\\u0041\"}");
@@ -968,34 +968,34 @@ static void check_routes(int port) {
   check_one(port, "create-nbf", req, 201, "{\"id\":3,\"text\":\"a\\\"b\"}", 0, 0);
   check_one(port, "read-1", "GET /posts/1 HTTP/1.1\r\nHost: t\r\n\r\n", 200, "{\"id\":1,\"text\":\"hi\"}", 0, 0);
   check_one(port, "read-2", "GET /posts/2 HTTP/1.1\r\nHost: t\r\n\r\n", 200, "{\"id\":2,\"text\":\"A\"}", 0, 0);
-  check_one(port, "read-missing", "GET /posts/9 HTTP/1.1\r\nHost: t\r\n\r\n", 404, "post-missing", 0, 0);
-  check_one(port, "read-zero", "GET /posts/0 HTTP/1.1\r\nHost: t\r\n\r\n", 400, "invalid-id", 0, 0);
-  check_one(port, "read-pad", "GET /posts/01 HTTP/1.1\r\nHost: t\r\n\r\n", 400, "invalid-id", 0, 0);
-  check_one(port, "get-posts", "GET /posts HTTP/1.1\r\nHost: t\r\n\r\n", 404, "not-found", 0, 0);
+  check_one(port, "read-missing", "GET /posts/9 HTTP/1.1\r\nHost: t\r\n\r\n", 404, "post-missing", 1, 1);
+  check_one(port, "read-zero", "GET /posts/0 HTTP/1.1\r\nHost: t\r\n\r\n", 400, "invalid-id", 1, 1);
+  check_one(port, "read-pad", "GET /posts/01 HTTP/1.1\r\nHost: t\r\n\r\n", 400, "invalid-id", 1, 1);
+  check_one(port, "get-posts", "GET /posts HTTP/1.1\r\nHost: t\r\n\r\n", 404, "not-found", 1, 1);
   snprintf(req, sizeof req,
            "POST /posts HTTP/1.1\r\nAuthorization: Bearer %s\r\nContent-Length: 0\r\nHost: t\r\n\r\n", tok_ada);
-  check_one(port, "post-empty-body", req, 400, "malformed", 0, 0);
-  check_one(port, "post-on-id", "POST /posts/1 HTTP/1.1\r\nHost: t\r\n\r\n", 404, "not-found", 0, 0);
+  check_one(port, "post-empty-body", req, 400, "malformed", 1, 1);
+  check_one(port, "post-on-id", "POST /posts/1 HTTP/1.1\r\nHost: t\r\n\r\n", 404, "not-found", 1, 1);
   post_like(req, sizeof req, "1", NULL);
-  check_one(port, "like-no-auth", req, 401, "missing-bearer", 0, 0);
+  check_one(port, "like-no-auth", req, 401, "missing-bearer", 1, 1);
   post_like(req, sizeof req, "1", tok_expired);
-  check_one(port, "like-bad-payload", req, 401, "bad-payload", 0, 0);
+  check_one(port, "like-bad-payload", req, 401, "bad-payload", 1, 1);
   post_like(req, sizeof req, "1", tok_bad);
-  check_one(port, "like-bad-token", req, 401, "bad-token", 0, 0);
+  check_one(port, "like-bad-token", req, 401, "bad-token", 1, 1);
   post_like(req, sizeof req, "0", tok_ada);
-  check_one(port, "like-bad-id", req, 400, "invalid-id", 0, 0);
+  check_one(port, "like-bad-id", req, 400, "invalid-id", 1, 1);
   post_like(req, sizeof req, "1", tok_ada);
   check_one(port, "like-new", req, 201, "{\"id\":1,\"likes\":1}", 0, 0);
   post_like(req, sizeof req, "1", tok_ada);
   check_one(port, "like-again", req, 200, "{\"id\":1,\"likes\":1}", 0, 0);
   post_like(req, sizeof req, "9", tok_ada);
-  check_one(port, "like-missing", req, 404, "post-missing", 0, 0);
+  check_one(port, "like-missing", req, 404, "post-missing", 1, 1);
   check_one(port, "feed-rows", "GET /feed HTTP/1.1\r\nHost: t\r\n\r\n", 200,
             "[{\"id\":1,\"text\":\"hi\"},{\"id\":2,\"text\":\"A\"},{\"id\":3,\"text\":\"a\\\"b\"}]", 0, 0);
-  check_one(port, "post-health", "POST /health HTTP/1.1\r\nHost: t\r\n\r\n", 404, "not-found", 0, 0);
-  check_one(port, "post-feed", "POST /feed HTTP/1.1\r\nHost: t\r\n\r\n", 404, "not-found", 0, 0);
-  check_one(port, "get-like", "GET /posts/1/like HTTP/1.1\r\nHost: t\r\n\r\n", 404, "not-found", 0, 0);
-  check_one(port, "put-health", "PUT /health HTTP/1.1\r\nHost: t\r\n\r\n", 404, "not-found", 0, 0);
+  check_one(port, "post-health", "POST /health HTTP/1.1\r\nHost: t\r\n\r\n", 404, "not-found", 1, 1);
+  check_one(port, "post-feed", "POST /feed HTTP/1.1\r\nHost: t\r\n\r\n", 404, "not-found", 1, 1);
+  check_one(port, "get-like", "GET /posts/1/like HTTP/1.1\r\nHost: t\r\n\r\n", 404, "not-found", 1, 1);
+  check_one(port, "put-health", "PUT /health HTTP/1.1\r\nHost: t\r\n\r\n", 404, "not-found", 1, 1);
   snprintf(req, sizeof req, "GET /health HTTP/1.1\r\nAuthorization: Bearer %s\r\nHost: t\r\n\r\n", tok_bad);
   check_one(port, "health-bad-auth", req, 200, "ok", 0, 0);
 }
@@ -1009,13 +1009,13 @@ static void check_db_down(void) {
   pid = start_server(10000, 4, &port, NULL, NULL, NULL);
   srv_db = saved;
   if (pid < 0) return;
-  check_one(port, "down-health", "GET /health HTTP/1.1\r\nHost: t\r\n\r\n", 503, "db", 0, 0);
-  check_one(port, "down-feed", "GET /feed HTTP/1.1\r\nHost: t\r\n\r\n", 500, "internal", 0, 0);
+  check_one(port, "down-health", "GET /health HTTP/1.1\r\nHost: t\r\n\r\n", 503, "db", 1, 1);
+  check_one(port, "down-feed", "GET /feed HTTP/1.1\r\nHost: t\r\n\r\n", 500, "internal", 1, 1);
   post_json(req, sizeof req, tok_ada, "{\"text\":\"hi\"}");
-  check_one(port, "down-create", req, 500, "internal", 0, 0);
-  check_one(port, "down-read", "GET /posts/1 HTTP/1.1\r\nHost: t\r\n\r\n", 500, "internal", 0, 0);
+  check_one(port, "down-create", req, 500, "internal", 1, 1);
+  check_one(port, "down-read", "GET /posts/1 HTTP/1.1\r\nHost: t\r\n\r\n", 500, "internal", 1, 1);
   post_like(req, sizeof req, "1", tok_ada);
-  check_one(port, "down-like", req, 500, "internal", 0, 0);
+  check_one(port, "down-like", req, 500, "internal", 1, 1);
   if (stop_server(pid) < 0) return;
 }
 
@@ -1118,7 +1118,7 @@ static void check_precedence(void) {
   env_sqlite = file_a;
   pid = start_server(10000, 4, &port, NULL, NULL, NULL);
   if (pid >= 0) {
-    check_one(port, "prec-flag", "GET /posts/1 HTTP/1.1\r\nHost: t\r\n\r\n", 404, "post-missing", 0, 0);
+    check_one(port, "prec-flag", "GET /posts/1 HTTP/1.1\r\nHost: t\r\n\r\n", 404, "post-missing", 1, 1);
     stop_server(pid);
   }
   pass_db = 0;
@@ -1126,7 +1126,7 @@ static void check_precedence(void) {
   env_muro_db = file_b;
   pid = start_server(10000, 4, &port, NULL, NULL, NULL);
   if (pid >= 0) {
-    check_one(port, "prec-muro-db", "GET /posts/1 HTTP/1.1\r\nHost: t\r\n\r\n", 404, "post-missing", 0, 0);
+    check_one(port, "prec-muro-db", "GET /posts/1 HTTP/1.1\r\nHost: t\r\n\r\n", 404, "post-missing", 1, 1);
     stop_server(pid);
   }
   pass_db = 0;
@@ -1297,9 +1297,9 @@ static void check_no_key(void) {
   if (pid < 0) return;
   check_one(port, "nokey-health", "GET /health HTTP/1.1\r\nHost: t\r\n\r\n", 200, "ok", 0, 0);
   post_json(req, sizeof req, tok_ada, "{\"text\":\"hi\"}");
-  check_one(port, "nokey-token", req, 401, "bad-token", 0, 0);
+  check_one(port, "nokey-token", req, 401, "bad-token", 1, 1);
   check_one(port, "nokey-absent", "POST /posts HTTP/1.1\r\nContent-Length: 2\r\nHost: t\r\n\r\n{}", 401,
-            "missing-bearer", 0, 0);
+            "missing-bearer", 1, 1);
   if (stop_server(pid) < 0) return;
 }
 
@@ -1495,7 +1495,7 @@ static void check_interleaved(void) {
     fail("interleave", "finish body");
     goto done;
   }
-  if (take_resp(body, "interleave-body-finish", 401, "missing-bearer", 0, 0) < 0)
+  if (take_resp(body, "interleave-body-finish", 401, "missing-bearer", 1, 1) < 0)
     goto done;
 
 done:
@@ -1621,9 +1621,9 @@ int main(int argc, char **argv) {
   check_one(port, "malformed", "GET/feed HTTP/1.1\r\n\r\n", 400, "malformed", 1, 1);
   check_fin(port);
   check_one(port, "feed", "GET /feed HTTP/1.1\r\nHost: t\r\n\r\n", 200, "[]", 0, 0);
-  check_one(port, "missing", "GET /missing HTTP/1.1\r\nHost: t\r\n\r\n", 404, "not-found", 0, 0);
+  check_one(port, "missing", "GET /missing HTTP/1.1\r\nHost: t\r\n\r\n", 404, "not-found", 1, 1);
   check_one(port, "post", "POST /posts HTTP/1.1\r\nContent-Length: 2\r\nHost: t\r\n\r\n{}", 401, "missing-bearer",
-            0, 0);
+            1, 1);
   check_split_body(port);
   check_routes(port);
   check_full_buffer();
