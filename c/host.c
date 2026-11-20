@@ -2,29 +2,24 @@
    The image is conn.step. The moves are proto_admit, which applies
    the emitted admitChoice. This file does not choose a move, a
    status, or a response. It feeds bytes, peer eof, write progress,
-   write done, write error, an idle tick, and db events whose facts
-   come from the request, the JWT check, and SQLite.
-   It performs the action the image returns. decide chooses every
-   status except one: a create or a like that has already committed.
-   If the rendered response does not fit, or the socket closes before
-   any status byte is written, the host sends 500 and the body
-   internal.
+   write done, write error, an idle tick, and the handler's reply.
+   When the image asks for the handler, this file builds a request
+   view, calls that callback, and copies the book's framing of the
+   handler's status, headers, and body.
+
+   A malformed request is origin 1. The bytes are httpMalformed.
+   A committed handler that fails before a status byte leaves is
+   httpInternal. This file does not invent those words.
 
    c/generated/render.h cannot sit in this file. It and conn.h both
-   define the muro prelude. c/host_render.c includes render.h and
-   copies the slice. This file does not declare httpRender. */
+   define the muro prelude. c/host_render.c includes render.h. */
 
 #include "shim.h"
 #include "conn.h"
 #include "proto.h"
-#include "decision_tags.h"
-#include "host.h"
+#include "muro_http.h"
 #include "host_poll.h"
 #include "host_render.h"
-#include "host_body.h"
-#include "jwt.h"
-#include "json_text.h"
-#include "store.h"
 
 #include <arpa/inet.h>
 #include <errno.h>
@@ -36,7 +31,6 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
-#include <time.h>
 #include <unistd.h>
 
 enum {
@@ -45,28 +39,29 @@ enum {
   PH_WRITE = 2,
   PH_IDLE = 3,
   PH_CLOSED = 4,
-  /* Connection actions from conn.step. Not the decide act tags. */
   HOST_ACT_NONE = 0,
   HOST_ACT_READ = 1,
   HOST_ACT_WRITE = 2,
   HOST_ACT_CLOSE = 3,
-  HOST_ACT_DECIDE = 4,
+  HOST_ACT_HANDLER = 4,
   EV_BYTES = 0,
   EV_EOF = 1,
-  EV_DB = 6,
+  EV_REPLY = 6,
   IN_CAP = 65536,
   OUT_CAP = 69632,
-  ROW_CAP = 65536,
   PUMP_FUSE = 100000
 };
 
 static volatile sig_atomic_t stop_flag;
-/* Remaining forced evDb refusals. See MURO_TEST_FAIL_DB_ADMIT. */
-static int fail_db_admit;
 
 static void on_signal(int sig) {
   (void)sig;
   stop_flag = 1;
+}
+
+static const char *cfg_name(const MuroHttpConfig *cfg) {
+  if (cfg && cfg->name && cfg->name[0]) return cfg->name;
+  return "muro-http";
 }
 
 static uint64_t field(Conn st, int i) {
@@ -96,8 +91,7 @@ typedef struct Slot {
   int want_read;
   int want_write;
   int rendered;
-  int fact_live;
-  int fact_queried;
+  int owe;
   Proto *proto;
   Conn st;
   uint8_t *in;
@@ -106,22 +100,6 @@ typedef struct Slot {
   size_t out_cap;
   size_t out_len;
   size_t out_off;
-  uint8_t *row;
-  size_t row_cap;
-  size_t row_len;
-  int row_ok;
-  int wrote;
-  uint64_t f_auth;
-  uint64_t f_body;
-  uint64_t f_like;
-  uint64_t f_db;
-  uint64_t f_idc;
-  int64_t f_idn;
-  uint8_t f_sub[128];
-  size_t f_sub_n;
-  uint8_t f_text[1024];
-  size_t f_text_n;
-  int f_text_ok;
   uint64_t deadline;
 } Slot;
 
@@ -137,10 +115,71 @@ typedef struct Server {
   const char *write_log;
   size_t in_cap;
   uint64_t armed_deadline;
-  Store *store;
-  uint8_t jwt_key[256];
-  size_t jwt_key_len;
+  char name[32];
+  char bind_host[16];
+  MuroHttpHandler handler;
+  void *user;
 } Server;
+
+static int slice_in(const MuroHttpRequest *req, const uint8_t *p) {
+  size_t i;
+  if (!req || !req->buf || !p) return 0;
+  for (i = 0; i <= req->buf_n; i++) {
+    if (p == req->buf + i) return 1;
+  }
+  return 0;
+}
+
+/* A miss is the out-of-range empty. The C emitter turns that into the
+   static empty, which does not point at this buffer. An empty value
+   is a zero-length slice inside the buffer. */
+static int header_present(const MuroHttpRequest *req, muro__slice v) {
+  if (v.n == 0 && !slice_in(req, v.p)) return 0;
+  return 1;
+}
+
+static MuroHttpSlice to_pub(muro__slice s) {
+  MuroHttpSlice v;
+  v.p = s.p;
+  v.n = s.n;
+  return v;
+}
+
+size_t muro_http_header_count(const MuroHttpRequest *req) {
+  muro__slice buf;
+  if (!req || !req->buf) return 0;
+  buf.p = req->buf;
+  buf.n = req->buf_n;
+  return (size_t)headerCount(buf);
+}
+
+int muro_http_header_at(const MuroHttpRequest *req, size_t index, MuroHttpSlice *name,
+                        MuroHttpSlice *value) {
+  muro__slice buf;
+  muro__slice n;
+  muro__slice v;
+  if (!req || !req->buf) return 0;
+  buf.p = req->buf;
+  buf.n = req->buf_n;
+  n = headerName(buf, (uint64_t)index);
+  if (!header_present(req, n)) return 0;
+  v = headerValue(buf, (uint64_t)index);
+  if (name) *name = to_pub(n);
+  if (value) *value = to_pub(v);
+  return 1;
+}
+
+int muro_http_header_find(const MuroHttpRequest *req, const char *name, MuroHttpSlice *value) {
+  muro__slice buf;
+  muro__slice v;
+  if (!req || !req->buf || !name) return 0;
+  buf.p = req->buf;
+  buf.n = req->buf_n;
+  v = findHeader(buf, muro__slice_of((const uint8_t *)name, strlen(name)));
+  if (!header_present(req, v)) return 0;
+  if (value) *value = to_pub(v);
+  return 1;
+}
 
 static int set_nb_cloexec(int fd) {
   int fl = fcntl(fd, F_GETFL, 0);
@@ -183,9 +222,7 @@ static void note_write(const Server *sv, size_t n) {
 
 /* MURO_TEST_IN_CAP lowers the receive buffer under the image's
    16384-byte malformed scan. Absent, the cap is IN_CAP. A full
-   buffer the image did not consume still closes with no status.
-   MURO_TEST_FAIL_DB_ADMIT=N makes the next N evDb admits fail after
-   a committed create or like. The close still sends 500. */
+   buffer the image did not consume still closes with no status. */
 static size_t env_in_cap(void) {
   const char *e = getenv("MURO_TEST_IN_CAP");
   char *end = NULL;
@@ -195,17 +232,6 @@ static size_t env_in_cap(void) {
   cap = strtoul(e, &end, 10);
   if (errno || end == e || *end || cap < 128ul || cap > (unsigned long)IN_CAP) return (size_t)IN_CAP;
   return (size_t)cap;
-}
-
-static int env_fail_db_admit(void) {
-  const char *e = getenv("MURO_TEST_FAIL_DB_ADMIT");
-  char *end = NULL;
-  unsigned long n;
-  if (!e || !*e) return 0;
-  errno = 0;
-  n = strtoul(e, &end, 10);
-  if (errno || end == e || *end || n > 1000ul) return 0;
-  return (int)n;
 }
 
 static size_t env_write_limit(void) {
@@ -226,7 +252,7 @@ static int sync_listen(Server *sv) {
   on = sv->nconn < sv->max_conn;
   if (host_poll_watch(sv->pq, sv->listen_fd, on, 0) < 0) {
     err = errno;
-    fprintf(stderr, "muro-httpd: listen watch failed: %s\n", strerror(err));
+    fprintf(stderr, "%s: listen watch failed: %s\n", sv->name, strerror(err));
     sv->fatal = 1;
     return -1;
   }
@@ -241,7 +267,7 @@ static void sync_watch(Server *sv, Slot *s) {
   if (!s->used) return;
   if (host_poll_watch(sv->pq, s->fd, s->want_read, s->want_write) < 0) {
     err = errno;
-    fprintf(stderr, "muro-httpd: watch %d failed: %s\n", s->fd, strerror(err));
+    fprintf(stderr, "%s: watch %d failed: %s\n", sv->name, s->fd, strerror(err));
     close_slot(sv, s);
   }
 }
@@ -254,178 +280,13 @@ static void close_slot(Server *sv, Slot *s) {
   proto_free(s->proto);
   free(s->in);
   free(s->out);
-  free(s->row);
   memset(s, 0, sizeof *s);
   s->fd = -1;
   if (sv->nconn > 0) sv->nconn -= 1;
   (void)sync_listen(sv);
 }
 
-/* First facts, before any query. db and like stay unknown so decide
-   can ask for the query. A post body that classifies as body-ok is
-   unescaped here. A bad escape or bad UTF-8 is body-malformed, which
-   is a fact, not a status. Returns 0 when the request span is not in
-   the buffer. */
-static int take_facts(Server *sv, Slot *s) {
-  uint64_t end = field(s->st, 13);
-  uint64_t verb = field(s->st, 3);
-  uint64_t path = field(s->st, 4);
-  uint64_t idc = field(s->st, 5);
-  muro__slice req;
-  muro__slice av;
-  AuthMark *mark;
-  uint8_t authbuf[16384];
-  size_t authn = 0;
-  if (end == 0 || end > (uint64_t)s->in_len) return 0;
-  req = muro__slice_of(s->in, (size_t)end);
-  mark = authMark(req);
-  av = authValue(req);
-  if (av.n > sizeof authbuf) {
-    s->f_auth = AUTH_BAD_TOKEN;
-    s->f_sub_n = 0;
-  } else if (!mark || mark->muro__field_tag == 0) {
-    s->f_auth = AUTH_ABSENT;
-    s->f_sub_n = 0;
-  } else {
-    JwtResult jr;
-    if (av.n && av.p) memcpy(authbuf, av.p, av.n);
-    authn = av.n;
-    jwt_classify(authbuf, authn, sv->jwt_key, sv->jwt_key_len, (int64_t)time(NULL), &jr);
-    s->f_auth = (uint64_t)jr.auth;
-    s->f_sub_n = jr.sub_n;
-    if (jr.sub_n) memcpy(s->f_sub, jr.sub, jr.sub_n);
-  }
-  s->f_body = BODY_NONE;
-  s->f_text_ok = 0;
-  s->f_text_n = 0;
-  if (verb == VERB_POST && path == PATH_POSTS) {
-    muro__slice body = bodyView(req);
-    uint64_t cls = host_body_class(body.p, body.n);
-    if (cls == BODY_OK) {
-      uint64_t off = host_text_off(body.p, body.n);
-      uint64_t len = host_text_len(body.p, body.n);
-      size_t tn = 0;
-      if (off > (uint64_t)body.n || len > (uint64_t)body.n - off ||
-          json_unescape(body.p + (size_t)off, (size_t)len, s->f_text, sizeof s->f_text, &tn) != 0 ||
-          !json_utf8(s->f_text, tn)) {
-        cls = BODY_MALFORMED;
-      } else {
-        s->f_text_n = tn;
-        s->f_text_ok = 1;
-      }
-    }
-    s->f_body = cls;
-  }
-  s->f_like = LIKE_UNKNOWN;
-  s->f_db = DB_UNKNOWN;
-  s->f_idc = idc;
-  s->f_idn = 0;
-  if (idc == ID_UNKNOWN) s->f_idn = idNumber(req);
-  s->row_ok = 0;
-  s->row_len = 0;
-  s->fact_live = 1;
-  s->fact_queried = 0;
-  muro_http_reset();
-  return 1;
-}
-
-/* One query after decide returns act-observe. The lookup and the like
-   write are one step, so id-present is not paired with db-down.
-   Create and like render the row inside the store transaction and
-   commit only when that row fits. A fit failure rolls back and this
-   function reports db-down, so decide answers 500.
-   Returns 0 when a read row does not fit, or when the route has
-   nothing left to learn. That closes the socket. It is not a status.
-   POST /posts reaches here only for body-ok, which stored the text.
-   A missing text is a host bug and closes the socket. */
-static int query_facts(Server *sv, Slot *s) {
-  uint64_t verb = field(s->st, 3);
-  uint64_t path = field(s->st, 4);
-  int rc;
-  s->row_ok = 0;
-  s->row_len = 0;
-  if (verb == VERB_GET && path == PATH_HEALTH) {
-    s->f_db = store_ping(sv->store) ? DB_OK : DB_DOWN;
-    return 1;
-  }
-  if (verb == VERB_GET && path == PATH_FEED) {
-    rc = store_feed(sv->store, s->row, s->row_cap, &s->row_len);
-    if (rc == -2) return 0;
-    if (rc != 0) {
-      s->f_db = DB_DOWN;
-      return 1;
-    }
-    s->f_db = DB_OK;
-    s->row_ok = 1;
-    return 1;
-  }
-  if (verb == VERB_POST && path == PATH_POSTS) {
-    int64_t id = 0;
-    size_t n = 0;
-    if (!s->f_text_ok) {
-      fprintf(stderr, "muro-httpd: create observed without text\n");
-      return 0;
-    }
-    rc = store_create(sv->store, s->f_text, s->f_text_n, &id, s->row, s->row_cap, &n);
-    if (rc != 0) {
-      s->f_db = DB_DOWN;
-      return 1;
-    }
-    s->row_len = n;
-    s->row_ok = 1;
-    s->f_db = DB_OK;
-    s->wrote = 1;
-    return 1;
-  }
-  if (verb == VERB_GET && path == PATH_POST_ID) {
-    uint8_t text[1024];
-    size_t tn = 0;
-    size_t n = 0;
-    if (s->f_idc != ID_UNKNOWN) return 0;
-    rc = store_read(sv->store, s->f_idn, text, sizeof text, &tn);
-    if (rc == -2) return 0;
-    if (rc < 0) {
-      s->f_db = DB_DOWN;
-      return 1;
-    }
-    if (rc == 0) {
-      s->f_db = DB_OK;
-      s->f_idc = ID_MISSING;
-      return 1;
-    }
-    if (json_row_post(s->row, s->row_cap, &n, s->f_idn, text, tn) != 0) return 0;
-    s->row_len = n;
-    s->row_ok = 1;
-    s->f_db = DB_OK;
-    s->f_idc = ID_PRESENT;
-    return 1;
-  }
-  if (verb == VERB_POST && path == PATH_POST_LIKE) {
-    int64_t likes = 0;
-    size_t n = 0;
-    if (s->f_idc != ID_UNKNOWN || s->f_auth != AUTH_OK || s->f_sub_n == 0) return 0;
-    rc = store_like(sv->store, s->f_idn, s->f_sub, s->f_sub_n, &likes, s->row, s->row_cap, &n);
-    if (rc < 0) {
-      s->f_db = DB_DOWN;
-      return 1;
-    }
-    if (rc == 0) {
-      s->f_db = DB_OK;
-      s->f_idc = ID_MISSING;
-      return 1;
-    }
-    s->row_len = n;
-    s->row_ok = 1;
-    s->f_db = DB_OK;
-    s->f_idc = ID_PRESENT;
-    s->f_like = rc == 1 ? LIKE_NEW : LIKE_AGAIN;
-    s->wrote = 1;
-    return 1;
-  }
-  return 0;
-}
-
-static int step_ev(Slot *s, Ev ev) {
+static int step_ev(Server *sv, Slot *s, Ev ev) {
   int phase = (int)field(s->st, 0);
   int half = (int)field(s->st, 1);
   int keep = (int)field(s->st, 2);
@@ -437,34 +298,21 @@ static int step_ev(Slot *s, Ev ev) {
   int admitted;
 
   if (!s->proto) return 0;
-  if (proto_live(s->proto) && !proto_done(s->proto) &&
-      (phase == PH_READ || phase == PH_IDLE) &&
+  if (proto_live(s->proto) && !proto_done(s->proto) && (phase == PH_READ || phase == PH_IDLE) &&
       (tag == EV_BYTES || (tag == EV_EOF && buf.n > 0))) {
     Classified *c = classify(buf);
     status = c->muro__as.classified.muro__f_0->muro__field_tag;
   }
-  if (proto_live(s->proto) && !proto_done(s->proto) && phase == PH_DECIDE && tag == EV_DB) {
-    Decision *d = decide(verbFrom(field(s->st, 3)), pathFrom(field(s->st, 4)),
-                         idFrom(ev.muro__as.ev.muro__f_6), authFrom(ev.muro__as.ev.muro__f_2),
-                         bodyFrom(ev.muro__as.ev.muro__f_3), likeFrom(ev.muro__as.ev.muro__f_4),
-                         dbFrom(ev.muro__as.ev.muro__f_5));
-    int act = d->muro__as.decided.muro__f_2->muro__field_tag;
-    int code = d->muro__as.decided.muro__f_0->muro__field_tag;
-    if (act == ACT_OBSERVE) observe = 1;
-    else reply = code <= ST_201 ? 0 : 1;
-  }
-  /* The store write has already committed. Refusing here is the same
-     close as proto_admit returning 0: the image never reaches write. */
-  if (tag == EV_DB && s->wrote && fail_db_admit > 0) {
-    fail_db_admit -= 1;
-    muro_http_reset();
-    fprintf(stderr, "muro-httpd: test hook refused db admit phase %d ev %d\n", phase, tag);
-    return 0;
+  /* A finished handler is a successful protocol reply. The HTTP
+     status, including 4xx and 5xx, stays in the bytes. */
+  if (proto_live(s->proto) && !proto_done(s->proto) && phase == PH_DECIDE && tag == EV_REPLY) {
+    reply = 0;
+    observe = 0;
   }
   admitted = proto_admit(s->proto, phase, tag, buf.n, status, reply, observe, half || keep);
   if (admitted != 1) {
     muro_http_reset();
-    fprintf(stderr, "muro-httpd: admit refused phase %d ev %d\n", phase, tag);
+    fprintf(stderr, "%s: admit refused phase %d ev %d\n", sv->name, phase, tag);
     return 0;
   }
   s->st = step(s->st, ev);
@@ -472,30 +320,12 @@ static int step_ev(Slot *s, Ev ev) {
   return 1;
 }
 
-/* Body is decide's err-internal text. Used after a committed write
-   whose success response did not fit, and when a close happens
-   before any status byte is written. keep 1 is Connection: close. */
-static const char k_500_keep[] =
-    "HTTP/1.1 500 Internal Server Error\r\n"
-    "Connection: keep-alive\r\n"
-    "Content-Length: 8\r\n"
-    "Content-Type: text/plain; charset=utf-8\r\n"
-    "\r\n"
-    "internal";
-static const char k_500_close[] =
-    "HTTP/1.1 500 Internal Server Error\r\n"
-    "Connection: close\r\n"
-    "Content-Length: 8\r\n"
-    "Content-Type: text/plain; charset=utf-8\r\n"
-    "\r\n"
-    "internal";
-
 /* Best-effort status before close. The fd is non-blocking. A short
    write is retried immediately. EAGAIN or EWOULDBLOCK returns
    without waiting: a poll or a sleep here would stall every other
    socket. The peer may miss this last status if its receive window
    is already full. */
-static void write_status(Server *sv, int fd, const char *p, size_t n) {
+static void write_status(Server *sv, int fd, const uint8_t *p, size_t n) {
   size_t off = 0;
   if (fd < 0 || !p || n == 0) return;
   while (off < n) {
@@ -508,65 +338,74 @@ static void write_status(Server *sv, int fd, const char *p, size_t n) {
   }
 }
 
-/* wrote is set only after a committed create or like. If no status
+/* owe is set when the handler committed a side effect. If no status
    byte has left the socket, send one before the fd is closed. A
-   rendered buffer is that status. Otherwise the body is internal,
-   sent with Connection: close because the fd closes next. */
+   rendered buffer is that status. Otherwise the book supplies 500. */
 static void status_before_close(Server *sv, Slot *s) {
-  const char *msg;
-  size_t n;
-  if (!s->wrote || s->fd < 0 || s->out_off > 0) return;
+  uint8_t tmp[512];
+  size_t n = 0;
+  const uint8_t *msg;
+  if (!s->owe || s->fd < 0 || s->out_off > 0) return;
   if (s->rendered && s->out && s->out_len > 0) {
-    msg = (const char *)s->out;
+    msg = s->out;
     n = s->out_len;
   } else {
-    msg = k_500_close;
-    n = strlen(msg);
-    fprintf(stderr, "muro-httpd: committed write has no status; sending 500\n");
+    n = host_copy_internal(tmp, sizeof tmp, NULL);
+    msg = tmp;
+    fprintf(stderr, "%s: committed write has no status; sending 500\n", sv->name);
   }
-  write_status(sv, s->fd, msg, n);
-  s->wrote = 0;
+  if (n > 0) write_status(sv, s->fd, msg, n);
+  s->owe = 0;
 }
 
-static int render_out(Slot *s) {
+static int fill_request(Slot *s, MuroHttpRequest *req) {
+  uint64_t end = field(s->st, 13);
+  muro__slice buf;
+  if (end == 0 || end > (uint64_t)s->in_len || !s->in) return -1;
+  buf.p = s->in;
+  buf.n = (size_t)end;
+  memset(req, 0, sizeof *req);
+  req->method = to_pub(methodView(buf));
+  req->target = to_pub(targetView(buf));
+  req->path = to_pub(pathView(buf));
+  req->query = to_pub(queryView(buf));
+  req->version = to_pub(versionView(buf));
+  req->body = to_pub(bodyView(buf));
+  req->buf = s->in;
+  req->buf_n = (size_t)end;
+  return 0;
+}
+
+static int begin_reply(Server *sv, Slot *s, const MuroHttpResponse *resp) {
+  int half = (int)field(s->st, 1);
+  int keep = (int)field(s->st, 2);
+  int bit = resp->close_after ? 1 : 0;
+  uint64_t eff = (half || keep || bit) ? 1u : 0u;
   size_t got = 0;
-  uint64_t act = field(s->st, 10);
-  const uint8_t *row = NULL;
-  size_t row_n = 0;
   size_t n;
-  if (act >= ACT_FEED && act <= ACT_LIKE_AGAIN) {
-    if (!s->row_ok || !s->row) {
-      muro_http_reset();
-      fprintf(stderr, "muro-httpd: row is missing\n");
-      return 0;
-    }
-    row = s->row;
-    row_n = s->row_len;
+  const uint8_t *reason = resp->reason ? (const uint8_t *)resp->reason : NULL;
+  const uint8_t *extra = resp->headers ? (const uint8_t *)resp->headers : NULL;
+  const uint8_t *body = resp->body;
+  size_t reason_n = reason ? resp->reason_len : 0;
+  size_t extra_n = extra ? resp->headers_len : 0;
+  size_t body_n = body ? resp->body_len : 0;
+  n = host_copy_response(s->out, s->out_cap, (uint64_t)resp->status, reason, reason_n, extra,
+                         extra_n, body, body_n, eff, &got);
+  if (n == 0 && resp->owe_status) {
+    n = host_copy_internal(s->out, s->out_cap, NULL);
+    bit = 1;
+    if (n > 0) fprintf(stderr, "%s: response is %zu bytes after commit; sending 500\n", sv->name, got);
   }
-  n = host_copy_render(s->out, s->out_cap, field(s->st, 8), field(s->st, 9), act, field(s->st, 2),
-                       row, row_n, &got);
   if (n == 0) {
-    muro_http_reset();
-    if (s->wrote) {
-      const char *fb = field(s->st, 2) == 1 ? k_500_close : k_500_keep;
-      size_t fn = strlen(fb);
-      if (fn <= s->out_cap) {
-        memcpy(s->out, fb, fn);
-        s->out_len = fn;
-        s->out_off = 0;
-        s->rendered = 1;
-        fprintf(stderr, "muro-httpd: response is %zu bytes after commit; sending 500\n", got);
-        return 1;
-      }
-    }
-    fprintf(stderr, "muro-httpd: response is %zu bytes\n", got);
-    return 0;
+    fprintf(stderr, "%s: response is %zu bytes\n", sv->name, got);
+    return -1;
   }
   s->out_len = n;
   s->out_off = 0;
   s->rendered = 1;
-  muro_http_reset();
-  return 1;
+  s->owe = resp->owe_status ? 1 : 0;
+  if (!step_ev(sv, s, evReply((uint64_t)bit))) return -1;
+  return 0;
 }
 
 static void consume(Slot *s, uint64_t end_off) {
@@ -575,6 +414,17 @@ static void consume(Slot *s, uint64_t end_off) {
   n = (size_t)end_off;
   memmove(s->in, s->in + n, s->in_len - n);
   s->in_len -= n;
+}
+
+static int copy_fixed(Slot *s, int which) {
+  size_t got = 0;
+  size_t n = which ? host_copy_internal(s->out, s->out_cap, &got)
+                   : host_copy_malformed(s->out, s->out_cap, &got);
+  if (n == 0) return -1;
+  s->out_len = n;
+  s->out_off = 0;
+  s->rendered = 1;
+  return 0;
 }
 
 /* Returns 1 to keep pumping, 0 when the slot is waiting or gone. */
@@ -592,30 +442,33 @@ static int pump(Server *sv, Slot *s) {
       return 0;
     }
     if (phase == PH_READ || phase == PH_IDLE) {
-      s->fact_live = 0;
-      s->fact_queried = 0;
-      s->row_ok = 0;
-      s->wrote = 0;
+      s->rendered = 0;
+      s->owe = 0;
+      s->out_len = 0;
+      s->out_off = 0;
     }
-    if (action == HOST_ACT_DECIDE) {
-      if (!s->fact_live) {
-        if (!take_facts(sv, s)) {
-          close_slot(sv, s);
-          return 0;
-        }
-      } else if (!s->fact_queried) {
-        if (!query_facts(sv, s)) {
-          fprintf(stderr, "muro-httpd: query closed the socket\n");
-          close_slot(sv, s);
-          return 0;
-        }
-        s->fact_queried = 1;
-      } else {
-        fprintf(stderr, "muro-httpd: decide asked again; no further fact\n");
+    if (action == HOST_ACT_HANDLER) {
+      MuroHttpRequest req;
+      MuroHttpResponse resp;
+      int rc;
+      if (fill_request(s, &req) < 0 || !sv->handler) {
         close_slot(sv, s);
         return 0;
       }
-      if (!step_ev(s, evDb(s->f_auth, s->f_body, s->f_like, s->f_db, s->f_idc))) {
+      memset(&resp, 0, sizeof resp);
+      rc = sv->handler(&req, &resp, sv->user);
+      if (rc < 0) {
+        if (resp.owe_status) {
+          s->owe = 1;
+          if (copy_fixed(s, 1) == 0) {
+            fprintf(stderr, "%s: handler failed after a commit; sending 500\n", sv->name);
+          }
+        }
+        close_slot(sv, s);
+        return 0;
+      }
+      if (begin_reply(sv, s, &resp) < 0) {
+        if (resp.owe_status) s->owe = 1;
         close_slot(sv, s);
         return 0;
       }
@@ -625,7 +478,9 @@ static int pump(Server *sv, Slot *s) {
       ssize_t n;
       size_t chunk;
       if (!s->rendered) {
-        if (!render_out(s)) {
+        /* Origin 1 is the book's malformed response. A handler
+           reply was copied before the image entered write. */
+        if (field(s->st, 8) != 1 || copy_fixed(s, 0) < 0) {
           close_slot(sv, s);
           return 0;
         }
@@ -641,18 +496,17 @@ static int pump(Server *sv, Slot *s) {
           return 0;
         }
         if (n <= 0) {
-          if (!step_ev(s, evError())) {
+          if (!step_ev(sv, s, evError())) {
             close_slot(sv, s);
             return 0;
           }
           continue;
         }
         s->out_off += (size_t)n;
-        /* A status byte has left. A later close must not send another. */
-        if (s->out_off > 0) s->wrote = 0;
+        if (s->out_off > 0) s->owe = 0;
         s->want_write = 0;
         note_write(sv, (size_t)n);
-        if (!step_ev(s, evProgress((uint64_t)n))) {
+        if (!step_ev(sv, s, evProgress((uint64_t)n))) {
           close_slot(sv, s);
           return 0;
         }
@@ -662,7 +516,7 @@ static int pump(Server *sv, Slot *s) {
       s->rendered = 0;
       s->out_len = 0;
       s->out_off = 0;
-      if (!step_ev(s, evDone())) {
+      if (!step_ev(sv, s, evDone())) {
         close_slot(sv, s);
         return 0;
       }
@@ -673,7 +527,7 @@ static int pump(Server *sv, Slot *s) {
       if (more && end_off > 0 && end_off <= (uint64_t)s->in_len) {
         consume(s, end_off);
         s->want_read = 0;
-        if (!step_ev(s, evBytes(muro__slice_of(s->in, s->in_len)))) {
+        if (!step_ev(sv, s, evBytes(muro__slice_of(s->in, s->in_len)))) {
           close_slot(sv, s);
           return 0;
         }
@@ -693,7 +547,7 @@ static int pump(Server *sv, Slot *s) {
     return 0;
   }
   if (s->used) {
-    fprintf(stderr, "muro-httpd: pump fuel exhausted\n");
+    fprintf(stderr, "%s: pump fuel exhausted\n", sv->name);
     close_slot(sv, s);
   }
   return 0;
@@ -724,18 +578,16 @@ static void on_readable(Server *sv, Slot *s, int hangup) {
     return;
   }
   if (!got && !hit_eof && !hangup) {
-    /* A full buffer that the image did not consume cannot take another
-       byte. Closing is a host limit. It is not a status. */
     if (s->in_len >= sv->in_cap) close_slot(sv, s);
     return;
   }
   s->deadline = 0;
   if (hit_eof || hangup) {
-    if (!step_ev(s, evEof(muro__slice_of(s->in, s->in_len)))) {
+    if (!step_ev(sv, s, evEof(muro__slice_of(s->in, s->in_len)))) {
       close_slot(sv, s);
       return;
     }
-  } else if (!step_ev(s, evBytes(muro__slice_of(s->in, s->in_len)))) {
+  } else if (!step_ev(sv, s, evBytes(muro__slice_of(s->in, s->in_len)))) {
     close_slot(sv, s);
     return;
   }
@@ -748,7 +600,7 @@ static void on_tick(Server *sv, Slot *s, uint64_t now) {
   phase = (int)field(s->st, 0);
   s->deadline = 0;
   if (phase != PH_READ && phase != PH_IDLE) return;
-  if (!step_ev(s, evTick())) {
+  if (!step_ev(sv, s, evTick())) {
     close_slot(sv, s);
     return;
   }
@@ -773,7 +625,7 @@ static void accept_some(Server *sv) {
     if (fd < 0) {
       if (errno == EINTR) continue;
       if (errno == EAGAIN || errno == EWOULDBLOCK) return;
-      fprintf(stderr, "muro-httpd: accept: %s\n", strerror(errno));
+      fprintf(stderr, "%s: accept: %s\n", sv->name, strerror(errno));
       return;
     }
     if (set_nb_cloexec(fd) < 0) {
@@ -806,18 +658,15 @@ static void accept_some(Server *sv) {
     s->in = malloc(sv->in_cap);
     s->out = malloc(OUT_CAP);
     s->out_cap = s->out ? (size_t)OUT_CAP : 0;
-    s->row = malloc(ROW_CAP);
-    s->row_cap = s->row ? (size_t)ROW_CAP : 0;
     s->proto = proto_begin();
-    if (!s->in || !s->out || !s->row || !s->proto) {
+    if (!s->in || !s->out || !s->proto) {
       proto_free(s->proto);
       free(s->in);
       free(s->out);
-      free(s->row);
       close(fd);
       memset(s, 0, sizeof *s);
       s->fd = -1;
-      fprintf(stderr, "muro-httpd: connection setup failed\n");
+      fprintf(stderr, "%s: connection setup failed\n", sv->name);
       return;
     }
     s->st = begin();
@@ -867,13 +716,13 @@ static void arm_soonest(Server *sv) {
   else if (soon - now > 86400000ull) ms = 86400000u;
   else ms = (unsigned)(soon - now);
   if (host_poll_arm(sv->pq, ms) < 0) {
-    fprintf(stderr, "muro-httpd: timer: %s\n", strerror(errno));
+    fprintf(stderr, "%s: timer: %s\n", sv->name, strerror(errno));
     return;
   }
   sv->armed_deadline = soon;
 }
 
-static int listen_on(int port) {
+static int listen_on(const char *host, int port) {
 #if defined(SOCK_CLOEXEC)
   int fd = socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0);
 #else
@@ -888,9 +737,9 @@ static int listen_on(int port) {
   memset(&addr, 0, sizeof addr);
   addr.sin_family = AF_INET;
   addr.sin_port = htons((uint16_t)port);
-  if (inet_pton(AF_INET, "127.0.0.1", &addr.sin_addr) != 1) {
+  if (inet_pton(AF_INET, host, &addr.sin_addr) != 1) {
     close(fd);
-    return -1;
+    return -2;
   }
   if (bind(fd, (struct sockaddr *)&addr, sizeof addr) < 0) {
     close(fd);
@@ -914,12 +763,150 @@ static int bound_port(int fd) {
   return (int)ntohs(addr.sin_port);
 }
 
-int host_run(const HostConfig *cfg) {
+static int parse_i(const char *s, long lo, long hi, int *out) {
+  char *end = NULL;
+  long v;
+  if (!s || !*s) return -1;
+  errno = 0;
+  v = strtol(s, &end, 10);
+  if (errno || !end || *end || v < lo || v > hi) return -1;
+  *out = (int)v;
+  return 0;
+}
+
+void muro_http_config_init(MuroHttpConfig *cfg) {
+  if (!cfg) return;
+  memset(cfg, 0, sizeof *cfg);
+  cfg->port = 8080;
+  cfg->idle_ms = 5000;
+  cfg->max_conn = 128;
+}
+
+void muro_http_config_usage(FILE *out, const MuroHttpConfig *cfg) {
+  const char *name = cfg_name(cfg);
+  if (!out) return;
+  fprintf(out,
+          "%s — HTTP/1.1\n"
+          "\n"
+          "  --bind HOST            IPv4 address. default 127.0.0.1\n"
+          "  --port N               listen port (0 picks one). default 8080\n"
+          "  --idle-ms N            idle tick. default 5000\n"
+          "  --max-connections N    accept cap. default 128, max 1024\n"
+          "\n"
+          "Environment, used when the flag is absent: MURO_HTTP_BIND,\n"
+          "MURO_HTTP_PORT, MURO_HTTP_IDLE_MS, MURO_HTTP_MAX_CONNECTIONS.\n"
+          "The default bind host is 127.0.0.1. SIGINT and SIGTERM stop it.\n",
+          name);
+}
+
+static int take_env_i(const MuroHttpConfig *cfg, const char *env, long lo, long hi, int *slot) {
+  const char *v = getenv(env);
+  if (!v) return 0;
+  if (parse_i(v, lo, hi, slot) < 0) {
+    fprintf(stderr, "%s: bad %s\n", cfg_name(cfg), env);
+    return -1;
+  }
+  return 0;
+}
+
+int muro_http_config_env(MuroHttpConfig *cfg) {
+  const char *bind;
+  if (!cfg) return -1;
+  if (take_env_i(cfg, "MURO_HTTP_PORT", 0, 65535, &cfg->port) < 0) return -1;
+  if (take_env_i(cfg, "MURO_HTTP_IDLE_MS", 1, 86400000, &cfg->idle_ms) < 0) return -1;
+  if (take_env_i(cfg, "MURO_HTTP_MAX_CONNECTIONS", 1, 1024, &cfg->max_conn) < 0) return -1;
+  bind = getenv("MURO_HTTP_BIND");
+  if (bind) {
+    if (!bind[0]) {
+      fprintf(stderr, "%s: bad MURO_HTTP_BIND\n", cfg_name(cfg));
+      return -1;
+    }
+    cfg->bind_host = bind;
+  }
+  return 0;
+}
+
+int muro_http_config_arg(MuroHttpConfig *cfg, int *index, int argc, char **argv) {
+  const char *a;
+  const char *val;
+  int *slot = NULL;
+  long lo = 0;
+  long hi = 0;
+  if (!cfg || !index || !argv || *index < 0 || *index >= argc) return -1;
+  a = argv[*index];
+  if (!a) return -1;
+  if (strcmp(a, "-h") == 0 || strcmp(a, "--help") == 0) return 2;
+  if (strcmp(a, "--bind") == 0) {
+    if (*index + 1 >= argc) {
+      fprintf(stderr, "%s: --bind needs a value\n", cfg_name(cfg));
+      return -1;
+    }
+    *index += 1;
+    val = argv[*index];
+    if (!val || !val[0]) {
+      fprintf(stderr, "%s: bad --bind\n", cfg_name(cfg));
+      return -1;
+    }
+    cfg->bind_host = val;
+    return 1;
+  }
+  if (strcmp(a, "--port") == 0) {
+    slot = &cfg->port;
+    lo = 0;
+    hi = 65535;
+  } else if (strcmp(a, "--idle-ms") == 0) {
+    slot = &cfg->idle_ms;
+    lo = 1;
+    hi = 86400000;
+  } else if (strcmp(a, "--max-connections") == 0) {
+    slot = &cfg->max_conn;
+    lo = 1;
+    hi = 1024;
+  } else {
+    return 0;
+  }
+  if (*index + 1 >= argc) {
+    fprintf(stderr, "%s: %s needs a value\n", cfg_name(cfg), a);
+    return -1;
+  }
+  *index += 1;
+  val = argv[*index];
+  if (parse_i(val, lo, hi, slot) < 0) {
+    fprintf(stderr, "%s: bad %s %s\n", cfg_name(cfg), a, val ? val : "");
+    return -1;
+  }
+  return 1;
+}
+
+int muro_http_config_parse(MuroHttpConfig *cfg, int argc, char **argv) {
+  int i;
+  if (!cfg) return -1;
+  if (muro_http_config_env(cfg) < 0) return -1;
+  for (i = 1; i < argc; i++) {
+    int rc = muro_http_config_arg(cfg, &i, argc, argv);
+    if (rc == 2) {
+      muro_http_config_usage(stdout, cfg);
+      return 1;
+    }
+    if (rc < 0) return -1;
+    if (rc == 0) {
+      fprintf(stderr, "%s: unknown argument %s\n", cfg_name(cfg), argv[i]);
+      muro_http_config_usage(stderr, cfg);
+      return -1;
+    }
+  }
+  return 0;
+}
+
+int muro_http_serve(const MuroHttpConfig *cfg, MuroHttpHandler handler, void *user) {
   Server sv;
   struct sigaction sa;
+  const char *bind;
+  const char *name;
   int port;
   int rc = 0;
-  if (!cfg || cfg->port < 0 || cfg->port > 65535 || cfg->idle_ms < 1 || cfg->max_conn < 1)
+  if (!cfg || !handler || cfg->port < 0 || cfg->port > 65535 || cfg->idle_ms < 1 ||
+      cfg->max_conn < 1)
     return -1;
   stop_flag = 0;
   memset(&sv, 0, sizeof sv);
@@ -929,13 +916,24 @@ int host_run(const HostConfig *cfg) {
   sv.in_cap = env_in_cap();
   sv.write_limit = env_write_limit();
   sv.write_log = getenv("MURO_TEST_WRITE_LOG");
-  fail_db_admit = env_fail_db_admit();
-  if (cfg->jwt_key_len > sizeof sv.jwt_key) return -1;
-  if (cfg->jwt_key_len) memcpy(sv.jwt_key, cfg->jwt_key, cfg->jwt_key_len);
-  sv.jwt_key_len = cfg->jwt_key_len;
-  sv.store = store_open(cfg->db_path && cfg->db_path[0] ? cfg->db_path : ":memory:");
-  if (!sv.store) fprintf(stderr, "muro-httpd: database is unavailable\n");
+  sv.handler = handler;
+  sv.user = user;
   if (sv.write_log && !sv.write_log[0]) sv.write_log = NULL;
+  name = cfg_name(cfg);
+  snprintf(sv.name, sizeof sv.name, "%s", name);
+  bind = (cfg->bind_host && cfg->bind_host[0]) ? cfg->bind_host : "127.0.0.1";
+  if (strlen(bind) >= sizeof sv.bind_host) {
+    fprintf(stderr, "%s: bad bind host\n", sv.name);
+    return -2;
+  }
+  memcpy(sv.bind_host, bind, strlen(bind) + 1);
+  {
+    struct in_addr probe;
+    if (inet_pton(AF_INET, sv.bind_host, &probe) != 1) {
+      fprintf(stderr, "%s: bad bind host\n", sv.name);
+      return -2;
+    }
+  }
   sv.slots = calloc((size_t)cfg->max_conn, sizeof(Slot));
   sv.pq = host_poll_open();
   if (sv.slots) {
@@ -943,19 +941,24 @@ int host_run(const HostConfig *cfg) {
     for (i = 0; i < sv.max_conn; i++) sv.slots[i].fd = -1;
   }
   if (!sv.slots || !sv.pq) {
-    fprintf(stderr, "muro-httpd: setup failed\n");
+    fprintf(stderr, "%s: setup failed\n", sv.name);
     rc = -1;
     goto out;
   }
-  sv.listen_fd = listen_on(cfg->port);
+  sv.listen_fd = listen_on(sv.bind_host, cfg->port);
+  if (sv.listen_fd == -2) {
+    fprintf(stderr, "%s: bad bind host\n", sv.name);
+    rc = -2;
+    goto out;
+  }
   if (sv.listen_fd < 0) {
-    fprintf(stderr, "muro-httpd: listen 127.0.0.1:%d: %s\n", cfg->port, strerror(errno));
+    fprintf(stderr, "%s: listen %s:%d: %s\n", sv.name, sv.bind_host, cfg->port, strerror(errno));
     rc = -1;
     goto out;
   }
   port = bound_port(sv.listen_fd);
   if (port < 0) {
-    fprintf(stderr, "muro-httpd: getsockname: %s\n", strerror(errno));
+    fprintf(stderr, "%s: getsockname: %s\n", sv.name, strerror(errno));
     rc = -1;
     goto out;
   }
@@ -970,7 +973,7 @@ int host_run(const HostConfig *cfg) {
     rc = -1;
     goto out;
   }
-  printf("listening 127.0.0.1 %d\n", port);
+  printf("listening %s %d\n", sv.bind_host, port);
   fflush(stdout);
   while (!stop_flag && !sv.fatal) {
     HostEv evs[32];
@@ -979,7 +982,7 @@ int host_run(const HostConfig *cfg) {
     arm_soonest(&sv);
     n = host_poll_wait(sv.pq, evs, 32);
     if (n < 0) {
-      fprintf(stderr, "muro-httpd: poll: %s\n", strerror(errno));
+      fprintf(stderr, "%s: poll: %s\n", sv.name, strerror(errno));
       rc = -1;
       break;
     }
@@ -1008,9 +1011,6 @@ int host_run(const HostConfig *cfg) {
       if (s->used && evs[i].readable && s->want_read) on_readable(&sv, s, evs[i].hangup);
       else if (s->used && evs[i].hangup && s->want_read) on_readable(&sv, s, 1);
       else if (s->used && evs[i].hangup && !evs[i].writable) {
-        /* Write-only hangup with no POLLOUT: close. A peer FIN
-           while want_read is set is evEof above, so a request
-           that already arrived can still be answered. */
         close_slot(&sv, s);
       }
     }
@@ -1035,6 +1035,5 @@ out:
   }
   host_poll_close(sv.pq);
   free(sv.slots);
-  store_close(sv.store);
   return rc;
 }

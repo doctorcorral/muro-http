@@ -1,99 +1,27 @@
--- HTTP/1.1 response bytes for one write action.
+-- HTTP/1.1 response bytes for one write.
 --
--- The image stores status, error, and act as tags. This book turns
--- those tags, and the keep bit, into the response bytes. It does not
--- choose the status. The host copies the slice and writes it.
+-- The handler supplies the status, the reason, extra header lines,
+-- and the body. This book frames them. It writes the status line,
+-- Connection, and Content-Length. Extra headers are copied as given
+-- and must already end in CRLF. The handler does not supply
+-- Connection or Content-Length.
 --
--- Tags are decide.muro constructor order, the same numbers as
--- c/decision_tags.h. This book does not import decide.muro. A def is
--- a global C symbol, and conn.muro already emits that book.
+-- keep 1 sends Connection: close. Any other value sends keep-alive.
+-- A positive Content-Length walks rdShow. That walk does not finish
+-- under the evidence fuel, so the equations use an empty body.
+-- c/test_render checks a non-empty body.
 --
--- code: 0 200, 1 201, 2 400, 3 401, 4 404, 5 500, 6 503.
--- A code outside that list is 500. st-observe is not a write. The
--- image leaves it in decide. The 500 arm makes this function total.
--- err: 0 none, 1 not-found, 2 invalid-id, 3 post-missing,
--- 4 missing-bearer, 5 bad-token, 6 bad-payload, 7 malformed,
--- 8 body-required, 9 body-long, 10 internal, 11 db, 12 observe.
--- act: 0 health, 6 error, 7 observe. Acts 1 through 5 are rows.
--- The row argument is those body bytes. Content-Length is the decimal
--- length of that argument. This book does not choose the status and
--- does not invent a row. Any other act is an empty text body.
--- keep: 1 sends Connection: close. Any other value sends keep-alive.
+-- httpMalformed and httpInternal are the protocol texts. The host
+-- copies them. It does not invent the words.
 --
--- Each suffix literal carries its own Content-Length. The length is
--- the byte count of the body in that same literal.
-
-def httpLine : run Π (+ code : U64) → Bytes :=
-  λ (+ code : U64) →
-    match (eqi code (toU64 0)) motive (λ _ → Bytes)
-      | wtrue => b"HTTP/1.1 200 OK\r\n"
-      | wfalse =>
-          (match (eqi code (toU64 1)) motive (λ _ → Bytes)
-            | wtrue => b"HTTP/1.1 201 Created\r\n"
-            | wfalse =>
-                (match (eqi code (toU64 2)) motive (λ _ → Bytes)
-                  | wtrue => b"HTTP/1.1 400 Bad Request\r\n"
-                  | wfalse =>
-                      (match (eqi code (toU64 3)) motive (λ _ → Bytes)
-                        | wtrue => b"HTTP/1.1 401 Unauthorized\r\n"
-                        | wfalse =>
-                            (match (eqi code (toU64 4)) motive (λ _ → Bytes)
-                              | wtrue => b"HTTP/1.1 404 Not Found\r\n"
-                              | wfalse =>
-                                  (match (eqi code (toU64 5)) motive (λ _ → Bytes)
-                                    | wtrue => b"HTTP/1.1 500 Internal Server Error\r\n"
-                                    | wfalse =>
-                                        (match (eqi code (toU64 6)) motive (λ _ → Bytes)
-                                          | wtrue => b"HTTP/1.1 503 Service Unavailable\r\n"
-                                          | wfalse => b"HTTP/1.1 500 Internal Server Error\r\n"))))))
+-- This book does not import another book. A def is a global C
+-- symbol, and conn.muro already emits the request scan.
 
 def httpConn : run Π (+ keep : U64) → Bytes :=
   λ (+ keep : U64) →
     match (eqi keep (toU64 1)) motive (λ _ → Bytes)
       | wtrue => b"Connection: close\r\n"
       | wfalse => b"Connection: keep-alive\r\n"
-
-def httpErrSuffix : run Π (+ err : U64) → Bytes :=
-  λ (+ err : U64) →
-    match (eqi err (toU64 0)) motive (λ _ → Bytes)
-      | wtrue => b"Content-Length: 0\r\nContent-Type: text/plain; charset=utf-8\r\n\r\n"
-      | wfalse =>
-          (match (eqi err (toU64 1)) motive (λ _ → Bytes)
-            | wtrue => b"Content-Length: 9\r\nContent-Type: text/plain; charset=utf-8\r\n\r\nnot-found"
-            | wfalse =>
-                (match (eqi err (toU64 2)) motive (λ _ → Bytes)
-                  | wtrue => b"Content-Length: 10\r\nContent-Type: text/plain; charset=utf-8\r\n\r\ninvalid-id"
-                  | wfalse =>
-                      (match (eqi err (toU64 3)) motive (λ _ → Bytes)
-                        | wtrue => b"Content-Length: 12\r\nContent-Type: text/plain; charset=utf-8\r\n\r\npost-missing"
-                        | wfalse =>
-                            (match (eqi err (toU64 4)) motive (λ _ → Bytes)
-                              | wtrue => b"Content-Length: 14\r\nContent-Type: text/plain; charset=utf-8\r\n\r\nmissing-bearer"
-                              | wfalse =>
-                                  (match (eqi err (toU64 5)) motive (λ _ → Bytes)
-                                    | wtrue => b"Content-Length: 9\r\nContent-Type: text/plain; charset=utf-8\r\n\r\nbad-token"
-                                    | wfalse =>
-                                        (match (eqi err (toU64 6)) motive (λ _ → Bytes)
-                                          | wtrue => b"Content-Length: 11\r\nContent-Type: text/plain; charset=utf-8\r\n\r\nbad-payload"
-                                          | wfalse =>
-                                              (match (eqi err (toU64 7)) motive (λ _ → Bytes)
-                                                | wtrue => b"Content-Length: 9\r\nContent-Type: text/plain; charset=utf-8\r\n\r\nmalformed"
-                                                | wfalse =>
-                                                    (match (eqi err (toU64 8)) motive (λ _ → Bytes)
-                                                      | wtrue => b"Content-Length: 13\r\nContent-Type: text/plain; charset=utf-8\r\n\r\nbody-required"
-                                                      | wfalse =>
-                                                          (match (eqi err (toU64 9)) motive (λ _ → Bytes)
-                                                            | wtrue => b"Content-Length: 9\r\nContent-Type: text/plain; charset=utf-8\r\n\r\nbody-long"
-                                                            | wfalse =>
-                                                                (match (eqi err (toU64 10)) motive (λ _ → Bytes)
-                                                                  | wtrue => b"Content-Length: 8\r\nContent-Type: text/plain; charset=utf-8\r\n\r\ninternal"
-                                                                  | wfalse =>
-                                                                      (match (eqi err (toU64 11)) motive (λ _ → Bytes)
-                                                                        | wtrue => b"Content-Length: 2\r\nContent-Type: text/plain; charset=utf-8\r\n\r\ndb"
-                                                                        | wfalse =>
-                                                                            (match (eqi err (toU64 12)) motive (λ _ → Bytes)
-                                                                              | wtrue => b"Content-Length: 7\r\nContent-Type: text/plain; charset=utf-8\r\n\r\nobserve"
-                                                                              | wfalse => b"Content-Length: 5\r\nContent-Type: text/plain; charset=utf-8\r\n\r\nerror"))))))))))))
 
 -- One decimal digit. remi 10 is 0 through 9. The last arm is total.
 def rdDigit : run internal Π (+ d : U64) → Bytes :=
@@ -152,7 +80,7 @@ def rdStep : run internal Π (+ st : Dec) → Dec :=
 
 -- Zero is the literal 0. A positive length walks twenty steps.
 -- Reducing that walk does not finish, so the equations below do not
--- call it. c/test_render checks a two-byte row and a ten-byte row.
+-- call it on a non-empty body.
 def rdShow : run internal Π (+ n : U64) → Bytes :=
   λ (+ n : U64) →
     match (eqi n (toU64 0)) motive (λ _ → Bytes)
@@ -163,79 +91,79 @@ def rdShow : run internal Π (+ n : U64) → Bytes :=
                   b"....................") motive (λ _ → Bytes)
             | dec _m out => out)
 
--- Acts 1 through 5. 0 is health. 6 is an error. 7 is observe.
-def rdIsRow : run internal Π (+ act : U64) → U64 :=
-  λ (+ act : U64) →
-    match (lti (toU64 0) act) motive (λ _ → U64)
-      | wtrue =>
-          (match (lti act (toU64 6)) motive (λ _ → U64)
-            | wtrue => toU64 1
-            | wfalse => toU64 0)
-      | wfalse => toU64 0
-
-def rdRowSuffix : run internal Π (+ row : Bytes) → Bytes :=
-  λ (+ row : Bytes) →
-    bytesCat (bytesCat (bytesCat b"Content-Length: " (rdShow (bytesLen row))) b"\r\nContent-Type: application/json; charset=utf-8\r\n\r\n") row
-
-def httpSuffix : run Π (+ act : U64) → Π (+ err : U64) → Π (+ row : Bytes) → Bytes :=
-  λ (+ act : U64) → λ (+ err : U64) → λ (+ row : Bytes) →
-    match (eqi act (toU64 0)) motive (λ _ → Bytes)
-      | wtrue => b"Content-Length: 2\r\nContent-Type: text/plain; charset=utf-8\r\n\r\nok"
+def httpCode : run Π (+ code : U64) → Bytes :=
+  λ (+ code : U64) →
+    match (eqi code (toU64 200)) motive (λ _ → Bytes)
+      | wtrue => b"200"
       | wfalse =>
-          (match (eqi act (toU64 6)) motive (λ _ → Bytes)
-            | wtrue => httpErrSuffix err
+          (match (eqi code (toU64 201)) motive (λ _ → Bytes)
+            | wtrue => b"201"
             | wfalse =>
-                (match (eqi act (toU64 7)) motive (λ _ → Bytes)
-                  | wtrue => b"Content-Length: 7\r\nContent-Type: text/plain; charset=utf-8\r\n\r\nobserve"
+                (match (eqi code (toU64 204)) motive (λ _ → Bytes)
+                  | wtrue => b"204"
                   | wfalse =>
-                      (match (eqi (rdIsRow act) (toU64 1)) motive (λ _ → Bytes)
-                        | wtrue => rdRowSuffix row
-                        | wfalse => b"Content-Length: 0\r\nContent-Type: text/plain; charset=utf-8\r\n\r\n")))
+                      (match (eqi code (toU64 400)) motive (λ _ → Bytes)
+                        | wtrue => b"400"
+                        | wfalse =>
+                            (match (eqi code (toU64 401)) motive (λ _ → Bytes)
+                              | wtrue => b"401"
+                              | wfalse =>
+                                  (match (eqi code (toU64 404)) motive (λ _ → Bytes)
+                                    | wtrue => b"404"
+                                    | wfalse =>
+                                        (match (eqi code (toU64 405)) motive (λ _ → Bytes)
+                                          | wtrue => b"405"
+                                          | wfalse =>
+                                              (match (eqi code (toU64 500)) motive (λ _ → Bytes)
+                                                | wtrue => b"500"
+                                                | wfalse =>
+                                                    (match (eqi code (toU64 503)) motive (λ _ → Bytes)
+                                                      | wtrue => b"503"
+                                                      | wfalse => rdShow code))))))))
 
-def httpJoin : run Π (+ line : Bytes) → Π (+ conn : Bytes) → Π (+ suffix : Bytes) → Bytes :=
-  λ (+ line : Bytes) → λ (+ conn : Bytes) → λ (+ suffix : Bytes) →
-    bytesCat (bytesCat line conn) suffix
+def httpLine : run Π (+ code : U64) → Π (+ reason : Bytes) → Bytes :=
+  λ (+ code : U64) → λ (+ reason : Bytes) →
+    bytesCat (bytesCat (bytesCat (bytesCat b"HTTP/1.1 " (httpCode code)) b" ") reason) b"\r\n"
 
-def httpRender : run Π (+ code : U64) → Π (+ err : U64) → Π (+ act : U64) → Π (+ keep : U64) → Π (+ row : Bytes) → Bytes :=
-  λ (+ code : U64) → λ (+ err : U64) → λ (+ act : U64) → λ (+ keep : U64) → λ (+ row : Bytes) →
-    httpJoin (httpLine code) (httpConn keep) (httpSuffix act err row)
+def httpCL : run Π (+ body : Bytes) → Bytes :=
+  λ (+ body : Bytes) →
+    bytesCat (bytesCat b"Content-Length: " (rdShow (bytesLen body))) b"\r\n"
 
-def render-health-keep : evidence
-  {httpRender (toU64 0) (toU64 0) (toU64 0) (toU64 0) b""
-    ≡ b"HTTP/1.1 200 OK\r\nConnection: keep-alive\r\nContent-Length: 2\r\nContent-Type: text/plain; charset=utf-8\r\n\r\nok"
+def httpJoin : run Π (+ line : Bytes) → Π (+ conn : Bytes) → Π (+ cl : Bytes) → Π (+ extra : Bytes) → Π (+ body : Bytes) → Bytes :=
+  λ (+ line : Bytes) → λ (+ conn : Bytes) → λ (+ cl : Bytes) → λ (+ extra : Bytes) → λ (+ body : Bytes) →
+    bytesCat (bytesCat (bytesCat (bytesCat line conn) cl) extra) (bytesCat b"\r\n" body)
+
+def httpRender : run Π (+ status : U64) → Π (+ reason : Bytes) → Π (+ extra : Bytes) → Π (+ body : Bytes) → Π (+ keep : U64) → Bytes :=
+  λ (+ status : U64) → λ (+ reason : Bytes) → λ (+ extra : Bytes) → λ (+ body : Bytes) → λ (+ keep : U64) →
+    httpJoin (httpLine status reason) (httpConn keep) (httpCL body) extra body
+
+def httpMalformed : run Bytes :=
+  b"HTTP/1.1 400 Bad Request\r\nConnection: close\r\nContent-Length: 9\r\nContent-Type: text/plain; charset=utf-8\r\n\r\nmalformed"
+
+def httpInternal : run Bytes :=
+  b"HTTP/1.1 500 Internal Server Error\r\nConnection: close\r\nContent-Length: 8\r\nContent-Type: text/plain; charset=utf-8\r\n\r\ninternal"
+
+def render-empty-keep : evidence
+  {httpRender (toU64 200) b"OK" b"Content-Type: text/plain; charset=utf-8\r\n" b"" (toU64 0)
+    ≡ b"HTTP/1.1 200 OK\r\nConnection: keep-alive\r\nContent-Length: 0\r\nContent-Type: text/plain; charset=utf-8\r\n\r\n"
     : Bytes} := refl
 
-def render-health-close : evidence
-  {httpRender (toU64 0) (toU64 0) (toU64 0) (toU64 1) b""
-    ≡ b"HTTP/1.1 200 OK\r\nConnection: close\r\nContent-Length: 2\r\nContent-Type: text/plain; charset=utf-8\r\n\r\nok"
+def render-empty-close : evidence
+  {httpRender (toU64 200) b"OK" b"" b"" (toU64 1)
+    ≡ b"HTTP/1.1 200 OK\r\nConnection: close\r\nContent-Length: 0\r\n\r\n"
+    : Bytes} := refl
+
+def render-204 : evidence
+  {httpRender (toU64 204) b"No Content" b"" b"" (toU64 0)
+    ≡ b"HTTP/1.1 204 No Content\r\nConnection: keep-alive\r\nContent-Length: 0\r\n\r\n"
     : Bytes} := refl
 
 def render-malformed : evidence
-  {httpRender (toU64 2) (toU64 7) (toU64 6) (toU64 1) b""
+  {httpMalformed
     ≡ b"HTTP/1.1 400 Bad Request\r\nConnection: close\r\nContent-Length: 9\r\nContent-Type: text/plain; charset=utf-8\r\n\r\nmalformed"
     : Bytes} := refl
 
-def render-unauthorized : evidence
-  {httpRender (toU64 3) (toU64 4) (toU64 6) (toU64 0) b""
-    ≡ b"HTTP/1.1 401 Unauthorized\r\nConnection: keep-alive\r\nContent-Length: 14\r\nContent-Type: text/plain; charset=utf-8\r\n\r\nmissing-bearer"
-    : Bytes} := refl
-
-def render-not-found : evidence
-  {httpRender (toU64 4) (toU64 1) (toU64 6) (toU64 0) b""
-    ≡ b"HTTP/1.1 404 Not Found\r\nConnection: keep-alive\r\nContent-Length: 9\r\nContent-Type: text/plain; charset=utf-8\r\n\r\nnot-found"
-    : Bytes} := refl
-
-def render-db-down : evidence
-  {httpRender (toU64 6) (toU64 11) (toU64 6) (toU64 1) b""
-    ≡ b"HTTP/1.1 503 Service Unavailable\r\nConnection: close\r\nContent-Length: 2\r\nContent-Type: text/plain; charset=utf-8\r\n\r\ndb"
-    : Bytes} := refl
-
-def render-empty-row : evidence
-  {httpRender (toU64 0) (toU64 0) (toU64 1) (toU64 0) b""
-    ≡ b"HTTP/1.1 200 OK\r\nConnection: keep-alive\r\nContent-Length: 0\r\nContent-Type: application/json; charset=utf-8\r\n\r\n"
-    : Bytes} := refl
-
-def render-code-out-of-range : evidence
-  {httpRender (toU64 7) (toU64 0) (toU64 0) (toU64 0) b""
-    ≡ b"HTTP/1.1 500 Internal Server Error\r\nConnection: keep-alive\r\nContent-Length: 2\r\nContent-Type: text/plain; charset=utf-8\r\n\r\nok"
+def render-internal : evidence
+  {httpInternal
+    ≡ b"HTTP/1.1 500 Internal Server Error\r\nConnection: close\r\nContent-Length: 8\r\nContent-Type: text/plain; charset=utf-8\r\n\r\ninternal"
     : Bytes} := refl

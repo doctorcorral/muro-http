@@ -1,0 +1,277 @@
+-- Challenge routes. The core request book does not name these paths.
+-- This book does not import request.muro, decide.muro, or std:bool.
+-- A def is a global C symbol. bool's not/and/or would collide with the
+-- connection book, and request's helpers would collide the same way.
+-- Every helper here is spelled rt. Predicates are U64: 1 yes, 0 no.
+--
+-- routeVerb: 0 GET, 1 POST, 2 other. The argument is the method.
+-- routePath: 0 /health, 1 /feed, 2 /posts, 3 /posts/:id,
+-- 4 /posts/:id/like, 5 other. The argument is the path, not the target.
+-- routeId: 0 none, 1 bad, 2 a decimal id that fits in I64.
+-- routeIdn is that number, or 0 when routeId is not 2.
+-- id-missing and id-present are store facts. They are not routes.
+
+def rtU8eq : run Π (x : U8) → Π (y : U8) → U64 :=
+  λ (x : U8) → λ (y : U8) →
+    match (eqi x y) motive (λ _ → U64)
+      | wtrue => toU64 1
+      | wfalse => toU64 0
+
+def rtU8lt : run Π (x : U8) → Π (y : U8) → U64 :=
+  λ (x : U8) → λ (y : U8) →
+    match (lti x y) motive (λ _ → U64)
+      | wtrue => toU64 1
+      | wfalse => toU64 0
+
+def rtU64eq : run Π (x : U64) → Π (y : U64) → U64 :=
+  λ (x : U64) → λ (y : U64) →
+    match (eqi x y) motive (λ _ → U64)
+      | wtrue => toU64 1
+      | wfalse => toU64 0
+
+def rtU64nil : run Π (n : U64) → U64 :=
+  λ (n : U64) → rtU64eq n (toU64 0)
+
+def rtU64lt : run Π (x : U64) → Π (y : U64) → U64 :=
+  λ (x : U64) → λ (y : U64) →
+    match (lti x y) motive (λ _ → U64)
+      | wtrue => toU64 1
+      | wfalse => toU64 0
+
+def rtNot : run Π (n : U64) → U64 :=
+  λ (n : U64) →
+    match (eqi n (toU64 0)) motive (λ _ → U64)
+      | wtrue => toU64 1
+      | wfalse => toU64 0
+
+def rtAnd : run Π (a : U64) → Π (b : U64) → U64 :=
+  λ (a : U64) → λ (b : U64) →
+    match (eqi a (toU64 0)) motive (λ _ → U64)
+      | wtrue => toU64 0
+      | wfalse =>
+          (match (eqi b (toU64 0)) motive (λ _ → U64)
+            | wtrue => toU64 0
+            | wfalse => toU64 1)
+
+def rtOr : run Π (a : U64) → Π (b : U64) → U64 :=
+  λ (a : U64) → λ (b : U64) →
+    match (eqi a (toU64 0)) motive (λ _ → U64)
+      | wtrue =>
+          (match (eqi b (toU64 0)) motive (λ _ → U64)
+            | wtrue => toU64 0
+            | wfalse => toU64 1)
+      | wfalse => toU64 1
+
+def rtByteAt : run Π (+ s : Slice) → Π (i : U64) → U8 :=
+  λ (+ s : Slice) → λ (i : U64) →
+    match (sliceGet s i) motive (λ _ → U8)
+      | wsome b => b
+      | wnone => toU8 0
+
+def rtSpanEq : run Π (+ s : Slice) → Π (+ w : Slice) → U64 :=
+  λ (+ s : Slice) → λ (+ w : Slice) →
+    match (sliceEq s w) motive (λ _ → U64)
+      | wtrue => toU64 1
+      | wfalse => toU64 0
+
+def rtByteIndex : run Π (+ s : Slice) → Π (+ rest : Slice) → U64 :=
+  λ (+ s : Slice) → λ (+ rest : Slice) →
+    subi (sliceLen s) (addi (sliceLen rest) (toU64 1))
+
+def rtLower : run Π (+ b : U8) → U8 :=
+  λ (+ b : U8) →
+    match (eqi (rtAnd (rtNot (rtU8lt b (toU8 65))) (rtNot (rtU8lt (toU8 90) b))) (toU64 1)) motive (λ _ → U8)
+      | wtrue => addi b (toU8 32)
+      | wfalse => b
+
+def rtNameStep : run Π (s : Slice) → Π (w : Slice) → Π (b : U8) → Π (r : Slice) → Π (+ acc : U64) → U64 :=
+  λ (s : Slice) → λ (w : Slice) → λ (b : U8) → λ (r : Slice) → λ (+ acc : U64) →
+    match (eqi (rtU64nil acc) (toU64 1)) motive (λ _ → U64)
+      | wtrue =>
+          (match (eqi (rtU8eq (rtLower b) (rtLower (rtByteAt w (rtByteIndex s r)))) (toU64 1)) motive (λ _ → U64)
+            | wtrue => toU64 0
+            | wfalse => toU64 1)
+      | wfalse => acc
+
+def rtNameFold : run Π (+ s : Slice) → Π (+ w : Slice) → U64 :=
+  λ (+ s : Slice) → λ (+ w : Slice) →
+    sliceFold U64 (toU64 0)
+      (λ (b : U8) → λ (r : Slice) → λ (acc : U64) → rtNameStep s w b r acc)
+      s
+
+def rtNameEq : run Π (+ s : Slice) → Π (+ w : Slice) → U64 :=
+  λ (+ s : Slice) → λ (+ w : Slice) →
+    match (eqi (rtU64eq (sliceLen s) (sliceLen w)) (toU64 1)) motive (λ _ → U64)
+      | wtrue => rtU64nil (rtNameFold s w)
+      | wfalse => toU64 0
+
+def rtIsDigit : run Π (+ b : U8) → U64 :=
+  λ (+ b : U8) →
+    rtAnd (rtNot (rtU8lt b (toU8 48))) (rtNot (rtU8lt (toU8 57) b))
+
+def rtPostsRest : run Π (+ path : Slice) → Slice :=
+  λ (+ path : Slice) →
+    slice path (toU64 7) (subi (sliceLen path) (toU64 7))
+
+def rtSlashStep : run Π (+ s : Slice) → Π (b : U8) → Π (r : Slice) → Π (+ acc : U64) → U64 :=
+  λ (+ s : Slice) → λ (b : U8) → λ (r : Slice) → λ (+ acc : U64) →
+    match (eqi (rtU64eq acc (sliceLen s)) (toU64 1)) motive (λ _ → U64)
+      | wtrue =>
+          (match (eqi (rtU8eq b (toU8 47)) (toU64 1)) motive (λ _ → U64)
+            | wtrue => rtByteIndex s r
+            | wfalse => acc)
+      | wfalse => acc
+
+def rtSlashAt : run Π (+ s : Slice) → U64 :=
+  λ (+ s : Slice) →
+    sliceFold U64 (sliceLen s)
+      (λ (b : U8) → λ (r : Slice) → λ (acc : U64) → rtSlashStep s b r acc)
+      s
+
+def rtIdSlice : run Π (+ path : Slice) → Slice :=
+  λ (+ path : Slice) →
+    slice (rtPostsRest path) (toU64 0) (rtSlashAt (rtPostsRest path))
+
+def rtLikeRest : run Π (+ path : Slice) → Slice :=
+  λ (+ path : Slice) →
+    slice (rtPostsRest path) (rtSlashAt (rtPostsRest path)) (subi (sliceLen (rtPostsRest path)) (rtSlashAt (rtPostsRest path)))
+
+def rtNoSlash : run Π (+ s : Slice) → U64 :=
+  λ (+ s : Slice) → rtU64eq (rtSlashAt s) (sliceLen s)
+
+def rtLexStep : run Π (+ s : Slice) → Π (+ b : U8) → Π (+ r : Slice) → Π (+ acc : U64) → U64 :=
+  λ (+ s : Slice) → λ (+ b : U8) → λ (+ r : Slice) → λ (+ acc : U64) →
+    match (eqi (rtU64eq acc (toU64 0)) (toU64 1)) motive (λ _ → U64)
+      | wtrue =>
+          (match (eqi (rtU8eq b (rtByteAt b"9223372036854775807" (rtByteIndex s r))) (toU64 1)) motive (λ _ → U64)
+            | wtrue => toU64 0
+            | wfalse =>
+                (match (eqi (rtU8lt b (rtByteAt b"9223372036854775807" (rtByteIndex s r))) (toU64 1)) motive (λ _ → U64)
+                  | wtrue => toU64 1
+                  | wfalse => toU64 2))
+      | wfalse => acc
+
+def rtLexFold : run Π (+ s : Slice) → U64 :=
+  λ (+ s : Slice) →
+    sliceFold U64 (toU64 0)
+      (λ (b : U8) → λ (r : Slice) → λ (acc : U64) → rtLexStep s b r acc)
+      s
+
+def rtLexLe : run Π (+ s : Slice) → U64 :=
+  λ (+ s : Slice) → rtNot (rtU64eq (rtLexFold s) (toU64 2))
+
+def rtFitsInt : run Π (+ s : Slice) → U64 :=
+  λ (+ s : Slice) →
+    match (eqi (rtU64lt (sliceLen s) (toU64 19)) (toU64 1)) motive (λ _ → U64)
+      | wtrue => toU64 1
+      | wfalse =>
+          (match (eqi (rtU64eq (sliceLen s) (toU64 19)) (toU64 1)) motive (λ _ → U64)
+            | wtrue => rtLexLe s
+            | wfalse => toU64 0)
+
+def rtAllDigits : run Π (+ s : Slice) → U64 :=
+  λ (+ s : Slice) →
+    match (eqi (rtU64eq (sliceLen s) (toU64 0)) (toU64 1)) motive (λ _ → U64)
+      | wtrue => toU64 0
+      | wfalse =>
+          sliceFold U64 (toU64 1)
+            (λ (b : U8) → λ (_r : Slice) → λ (acc : U64) → rtAnd acc (rtIsDigit b))
+            s
+
+def rtLeadingOk : run Π (+ s : Slice) → U64 :=
+  λ (+ s : Slice) →
+    rtAnd (rtIsDigit (rtByteAt s (toU64 0))) (rtU8lt (toU8 48) (rtByteAt s (toU64 0)))
+
+def rtIdOk : run Π (+ s : Slice) → U64 :=
+  λ (+ s : Slice) →
+    rtAnd (rtNot (rtU64lt (toU64 19) (sliceLen s)))
+      (rtAnd (rtNot (rtU64eq (sliceLen s) (toU64 0)))
+        (rtAnd (rtLeadingOk s)
+          (rtAnd (rtAllDigits s) (rtFitsInt s))))
+
+def rtIdNum : run Π (+ s : Slice) → I64 :=
+  λ (+ s : Slice) →
+    sliceFold I64 (toI64 0)
+      (λ (b : U8) → λ (_r : Slice) → λ (v : I64) →
+        addi (muli v (toI64 10)) (asI64 (subi b (toU8 48))))
+      s
+
+def rtPostShape : run Π (+ path : Slice) → U64 :=
+  λ (+ path : Slice) →
+    match (eqi (rtNoSlash (rtPostsRest path)) (toU64 1)) motive (λ _ → U64)
+      | wtrue => toU64 3
+      | wfalse =>
+          (match (eqi (rtSpanEq (rtLikeRest path) b"/like") (toU64 1)) motive (λ _ → U64)
+            | wtrue => toU64 4
+            | wfalse => toU64 5)
+
+def routeVerb : run Π (+ method : Slice) → U64 :=
+  λ (+ method : Slice) →
+    match (eqi (rtSpanEq method b"GET") (toU64 1)) motive (λ _ → U64)
+      | wtrue => toU64 0
+      | wfalse =>
+          (match (eqi (rtSpanEq method b"POST") (toU64 1)) motive (λ _ → U64)
+            | wtrue => toU64 1
+            | wfalse => toU64 2)
+
+def routePath : run Π (+ path : Slice) → U64 :=
+  λ (+ path : Slice) →
+    match (eqi (rtSpanEq path b"/health") (toU64 1)) motive (λ _ → U64)
+      | wtrue => toU64 0
+      | wfalse =>
+          (match (eqi (rtSpanEq path b"/feed") (toU64 1)) motive (λ _ → U64)
+            | wtrue => toU64 1
+            | wfalse =>
+                (match (eqi (rtSpanEq path b"/posts") (toU64 1)) motive (λ _ → U64)
+                  | wtrue => toU64 2
+                  | wfalse =>
+                      (match (eqi (rtAnd (rtU64lt (toU64 7) (sliceLen path)) (rtNameEq (slice path (toU64 0) (toU64 7)) b"/posts/")) (toU64 1)) motive (λ _ → U64)
+                        | wtrue => rtPostShape path
+                        | wfalse => toU64 5)))
+
+def routeId : run Π (+ path : Slice) → U64 :=
+  λ (+ path : Slice) →
+    match (eqi (rtOr (rtU64eq (routePath path) (toU64 3)) (rtU64eq (routePath path) (toU64 4))) (toU64 1)) motive (λ _ → U64)
+      | wtrue =>
+          (match (eqi (rtIdOk (rtIdSlice path)) (toU64 1)) motive (λ _ → U64)
+            | wtrue => toU64 2
+            | wfalse => toU64 1)
+      | wfalse => toU64 0
+
+def routeIdn : run Π (+ path : Slice) → I64 :=
+  λ (+ path : Slice) →
+    match (eqi (rtU64eq (routeId path) (toU64 2)) (toU64 1)) motive (λ _ → I64)
+      | wtrue => rtIdNum (rtIdSlice path)
+      | wfalse => toI64 0
+
+def route-verb-get : evidence {routeVerb b"GET" ≡ toU64 0 : U64} := refl
+
+def route-verb-post : evidence {routeVerb b"POST" ≡ toU64 1 : U64} := refl
+
+def route-verb-other : evidence {routeVerb b"PUT" ≡ toU64 2 : U64} := refl
+
+def route-health : evidence {routePath b"/health" ≡ toU64 0 : U64} := refl
+
+def route-feed : evidence {routePath b"/feed" ≡ toU64 1 : U64} := refl
+
+def route-posts : evidence {routePath b"/posts" ≡ toU64 2 : U64} := refl
+
+def route-id : evidence {routePath b"/posts/42" ≡ toU64 3 : U64} := refl
+
+def route-like : evidence {routePath b"/posts/42/like" ≡ toU64 4 : U64} := refl
+
+def route-tail : evidence {routePath b"/posts/42/likes" ≡ toU64 5 : U64} := refl
+
+def route-id-42 : evidence {routeId b"/posts/42" ≡ toU64 2 : U64} := refl
+
+def route-idn-42 : evidence {routeIdn b"/posts/42" ≡ toI64 42 : I64} := refl
+
+def route-id-zero : evidence {routeId b"/posts/0" ≡ toU64 1 : U64} := refl
+
+def route-id-abc : evidence {routeId b"/posts/abc" ≡ toU64 1 : U64} := refl
+
+def route-id-lead : evidence {routeId b"/posts/01" ≡ toU64 1 : U64} := refl
+
+def route-like-id : evidence {routeId b"/posts/42/like" ≡ toU64 2 : U64} := refl
+
+def route-health-id : evidence {routeId b"/health" ≡ toU64 0 : U64} := refl

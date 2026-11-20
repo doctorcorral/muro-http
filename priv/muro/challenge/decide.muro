@@ -1,3 +1,4 @@
+-- Finite request decision for the local challenge server.
 -- Finite request decision for the local $12 server baseline.
 -- Checked evidence is closed equations (refl). Only this run is emitted.
 -- Networking, HTTP, JSON, HMAC, and SQLite stay in the trusted C host.
@@ -362,3 +363,97 @@ def eq-like-fact-unknown : evidence
 def eq-other-verb-posts : evidence
   {decide verb-other path-posts id-none auth-ok body-ok like-none db-ok
     ≡ decided st-404 err-not-found act-error : Decision} := refl
+
+-- Tag to constructor. The names used to live on the connection book.
+-- They stay here so the challenge app and the tag pin share one map.
+-- eqi is matched directly. This book does not import std:bool, so it
+-- does not emit not/and/or and can link beside the connection book.
+def verbFrom : run Π (+ t : U64) → Verb :=
+  λ (+ t : U64) →
+    match (eqi t (toU64 0)) motive (λ _ → Verb)
+      | wtrue => verb-get
+      | wfalse =>
+          (match (eqi t (toU64 1)) motive (λ _ → Verb)
+            | wtrue => verb-post
+            | wfalse => verb-other)
+
+def pathFrom : run Π (+ t : U64) → PathShape :=
+  λ (+ t : U64) →
+    match (eqi t (toU64 0)) motive (λ _ → PathShape)
+      | wtrue => path-health
+      | wfalse =>
+          (match (eqi t (toU64 1)) motive (λ _ → PathShape)
+            | wtrue => path-feed
+            | wfalse =>
+                (match (eqi t (toU64 2)) motive (λ _ → PathShape)
+                  | wtrue => path-posts
+                  | wfalse =>
+                      (match (eqi t (toU64 3)) motive (λ _ → PathShape)
+                        | wtrue => path-post-id
+                        | wfalse =>
+                            (match (eqi t (toU64 4)) motive (λ _ → PathShape)
+                              | wtrue => path-post-like
+                              | wfalse => path-other))))
+
+def idFrom : run Π (+ t : U64) → IdClass :=
+  λ (+ t : U64) →
+    match (eqi t (toU64 0)) motive (λ _ → IdClass)
+      | wtrue => id-none
+      | wfalse =>
+          (match (eqi t (toU64 1)) motive (λ _ → IdClass)
+            | wtrue => id-bad
+            | wfalse =>
+                (match (eqi t (toU64 2)) motive (λ _ → IdClass)
+                  | wtrue => id-unknown
+                  | wfalse =>
+                      (match (eqi t (toU64 3)) motive (λ _ → IdClass)
+                        | wtrue => id-missing
+                        | wfalse => id-present)))
+
+def authFrom : run Π (+ t : U64) → AuthClass :=
+  λ (+ t : U64) →
+    match (eqi t (toU64 0)) motive (λ _ → AuthClass)
+      | wtrue => auth-absent
+      | wfalse =>
+          (match (eqi t (toU64 1)) motive (λ _ → AuthClass)
+            | wtrue => auth-bad-token
+            | wfalse =>
+                (match (eqi t (toU64 2)) motive (λ _ → AuthClass)
+                  | wtrue => auth-bad-payload
+                  | wfalse => auth-ok))
+
+def bodyFrom : run Π (+ t : U64) → BodyClass :=
+  λ (+ t : U64) →
+    match (eqi t (toU64 0)) motive (λ _ → BodyClass)
+      | wtrue => body-none
+      | wfalse =>
+          (match (eqi t (toU64 1)) motive (λ _ → BodyClass)
+            | wtrue => body-malformed
+            | wfalse =>
+                (match (eqi t (toU64 2)) motive (λ _ → BodyClass)
+                  | wtrue => body-required
+                  | wfalse =>
+                      (match (eqi t (toU64 3)) motive (λ _ → BodyClass)
+                        | wtrue => body-too-long
+                        | wfalse => body-ok)))
+
+def likeFrom : run Π (+ t : U64) → LikeFact :=
+  λ (+ t : U64) →
+    match (eqi t (toU64 0)) motive (λ _ → LikeFact)
+      | wtrue => like-none
+      | wfalse =>
+          (match (eqi t (toU64 1)) motive (λ _ → LikeFact)
+            | wtrue => like-unknown
+            | wfalse =>
+                (match (eqi t (toU64 2)) motive (λ _ → LikeFact)
+                  | wtrue => like-new
+                  | wfalse => like-again))
+
+def dbFrom : run Π (+ t : U64) → DbFact :=
+  λ (+ t : U64) →
+    match (eqi t (toU64 0)) motive (λ _ → DbFact)
+      | wtrue => db-unknown
+      | wfalse =>
+          (match (eqi t (toU64 1)) motive (λ _ → DbFact)
+            | wtrue => db-down
+            | wfalse => db-ok)

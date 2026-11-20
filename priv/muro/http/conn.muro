@@ -2,26 +2,29 @@
 --
 -- The C shim owns the socket, the buffer, and the clock. It calls step
 -- and performs the action. This book does not loop. It is the HTTP
--- image: classify, decide, a write range, keep-alive, the idle timer,
--- the half-close flag, and a pipelined offset. It is not the session
--- stepper. Protocol moves go through the stepper emitted from
--- session.muro. A run here does not name that session.
+-- image: classify, call the handler, a write range, keep-alive, the
+-- idle timer, the half-close flag, and a pipelined offset. It is not
+-- the session stepper. Protocol moves go through the stepper emitted
+-- from session.muro. A run here does not name that session.
 --
--- phase: 0 read, 1 decide, 2 write, 3 idle, 4 closed
+-- phase: 0 read, 1 handle, 2 write, 3 idle, 4 closed
 -- half:  0 open, 1 peer has shut its write (no further read)
 -- keep:  0 keep-alive, 1 close after the response
--- action: 0 none, 1 want-read, 2 write, 3 close, 4 call-decide
+-- action: 0 none, 1 want-read, 2 write, 3 close, 4 call-handler
 -- timer: 0 disarmed, 1 armed
--- Ev tag: 0 bytes, 1 eof, 2 progress, 3 done, 4 error, 5 tick, 6 db
--- A db event is n0 auth, n1 body, n2 like, n3 db, n4 id, in decide's
--- constructor order. progress stores the delta in n0.
+-- Ev tag: 0 bytes, 1 eof, 2 progress, 3 done, 4 error, 5 tick, 6 reply
+-- A reply event is the handler's answer. n0 is 1 when that answer
+-- forces Connection: close. progress stores the delta in n0.
 -- writeLen is 16 for every response. The shim owns the bytes; the
--- range is writeOff and writeLen. code, err, and act are decide's tags.
+-- range is writeOff and writeLen. Field 8 is the origin: 0 handler,
+-- 1 protocol malformed. The book chooses the 400. The shim does not.
 -- endOff is the first byte after the request. more is 1 when the
 -- buffer holds bytes past that, so the shim can re-step the tail.
 --
 -- Closed is stable: phase 4, action close, and every event returns
 -- that same state. It asks for no read and no write.
+-- The mode and action names stay mode-decide and do-decide. Phase 1
+-- is still the phase the admit map calls decide.
 import "request.muro"
 
 unboxed data Conn : Type where
@@ -71,158 +74,13 @@ def idleOf : run Π (+ endOff : U64) → Π (+ more : U64) → Conn :=
 
 def badWrite : run Π (+ fin : U64) → Conn :=
   λ (+ fin : U64) →
-    conn (toU64 2) fin (toU64 1) (toU64 0) (toU64 0) (toU64 0) (toU64 2) (toU64 0) (toU64 2) (toU64 7) (toU64 6) (toU64 0) respLen (toU64 0) (toU64 0)
-
-def verbTag : run Π (v : Verb) → U64 :=
-  λ (v : Verb) →
-    match v motive (λ _ → U64)
-      | verb-get => toU64 0
-      | verb-post => toU64 1
-      | verb-other => toU64 2
-
-def pathTag : run Π (p : PathShape) → U64 :=
-  λ (p : PathShape) →
-    match p motive (λ _ → U64)
-      | path-health => toU64 0
-      | path-feed => toU64 1
-      | path-posts => toU64 2
-      | path-post-id => toU64 3
-      | path-post-like => toU64 4
-      | path-other => toU64 5
-
-def idTag : run Π (i : IdClass) → U64 :=
-  λ (i : IdClass) →
-    match i motive (λ _ → U64)
-      | id-none => toU64 0
-      | id-bad => toU64 1
-      | id-unknown => toU64 2
-      | id-missing => toU64 3
-      | id-present => toU64 4
+    conn (toU64 2) fin (toU64 1) (toU64 0) (toU64 0) (toU64 0) (toU64 2) (toU64 0) (toU64 1) (toU64 0) (toU64 0) (toU64 0) respLen (toU64 0) (toU64 0)
 
 def keepTag : run Π (k : Keep) → U64 :=
   λ (k : Keep) →
     match k motive (λ _ → U64)
       | keep-yes => toU64 0
       | keep-no => toU64 1
-
-def codeTag : run Π (c : StatusCode) → U64 :=
-  λ (c : StatusCode) →
-    match c motive (λ _ → U64)
-      | st-200 => toU64 0
-      | st-201 => toU64 1
-      | st-400 => toU64 2
-      | st-401 => toU64 3
-      | st-404 => toU64 4
-      | st-500 => toU64 5
-      | st-503 => toU64 6
-      | st-observe => toU64 7
-
-def errTag : run Π (e : ErrKind) → U64 :=
-  λ (e : ErrKind) →
-    match e motive (λ _ → U64)
-      | err-none => toU64 0
-      | err-not-found => toU64 1
-      | err-invalid-id => toU64 2
-      | err-post-missing => toU64 3
-      | err-missing-bearer => toU64 4
-      | err-bad-token => toU64 5
-      | err-bad-payload => toU64 6
-      | err-malformed => toU64 7
-      | err-body-required => toU64 8
-      | err-body-long => toU64 9
-      | err-internal => toU64 10
-      | err-db => toU64 11
-      | err-observe => toU64 12
-
-def verbFrom : run Π (+ t : U64) → Verb :=
-  λ (+ t : U64) →
-    match (u64eq t (toU64 0)) motive (λ _ → Verb)
-      | true => verb-get
-      | false =>
-          (match (u64eq t (toU64 1)) motive (λ _ → Verb)
-            | true => verb-post
-            | false => verb-other)
-
-def pathFrom : run Π (+ t : U64) → PathShape :=
-  λ (+ t : U64) →
-    match (u64eq t (toU64 0)) motive (λ _ → PathShape)
-      | true => path-health
-      | false =>
-          (match (u64eq t (toU64 1)) motive (λ _ → PathShape)
-            | true => path-feed
-            | false =>
-                (match (u64eq t (toU64 2)) motive (λ _ → PathShape)
-                  | true => path-posts
-                  | false =>
-                      (match (u64eq t (toU64 3)) motive (λ _ → PathShape)
-                        | true => path-post-id
-                        | false =>
-                            (match (u64eq t (toU64 4)) motive (λ _ → PathShape)
-                              | true => path-post-like
-                              | false => path-other))))
-
-def idFrom : run Π (+ t : U64) → IdClass :=
-  λ (+ t : U64) →
-    match (u64eq t (toU64 0)) motive (λ _ → IdClass)
-      | true => id-none
-      | false =>
-          (match (u64eq t (toU64 1)) motive (λ _ → IdClass)
-            | true => id-bad
-            | false =>
-                (match (u64eq t (toU64 2)) motive (λ _ → IdClass)
-                  | true => id-unknown
-                  | false =>
-                      (match (u64eq t (toU64 3)) motive (λ _ → IdClass)
-                        | true => id-missing
-                        | false => id-present)))
-
-def authFrom : run Π (+ t : U64) → AuthClass :=
-  λ (+ t : U64) →
-    match (u64eq t (toU64 0)) motive (λ _ → AuthClass)
-      | true => auth-absent
-      | false =>
-          (match (u64eq t (toU64 1)) motive (λ _ → AuthClass)
-            | true => auth-bad-token
-            | false =>
-                (match (u64eq t (toU64 2)) motive (λ _ → AuthClass)
-                  | true => auth-bad-payload
-                  | false => auth-ok))
-
-def bodyFrom : run Π (+ t : U64) → BodyClass :=
-  λ (+ t : U64) →
-    match (u64eq t (toU64 0)) motive (λ _ → BodyClass)
-      | true => body-none
-      | false =>
-          (match (u64eq t (toU64 1)) motive (λ _ → BodyClass)
-            | true => body-malformed
-            | false =>
-                (match (u64eq t (toU64 2)) motive (λ _ → BodyClass)
-                  | true => body-required
-                  | false =>
-                      (match (u64eq t (toU64 3)) motive (λ _ → BodyClass)
-                        | true => body-too-long
-                        | false => body-ok)))
-
-def likeFrom : run Π (+ t : U64) → LikeFact :=
-  λ (+ t : U64) →
-    match (u64eq t (toU64 0)) motive (λ _ → LikeFact)
-      | true => like-none
-      | false =>
-          (match (u64eq t (toU64 1)) motive (λ _ → LikeFact)
-            | true => like-unknown
-            | false =>
-                (match (u64eq t (toU64 2)) motive (λ _ → LikeFact)
-                  | true => like-new
-                  | false => like-again))
-
-def dbFrom : run Π (+ t : U64) → DbFact :=
-  λ (+ t : U64) →
-    match (u64eq t (toU64 0)) motive (λ _ → DbFact)
-      | true => db-unknown
-      | false =>
-          (match (u64eq t (toU64 1)) motive (λ _ → DbFact)
-            | true => db-down
-            | false => db-ok)
 
 def keepBit : run Π (+ fin : U64) → Π (k : Keep) → U64 :=
   λ (+ fin : U64) → λ (k : Keep) →
@@ -239,16 +97,16 @@ def moreAt : run Π (+ buf : Slice) → U64 :=
       | true => toU64 1
       | false => toU64 0
 
-def decideWait : run Π (+ fin : U64) → Π (+ buf : Slice) → Π (verb : Verb) → Π (path : PathShape) → Π (idc : IdClass) → Π (k : Keep) → Conn :=
-  λ (+ fin : U64) → λ (+ buf : Slice) → λ (verb : Verb) → λ (path : PathShape) → λ (idc : IdClass) → λ (k : Keep) →
-    conn (toU64 1) fin (keepBit fin k) (verbTag verb) (pathTag path) (idTag idc) (toU64 4) (toU64 0) (toU64 0) (toU64 0) (toU64 0) (toU64 0) (toU64 0) (endAt buf) (moreAt buf)
+def handleWait : run Π (+ fin : U64) → Π (+ buf : Slice) → Π (k : Keep) → Conn :=
+  λ (+ fin : U64) → λ (+ buf : Slice) → λ (k : Keep) →
+    conn (toU64 1) fin (keepBit fin k) (toU64 0) (toU64 0) (toU64 0) (toU64 4) (toU64 0) (toU64 0) (toU64 0) (toU64 0) (toU64 0) (toU64 0) (endAt buf) (moreAt buf)
 
 def onClass : run Π (+ fin : U64) → Π (+ buf : Slice) → Π (c : Classified) → Conn :=
   λ (+ fin : U64) → λ (+ buf : Slice) → λ (c : Classified) →
     match c motive (λ _ → Conn)
-      | classified st verb path idc keep _mark _body =>
+      | classified st keep =>
           (match st motive (λ _ → Conn)
-            | status-ok => decideWait fin buf verb path idc keep
+            | status-ok => handleWait fin buf keep
             | status-malformed => badWrite fin
             | status-need-more =>
                 (match (u64eq fin (toU64 1)) motive (λ _ → Conn)
@@ -280,27 +138,11 @@ def finish : run Π (+ half : U64) → Π (+ keep : U64) → Π (+ endOff : U64)
       | true => shut
       | false => idleOf endOff more
 
-def writeOf : run Π (+ half : U64) → Π (+ keep : U64) → Π (+ verb : U64) → Π (+ path : U64) → Π (+ idc : U64) → Π (+ endOff : U64) → Π (+ more : U64) → Π (code : StatusCode) → Π (err : ErrKind) → Π (+ actn : U64) → Conn :=
-  λ (+ half : U64) → λ (+ keep : U64) → λ (+ verb : U64) → λ (+ path : U64) → λ (+ idc : U64) → λ (+ endOff : U64) → λ (+ more : U64) → λ (code : StatusCode) → λ (err : ErrKind) → λ (+ actn : U64) →
-    conn (toU64 2) half keep verb path idc (toU64 2) (toU64 0) (codeTag code) (errTag err) actn (toU64 0) respLen endOff more
-
-def observeOf : run Π (+ half : U64) → Π (+ keep : U64) → Π (+ verb : U64) → Π (+ path : U64) → Π (+ idc : U64) → Π (+ endOff : U64) → Π (+ more : U64) → Π (code : StatusCode) → Π (err : ErrKind) → Conn :=
-  λ (+ half : U64) → λ (+ keep : U64) → λ (+ verb : U64) → λ (+ path : U64) → λ (+ idc : U64) → λ (+ endOff : U64) → λ (+ more : U64) → λ (code : StatusCode) → λ (err : ErrKind) →
-    conn (toU64 1) half keep verb path idc (toU64 4) (toU64 0) (codeTag code) (errTag err) (toU64 7) (toU64 0) (toU64 0) endOff more
-
-def afterDecide : run Π (+ half : U64) → Π (+ keep : U64) → Π (+ verb : U64) → Π (+ path : U64) → Π (+ idc : U64) → Π (+ endOff : U64) → Π (+ more : U64) → Π (d : Decision) → Conn :=
-  λ (+ half : U64) → λ (+ keep : U64) → λ (+ verb : U64) → λ (+ path : U64) → λ (+ idc : U64) → λ (+ endOff : U64) → λ (+ more : U64) → λ (d : Decision) →
-    match d motive (λ _ → Conn)
-      | decided code err act =>
-          (match act motive (λ _ → Conn)
-            | act-health => writeOf half keep verb path idc endOff more code err (toU64 0)
-            | act-feed => writeOf half keep verb path idc endOff more code err (toU64 1)
-            | act-read => writeOf half keep verb path idc endOff more code err (toU64 2)
-            | act-create => writeOf half keep verb path idc endOff more code err (toU64 3)
-            | act-like-new => writeOf half keep verb path idc endOff more code err (toU64 4)
-            | act-like-again => writeOf half keep verb path idc endOff more code err (toU64 5)
-            | act-error => writeOf half keep verb path idc endOff more code err (toU64 6)
-            | act-observe => observeOf half keep verb path idc endOff more code err)
+def forceKeep : run Π (+ half : U64) → Π (+ keep : U64) → Π (+ bit : U64) → U64 :=
+  λ (+ half : U64) → λ (+ keep : U64) → λ (+ bit : U64) →
+    match (or (u64eq half (toU64 1)) (u64eq bit (toU64 1))) motive (λ _ → U64)
+      | true => toU64 1
+      | false => keep
 
 def onRead : run Π (+ phase : U64) → Π (+ half : U64) → Π (+ keep : U64) → Π (+ verb : U64) → Π (+ path : U64) → Π (+ idc : U64) → Π (+ action : U64) → Π (+ timer : U64) → Π (+ code : U64) → Π (+ err : U64) → Π (+ act : U64) → Π (+ off : U64) → Π (+ len : U64) → Π (+ endOff : U64) → Π (+ more : U64) → Π (+ tag : U64) → Π (+ buf : Slice) → Conn :=
   λ (+ phase : U64) → λ (+ half : U64) → λ (+ keep : U64) → λ (+ verb : U64) → λ (+ path : U64) → λ (+ idc : U64) → λ (+ action : U64) → λ (+ timer : U64) → λ (+ code : U64) → λ (+ err : U64) → λ (+ act : U64) → λ (+ off : U64) → λ (+ len : U64) → λ (+ endOff : U64) → λ (+ more : U64) → λ (+ tag : U64) → λ (+ buf : Slice) →
@@ -314,12 +156,14 @@ def onRead : run Π (+ phase : U64) → Π (+ half : U64) → Π (+ keep : U64) 
                   | true => shut
                   | false => hold phase half keep verb path idc action timer code err act off len endOff more))
 
-def onDecide : run Π (+ phase : U64) → Π (+ half : U64) → Π (+ keep : U64) → Π (+ verb : U64) → Π (+ path : U64) → Π (+ idc : U64) → Π (+ action : U64) → Π (+ timer : U64) → Π (+ code : U64) → Π (+ err : U64) → Π (+ act : U64) → Π (+ off : U64) → Π (+ len : U64) → Π (+ endOff : U64) → Π (+ more : U64) → Π (+ tag : U64) → Π (+ n0 : U64) → Π (+ n1 : U64) → Π (+ n2 : U64) → Π (+ n3 : U64) → Π (+ n4 : U64) → Conn :=
-  λ (+ phase : U64) → λ (+ half : U64) → λ (+ keep : U64) → λ (+ verb : U64) → λ (+ path : U64) → λ (+ idc : U64) → λ (+ action : U64) → λ (+ timer : U64) → λ (+ code : U64) → λ (+ err : U64) → λ (+ act : U64) → λ (+ off : U64) → λ (+ len : U64) → λ (+ endOff : U64) → λ (+ more : U64) → λ (+ tag : U64) → λ (+ n0 : U64) → λ (+ n1 : U64) → λ (+ n2 : U64) → λ (+ n3 : U64) → λ (+ n4 : U64) →
+-- A reply leaves handle for write. Origin stays 0: the handler chose
+-- the bytes. n0 1, or a half-close, forces keep. EOF stays in handle
+-- so the handler still runs, and the response closes.
+def onHandle : run Π (+ phase : U64) → Π (+ half : U64) → Π (+ keep : U64) → Π (+ verb : U64) → Π (+ path : U64) → Π (+ idc : U64) → Π (+ action : U64) → Π (+ timer : U64) → Π (+ code : U64) → Π (+ err : U64) → Π (+ act : U64) → Π (+ off : U64) → Π (+ len : U64) → Π (+ endOff : U64) → Π (+ more : U64) → Π (+ tag : U64) → Π (+ n0 : U64) → Conn :=
+  λ (+ phase : U64) → λ (+ half : U64) → λ (+ keep : U64) → λ (+ verb : U64) → λ (+ path : U64) → λ (+ idc : U64) → λ (+ action : U64) → λ (+ timer : U64) → λ (+ code : U64) → λ (+ err : U64) → λ (+ act : U64) → λ (+ off : U64) → λ (+ len : U64) → λ (+ endOff : U64) → λ (+ more : U64) → λ (+ tag : U64) → λ (+ n0 : U64) →
     match (u64eq tag (toU64 6)) motive (λ _ → Conn)
       | true =>
-          afterDecide half keep verb path n4 endOff more
-            (decide (verbFrom verb) (pathFrom path) (idFrom n4) (authFrom n0) (bodyFrom n1) (likeFrom n2) (dbFrom n3))
+          conn (toU64 2) half (forceKeep half keep n0) (toU64 0) (toU64 0) (toU64 0) (toU64 2) (toU64 0) (toU64 0) (toU64 0) (toU64 0) (toU64 0) respLen endOff more
       | false =>
           (match (u64eq tag (toU64 1)) motive (λ _ → Conn)
             | true => conn phase (toU64 1) (toU64 1) verb path idc (toU64 4) (toU64 0) code err act off len endOff more
@@ -361,7 +205,7 @@ def stepAt : run Π (+ phase : U64) → Π (+ half : U64) → Π (+ keep : U64) 
             | true => onRead phase half keep verb path idc action timer code err act off len endOff more tag buf
             | false =>
                 (match (u64eq phase (toU64 1)) motive (λ _ → Conn)
-                  | true => onDecide phase half keep verb path idc action timer code err act off len endOff more tag n0 n1 n2 n3 n4
+                  | true => onHandle phase half keep verb path idc action timer code err act off len endOff more tag n0
                   | false =>
                       (match (u64eq phase (toU64 2)) motive (λ _ → Conn)
                         | true => onWrite phase half keep verb path idc action timer code err act off len endOff more tag n0
@@ -459,15 +303,11 @@ def evError : run Ev :=
 def evTick : run Ev :=
   ev (toU64 5) b"" (toU64 0) (toU64 0) (toU64 0) (toU64 0) (toU64 0)
 
-def evDb : run Π (+ auth : U64) → Π (+ body : U64) → Π (+ like : U64) → Π (+ db : U64) → Π (+ idc : U64) → Ev :=
-  λ (+ auth : U64) → λ (+ body : U64) → λ (+ like : U64) → λ (+ db : U64) → λ (+ idc : U64) →
-    ev (toU64 6) b"" auth body like db idc
+def evReply : run Π (+ closeAfter : U64) → Ev :=
+  λ (+ closeAfter : U64) → ev (toU64 6) b"" closeAfter (toU64 0) (toU64 0) (toU64 0) (toU64 0)
 
-def evDbOk : run Ev :=
-  evDb (toU64 0) (toU64 0) (toU64 0) (toU64 2) (toU64 0)
-
-def evDbAsk : run Ev :=
-  evDb (toU64 0) (toU64 0) (toU64 0) (toU64 0) (toU64 0)
+def evReplyOk : run Ev :=
+  evReply (toU64 0)
 
 -- The equations below call these nullary runs. An equation whose
 -- argument is the unboxed state is proved here and skipped by ExUnit,
@@ -475,16 +315,16 @@ def evDbAsk : run Ev :=
 -- declared data, so the host suite can run it.
 
 def healthReq : run Slice :=
-  b"GET /health HTTP/1.1\r\n\r\n"
+  b"GET /health HTTP/1.1\r\nHost: t\r\n\r\n"
 
 def feedReq : run Slice :=
-  b"GET /feed HTTP/1.1\r\n\r\n"
+  b"GET /feed HTTP/1.1\r\nHost: t\r\n\r\n"
 
 def partialReq : run Slice :=
   b"GET /health HTTP/1.1\r\n"
 
 def closeReq : run Slice :=
-  b"GET /health HTTP/1.1\r\nConnection: close\r\n\r\n"
+  b"GET /health HTTP/1.1\r\nHost: t\r\nConnection: close\r\n\r\n"
 
 def http10Req : run Slice :=
   b"GET /health HTTP/1.0\r\n\r\n"
@@ -493,7 +333,7 @@ def badReq : run Slice :=
   b"GET/feed HTTP/1.1\r\n\r\n"
 
 def pipeReq : run Slice :=
-  b"GET /health HTTP/1.1\r\n\r\nGET /feed HTTP/1.1\r\n\r\n"
+  b"GET /health HTTP/1.1\r\nHost: t\r\n\r\nGET /feed HTTP/1.1\r\nHost: t\r\n\r\n"
 
 def sawBegin : run Mode :=
   mode begin
@@ -522,17 +362,14 @@ def sawHealthDo : run Do :=
 def sawHealthOne : run Flag :=
   moreFlag (step begin (evBytes healthReq))
 
-def sawAsk : run Mode :=
-  mode (step (step begin (evBytes healthReq)) evDbAsk)
-
 def sawWrite : run Mode :=
-  mode (step (step begin (evBytes healthReq)) evDbOk)
+  mode (step (step begin (evBytes healthReq)) evReplyOk)
 
 def sawWriteDo : run Do :=
-  actionOf (step (step begin (evBytes healthReq)) evDbOk)
+  actionOf (step (step begin (evBytes healthReq)) evReplyOk)
 
 def healthWritten : run Conn :=
-  step (step begin (evBytes healthReq)) evDbOk
+  step (step begin (evBytes healthReq)) evReplyOk
 
 def sawProgress : run Mode :=
   mode (step healthWritten (evProgress (toU64 8)))
@@ -554,10 +391,10 @@ def sawSecond : run Mode :=
   mode (step healthIdle (evBytes feedReq))
 
 def sawClose : run Mode :=
-  mode (step (step (step begin (evBytes closeReq)) evDbOk) evDone)
+  mode (step (step (step begin (evBytes closeReq)) evReplyOk) evDone)
 
 def sawHttp10 : run Mode :=
-  mode (step (step (step begin (evBytes http10Req)) evDbOk) evDone)
+  mode (step (step (step begin (evBytes http10Req)) evReplyOk) evDone)
 
 def sawBad : run Mode :=
   mode (step begin (evBytes badReq))
@@ -572,10 +409,10 @@ def sawHalf : run Mode :=
   mode (step (step begin (evBytes healthReq)) (evEof b""))
 
 def sawHalfWrite : run Mode :=
-  mode (step (step (step begin (evBytes healthReq)) (evEof b"")) evDbOk)
+  mode (step (step (step begin (evBytes healthReq)) (evEof b"")) evReplyOk)
 
 def sawHalfDone : run Mode :=
-  mode (step (step (step (step begin (evBytes healthReq)) (evEof b"")) evDbOk) evDone)
+  mode (step (step (step (step begin (evBytes healthReq)) (evEof b"")) evReplyOk) evDone)
 
 def sawFinReq : run Mode :=
   mode (step begin (evEof healthReq))
@@ -615,8 +452,6 @@ def health-decide : evidence {sawHealth ≡ mode-decide : Mode} := refl
 def health-calls : evidence {sawHealthDo ≡ do-decide : Do} := refl
 
 def health-one : evidence {sawHealthOne ≡ flag-no : Flag} := refl
-
-def health-ask : evidence {sawAsk ≡ mode-decide : Mode} := refl
 
 def health-write : evidence {sawWrite ≡ mode-write : Mode} := refl
 

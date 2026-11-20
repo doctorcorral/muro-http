@@ -92,12 +92,11 @@ static Proto *open_proto(const char *name) {
   return p;
 }
 
-/* Probe, then reset. classify and decide run here only so proto_admit
-   can see the status, reply, and observe tags. Those calls allocate.
-   The tags are plain integers copied out before muro_http_reset, which
-   drops the probe. step classifies or decides again, and that second
-   call is what the printed count measures. A control step stays 0, a
-   classify stays 1, and a decide stays 1. */
+/* Probe, then reset. classify runs here only so proto_admit can see
+   the status tag. The tag is a plain integer copied out before
+   muro_http_reset, which drops the probe. step classifies again, and
+   that second call is what the printed count measures. A control step
+   stays 0, a classify stays 1, and a handler reply stays 0. */
 static unsigned long take(const char *name, Conn *st, Proto *proto, Ev ev) {
   unsigned long built;
   unsigned long n;
@@ -122,17 +121,13 @@ static unsigned long take(const char *name, Conn *st, Proto *proto, Ev ev) {
     Classified *c = classify(buf);
     status = c->muro__as.classified.muro__f_0->muro__field_tag;
   }
+  /* Tag 6 is the handler reply. It is reply-ok. The HTTP status is
+     not a protocol refusal. reply -1 would offer no reply at all. */
   if (proto_live(proto) && !proto_done(proto) && phase == PH_DECIDE && tag == 6) {
-    Decision *d = decide(verbFrom(field(*st, 3)), pathFrom(field(*st, 4)),
-                        idFrom(ev.muro__as.ev.muro__f_6), authFrom(ev.muro__as.ev.muro__f_2),
-                        bodyFrom(ev.muro__as.ev.muro__f_3), likeFrom(ev.muro__as.ev.muro__f_4),
-                        dbFrom(ev.muro__as.ev.muro__f_5));
-    int act = d->muro__as.decided.muro__f_2->muro__field_tag;
-    int code = d->muro__as.decided.muro__f_0->muro__field_tag;
-    if (act == 7) observe = 1;
-    else reply = code <= 1 ? 0 : 1;
+    reply = 0;
+    observe = 0;
   }
-  if (!proto_admit(proto, phase, tag, buf.n, status, reply, observe, close_after)) {
+  if (proto_admit(proto, phase, tag, buf.n, status, reply, observe, close_after) != 1) {
     proto_where(proto, why, sizeof why);
     fprintf(stderr, "FAIL %s: protocol refused, at %s\n", name, why);
     failures += 1;
@@ -151,13 +146,14 @@ static unsigned long take(const char *name, Conn *st, Proto *proto, Ev ev) {
   return n;
 }
 
-static const char *health = "GET /health HTTP/1.1\r\n\r\n";
-static const char *feed = "GET /feed HTTP/1.1\r\n\r\n";
+static const char *health = "GET /health HTTP/1.1\r\nHost: t\r\n\r\n";
+static const char *feed = "GET /feed HTTP/1.1\r\nHost: t\r\n\r\n";
 static const char *partial = "GET /health HTTP/1.1\r\n";
-static const char *close_req = "GET /health HTTP/1.1\r\nConnection: close\r\n\r\n";
+static const char *close_req = "GET /health HTTP/1.1\r\nHost: t\r\nConnection: close\r\n\r\n";
 static const char *http10 = "GET /health HTTP/1.0\r\n\r\n";
 static const char *bad_req = "GET/feed HTTP/1.1\r\n\r\n";
-static const char *piped = "GET /health HTTP/1.1\r\n\r\nGET /feed HTTP/1.1\r\n\r\n";
+static const char *piped =
+    "GET /health HTTP/1.1\r\nHost: t\r\n\r\nGET /feed HTTP/1.1\r\nHost: t\r\n\r\n";
 
 static void check_begin(void) {
   unsigned long n;
@@ -222,14 +218,10 @@ static void check_keepalive(void) {
   want("health", st, 3, 0);
   want("health", st, 4, 0);
   want("health", st, 6, ACT_DECIDE);
-  want("health", st, 13, 24);
+  want("health", st, 13, 33);
   want("health", st, 14, 0);
-  n = take("ask-allocs", &st, proto, evDbAsk());
-  if (n != 1) bad("ask", "allocs");
-  want("ask", st, 0, PH_DECIDE);
-  want("ask", st, 10, 7);
-  n = take("db-allocs", &st, proto, evDbOk());
-  if (n != 1) bad("db", "allocs");
+  n = take("reply-allocs", &st, proto, evReply(0));
+  if (n != 0) bad("reply", "allocs");
   want("db", st, 0, PH_WRITE);
   want("db", st, 6, ACT_WRITE);
   want("db", st, 8, 0);
@@ -252,10 +244,10 @@ static void check_keepalive(void) {
   n = take("second-allocs", &st, proto, evBytes(of(feed)));
   if (n != 1) bad("second", "allocs");
   want("second", st, 0, PH_DECIDE);
-  want("second", st, 4, 1);
-  n = take("second-db-allocs", &st, proto, evDbOk());
-  if (n != 1) bad("second-db", "allocs");
-  want("second-db", st, 10, 1);
+  want("second", st, 4, 0);
+  n = take("second-reply-allocs", &st, proto, evReply(0));
+  if (n != 0) bad("second-reply", "allocs");
+  want("second-reply", st, 10, 0);
   n = take("second-idle-allocs", &st, proto, evDone());
   if (n != 0) bad("second-idle", "allocs");
   want("second-idle", st, 0, PH_IDLE);
@@ -281,8 +273,8 @@ static void check_close_header(const char *name, const char *raw) {
   want(name, st, 2, 1);
   if (proto_done(proto)) bad(name, "session ended before the reply");
   snprintf(label, sizeof label, "%s-db", name);
-  n = take(label, &st, proto, evDbOk());
-  if (n != 1) bad(name, "db allocs");
+  n = take(label, &st, proto, evReply(0));
+  if (n != 0) bad(name, "reply allocs");
   snprintf(label, sizeof label, "%s-done", name);
   n = take(label, &st, proto, evDone());
   if (n != 0) bad(name, "done allocs");
@@ -302,9 +294,9 @@ static void check_malformed(void) {
   want("malformed", st, 0, PH_WRITE);
   want("malformed", st, 2, 1);
   want("malformed", st, 6, ACT_WRITE);
-  want("malformed", st, 8, 2);
-  want("malformed", st, 9, 7);
-  want("malformed", st, 10, 6);
+  want("malformed", st, 8, 1);
+  want("malformed", st, 9, 0);
+  want("malformed", st, 10, 0);
   if (!proto_done(proto)) bad("malformed", "session open");
   n = take("malformed-done-allocs", &st, proto, evDone());
   if (n != 0) bad("malformed-done", "allocs");
@@ -333,8 +325,8 @@ static void check_half(void) {
   want("half-eof", st, 2, 1);
   want("half-eof", st, 6, ACT_DECIDE);
   if (proto_done(proto)) bad("half-eof", "session ended on a host flag");
-  n = take("half-db-allocs", &st, proto, evDbOk());
-  if (n != 1) bad("half-db", "allocs");
+  n = take("half-reply-allocs", &st, proto, evReply(0));
+  if (n != 0) bad("half-reply", "allocs");
   want("half-db", st, 0, PH_WRITE);
   want("half-db", st, 1, 1);
   n = take("half-progress-allocs", &st, proto, evProgress(8));
@@ -361,7 +353,7 @@ static void check_half(void) {
   if (n != 1) bad("trunc", "allocs");
   want("trunc", fin, 0, PH_WRITE);
   want("trunc", fin, 1, 1);
-  want("trunc", fin, 8, 2);
+  want("trunc", fin, 8, 1);
   if (!proto_done(proto)) bad("trunc", "session open");
   proto_free(proto);
 }
@@ -375,20 +367,20 @@ static void check_pipe(void) {
   if (n != 1) bad("pipe", "allocs");
   want("pipe", st, 0, PH_DECIDE);
   want("pipe", st, 4, 0);
-  want("pipe", st, 13, 24);
+  want("pipe", st, 13, 33);
   want("pipe", st, 14, 1);
-  n = take("pipe-db-allocs", &st, proto, evDbOk());
-  if (n != 1) bad("pipe-db", "allocs");
+  n = take("pipe-reply-allocs", &st, proto, evReply(0));
+  if (n != 0) bad("pipe-reply", "allocs");
   want("pipe-db", st, 14, 1);
   n = take("pipe-idle-allocs", &st, proto, evDone());
   if (n != 0) bad("pipe-idle", "allocs");
   want("pipe-idle", st, 0, PH_IDLE);
   want("pipe-idle", st, 14, 1);
   if (proto_done(proto)) bad("pipe-idle", "session ended on keep");
-  n = take("pipe-tail-allocs", &st, proto, evBytes(of(piped + 24)));
+  n = take("pipe-tail-allocs", &st, proto, evBytes(of(piped + 33)));
   if (n != 1) bad("pipe-tail", "allocs");
   want("pipe-tail", st, 0, PH_DECIDE);
-  want("pipe-tail", st, 4, 1);
+  want("pipe-tail", st, 4, 0);
   want("pipe-tail", st, 14, 0);
   if (proto_done(proto)) bad("pipe-tail", "session ended before the reply");
   proto_free(proto);
@@ -420,7 +412,7 @@ static void check_closed(void) {
   if (n != 0 || !same(st, again)) bad("closed-error", "state");
   n = take("closed-tick-allocs", &st, proto, evTick());
   if (n != 0 || !same(st, again)) bad("closed-tick", "state");
-  n = take("closed-db-allocs", &st, proto, evDbOk());
+  n = take("closed-reply-allocs", &st, proto, evReply(0));
   if (n != 0 || !same(st, again)) bad("closed-db", "state");
   want("closed", st, 0, PH_CLOSED);
   want("closed", st, 6, ACT_CLOSE);
@@ -433,7 +425,7 @@ static void check_write_error(void) {
   unsigned long n;
   if (!proto) return;
   (void)take("werr-bytes-allocs", &st, proto, evBytes(of(health)));
-  (void)take("werr-db-allocs", &st, proto, evDbOk());
+  (void)take("werr-reply-allocs", &st, proto, evReply(0));
   n = take("werr-allocs", &st, proto, evError());
   if (n != 0) bad("werr", "allocs");
   want("werr", st, 0, PH_CLOSED);
@@ -447,7 +439,7 @@ static void check_ignore_tick_while_writing(void) {
   unsigned long n;
   if (!proto) return;
   (void)take("wtick-bytes-allocs", &st, proto, evBytes(of(health)));
-  (void)take("wtick-db-allocs", &st, proto, evDbOk());
+  (void)take("wtick-reply-allocs", &st, proto, evReply(0));
   n = take("wtick-allocs", &st, proto, evTick());
   if (n != 0) bad("wtick", "allocs");
   want("wtick", st, 0, PH_WRITE);

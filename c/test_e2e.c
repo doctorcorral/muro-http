@@ -23,6 +23,9 @@ static const char *bin_path = "c/muro-httpd";
 static const char *srv_db = ":memory:";
 static const char *srv_jwt = NULL;
 static int pass_db = 1;
+static const char *srv_bind = NULL;
+static const char *srv_bind_env = NULL;
+static const char *dial_addr = "127.0.0.1";
 static const char *env_sqlite = NULL;
 static const char *env_muro_db = NULL;
 static const char *env_fail_admit = NULL;
@@ -33,9 +36,15 @@ static void fail(const char *name, const char *what) {
   failures += 1;
 }
 
-static int parse_port(const char *line) {
+static int parse_port(const char *line, const char *host) {
+  char prefix[80];
   int port = -1;
-  if (sscanf(line, "listening 127.0.0.1 %d", &port) != 1) return -1;
+  int n;
+  if (!host || !host[0]) host = "127.0.0.1";
+  n = snprintf(prefix, sizeof prefix, "listening %s ", host);
+  if (n < 0 || (size_t)n >= sizeof prefix) return -1;
+  if (strncmp(line, prefix, (size_t)n) != 0) return -1;
+  if (sscanf(line + n, "%d", &port) != 1) return -1;
   if (port <= 0 || port > 65535) return -1;
   return port;
 }
@@ -49,10 +58,15 @@ static pid_t start_server(int idle_ms, int max_conn, int *port, const char *writ
   char buf[128];
   size_t n = 0;
   int use_db = pass_db;
+  const char *bind = srv_bind;
+  const char *bind_env = srv_bind_env;
+  const char *banner_host = (bind && bind[0]) ? bind : "127.0.0.1";
   const char *sqlite_env = env_sqlite;
   const char *muro_env = env_muro_db;
   const char *fail_admit = env_fail_admit;
   pass_db = 1;
+  srv_bind = NULL;
+  srv_bind_env = NULL;
   env_sqlite = NULL;
   env_muro_db = NULL;
   env_fail_admit = NULL;
@@ -65,7 +79,7 @@ static pid_t start_server(int idle_ms, int max_conn, int *port, const char *writ
     return -1;
   }
   if (pid == 0) {
-    char *av[16];
+    char *av[20];
     int argc = 0;
     const char *db = srv_db && srv_db[0] ? srv_db : ":memory:";
     alarm(0);
@@ -74,6 +88,8 @@ static pid_t start_server(int idle_ms, int max_conn, int *port, const char *writ
     close(sp[1]);
     snprintf(idle, sizeof idle, "%d", idle_ms);
     snprintf(maxc, sizeof maxc, "%d", max_conn);
+    unsetenv("MURO_HTTP_BIND");
+    if (bind_env && bind_env[0]) setenv("MURO_HTTP_BIND", bind_env, 1);
     unsetenv("MURO_HTTP_DB");
     unsetenv("MURO_HTTP_JWT_KEY");
     unsetenv("SQLITE_PATH");
@@ -91,6 +107,10 @@ static pid_t start_server(int idle_ms, int max_conn, int *port, const char *writ
     av[argc++] = idle;
     av[argc++] = "--max-connections";
     av[argc++] = maxc;
+    if (bind && bind[0]) {
+      av[argc++] = "--bind";
+      av[argc++] = (char *)bind;
+    }
     if (use_db) {
       av[argc++] = "--db";
       av[argc++] = (char *)db;
@@ -122,7 +142,7 @@ static pid_t start_server(int idle_ms, int max_conn, int *port, const char *writ
   }
   close(sp[0]);
   buf[n < sizeof buf ? n : sizeof buf - 1] = 0;
-  *port = parse_port(buf);
+  *port = parse_port(buf, banner_host);
   if (*port < 0) {
     fprintf(stderr, "FAIL start: banner '%s'\n", buf);
     failures += 1;
@@ -171,7 +191,7 @@ static int dial(int port) {
   memset(&addr, 0, sizeof addr);
   addr.sin_family = AF_INET;
   addr.sin_port = htons((uint16_t)port);
-  if (inet_pton(AF_INET, "127.0.0.1", &addr.sin_addr) != 1) {
+  if (inet_pton(AF_INET, dial_addr, &addr.sin_addr) != 1) {
     close(fd);
     return -1;
   }
@@ -350,7 +370,7 @@ static void check_keepalive(int port) {
     fail("keep-alive", "connect");
     return;
   }
-  if (send_all(fd, "GET /health HTTP/1.1\r\n\r\n") < 0 ||
+  if (send_all(fd, "GET /health HTTP/1.1\r\nHost: t\r\n\r\n") < 0 ||
       read_response(fd, buf, sizeof buf, 0, &used, &status, &conn_close, body, sizeof body - 1,
                     &body_n) < 0) {
     fail("keep-alive", "first");
@@ -358,7 +378,7 @@ static void check_keepalive(int port) {
     return;
   }
   if (status != 200 || strcmp(body, "ok") != 0 || conn_close) fail("keep-alive", "first response");
-  if (send_all(fd, "GET /missing HTTP/1.1\r\n\r\n") < 0 ||
+  if (send_all(fd, "GET /missing HTTP/1.1\r\nHost: t\r\n\r\n") < 0 ||
       read_response(fd, buf, sizeof buf, used, &used, &status, &conn_close, body, sizeof body - 1,
                     &body_n) < 0) {
     fail("keep-alive", "second");
@@ -378,7 +398,7 @@ static void check_pipeline(int port) {
   size_t used = 0;
   int status = 0;
   int conn_close = 0;
-  const char *req = "GET /health HTTP/1.1\r\n\r\nGET /missing HTTP/1.1\r\n\r\n";
+  const char *req = "GET /health HTTP/1.1\r\nHost: t\r\n\r\nGET /missing HTTP/1.1\r\nHost: t\r\n\r\n";
   if (fd < 0) {
     fail("pipeline", "connect");
     return;
@@ -467,7 +487,7 @@ static void check_idle_after(int port) {
     fail("idle-after", "connect");
     return;
   }
-  if (send_all(fd, "GET /health HTTP/1.1\r\n\r\n") < 0 ||
+  if (send_all(fd, "GET /health HTTP/1.1\r\nHost: t\r\n\r\n") < 0 ||
       read_response(fd, buf, sizeof buf, 0, &used, &status, &conn_close, body, sizeof body - 1,
                     &body_n) < 0 ||
       status != 200) {
@@ -502,7 +522,7 @@ static void check_split_body(int port) {
     fail("split-body", "connect");
     return;
   }
-  if (send_all(fd, "POST /posts HTTP/1.1\r\nContent-Length: 2\r\n\r\n") < 0) {
+  if (send_all(fd, "POST /posts HTTP/1.1\r\nContent-Length: 2\r\nHost: t\r\n\r\n") < 0) {
     fail("split-body", "headers");
     close(fd);
     return;
@@ -559,7 +579,7 @@ static void check_full_buffer(void) {
     stop_server(pid);
     return;
   }
-  hdr_n = (size_t)snprintf(msg, sizeof msg, "POST /posts HTTP/1.1\r\nContent-Length: 2000\r\n\r\n");
+  hdr_n = (size_t)snprintf(msg, sizeof msg, "POST /posts HTTP/1.1\r\nContent-Length: 2000\r\nHost: t\r\n\r\n");
   if (hdr_n == 0 || hdr_n >= sizeof msg) {
     fail("full-buffer", "setup");
     close(fd);
@@ -622,7 +642,7 @@ static void check_max_conn(void) {
   pid = start_server(10000, 1, &port, NULL, NULL, NULL);
   if (pid < 0) return;
   fd1 = dial(port);
-  if (fd1 < 0 || send_all(fd1, "GET /health HTTP/1.1\r\n\r\n") < 0 ||
+  if (fd1 < 0 || send_all(fd1, "GET /health HTTP/1.1\r\nHost: t\r\n\r\n") < 0 ||
       read_response(fd1, buf, sizeof buf, 0, &used, &status, &conn_close, body, sizeof body - 1,
                     &body_n) < 0 ||
       status != 200) {
@@ -632,7 +652,7 @@ static void check_max_conn(void) {
     return;
   }
   fd2 = dial(port);
-  if (fd2 < 0 || send_all(fd2, "GET /health HTTP/1.1\r\n\r\n") < 0) {
+  if (fd2 < 0 || send_all(fd2, "GET /health HTTP/1.1\r\nHost: t\r\n\r\n") < 0) {
     fail("max-conn", "second connect");
     close(fd1);
     if (fd2 >= 0) close(fd2);
@@ -690,7 +710,7 @@ static void check_partial_send(void) {
     return;
   }
   fd = dial(port);
-  if (fd < 0 || send_chunks(fd, "GET /health HTTP/1.1\r\n\r\n", 1) < 0 ||
+  if (fd < 0 || send_chunks(fd, "GET /health HTTP/1.1\r\nHost: t\r\n\r\n", 1) < 0 ||
       read_response(fd, buf, sizeof buf, 0, &used, &status, &conn_close, body, sizeof body - 1,
                     &body_n) < 0) {
     fail("partial-send", "response");
@@ -761,10 +781,10 @@ static const char tok_bad[] =
 static void post_json(char *dst, size_t cap, const char *token, const char *json) {
   if (token && token[0]) {
     snprintf(dst, cap,
-             "POST /posts HTTP/1.1\r\nAuthorization: Bearer %s\r\nContent-Length: %zu\r\n\r\n%s",
+             "POST /posts HTTP/1.1\r\nAuthorization: Bearer %s\r\nContent-Length: %zu\r\nHost: t\r\n\r\n%s",
              token, strlen(json), json);
   } else {
-    snprintf(dst, cap, "POST /posts HTTP/1.1\r\nContent-Length: %zu\r\n\r\n%s", strlen(json), json);
+    snprintf(dst, cap, "POST /posts HTTP/1.1\r\nContent-Length: %zu\r\nHost: t\r\n\r\n%s", strlen(json), json);
   }
 }
 
@@ -833,9 +853,9 @@ static void unlink_db(const char *path) {
 
 static void post_like(char *dst, size_t cap, const char *id, const char *token) {
   if (token && token[0]) {
-    snprintf(dst, cap, "POST /posts/%s/like HTTP/1.1\r\nAuthorization: Bearer %s\r\n\r\n", id, token);
+    snprintf(dst, cap, "POST /posts/%s/like HTTP/1.1\r\nAuthorization: Bearer %s\r\nHost: t\r\n\r\n", id, token);
   } else {
-    snprintf(dst, cap, "POST /posts/%s/like HTTP/1.1\r\n\r\n", id);
+    snprintf(dst, cap, "POST /posts/%s/like HTTP/1.1\r\nHost: t\r\n\r\n", id);
   }
 }
 
@@ -891,12 +911,12 @@ static void check_routes(int port) {
   post_json(req, sizeof req, tok_none, "{\"text\":\"hi\"}");
   check_one(port, "post-alg-none", req, 401, "bad-token", 0, 0);
   snprintf(req, sizeof req,
-           "POST /posts HTTP/1.1\r\nAuthorization: bearer %s\r\nContent-Length: 13\r\n\r\n"
+           "POST /posts HTTP/1.1\r\nAuthorization: bearer %s\r\nContent-Length: 13\r\nHost: t\r\n\r\n"
            "{\"text\":\"hi\"}",
            tok_ada);
   check_one(port, "post-lower-bearer", req, 401, "bad-token", 0, 0);
   check_one(port, "post-empty-bearer",
-            "POST /posts HTTP/1.1\r\nAuthorization: Bearer \r\nContent-Length: 13\r\n\r\n"
+            "POST /posts HTTP/1.1\r\nAuthorization: Bearer \r\nContent-Length: 13\r\nHost: t\r\n\r\n"
             "{\"text\":\"hi\"}",
             401, "bad-token", 0, 0);
   post_json(req, sizeof req, tok_empty_sub, "{\"text\":\"hi\"}");
@@ -946,16 +966,16 @@ static void check_routes(int port) {
   check_one(port, "create-exp", req, 201, "{\"id\":2,\"text\":\"A\"}", 0, 0);
   post_json(req, sizeof req, tok_nbf, "{\"text\":\"a\\\"b\"}");
   check_one(port, "create-nbf", req, 201, "{\"id\":3,\"text\":\"a\\\"b\"}", 0, 0);
-  check_one(port, "read-1", "GET /posts/1 HTTP/1.1\r\n\r\n", 200, "{\"id\":1,\"text\":\"hi\"}", 0, 0);
-  check_one(port, "read-2", "GET /posts/2 HTTP/1.1\r\n\r\n", 200, "{\"id\":2,\"text\":\"A\"}", 0, 0);
-  check_one(port, "read-missing", "GET /posts/9 HTTP/1.1\r\n\r\n", 404, "post-missing", 0, 0);
-  check_one(port, "read-zero", "GET /posts/0 HTTP/1.1\r\n\r\n", 400, "invalid-id", 0, 0);
-  check_one(port, "read-pad", "GET /posts/01 HTTP/1.1\r\n\r\n", 400, "invalid-id", 0, 0);
-  check_one(port, "get-posts", "GET /posts HTTP/1.1\r\n\r\n", 404, "not-found", 0, 0);
+  check_one(port, "read-1", "GET /posts/1 HTTP/1.1\r\nHost: t\r\n\r\n", 200, "{\"id\":1,\"text\":\"hi\"}", 0, 0);
+  check_one(port, "read-2", "GET /posts/2 HTTP/1.1\r\nHost: t\r\n\r\n", 200, "{\"id\":2,\"text\":\"A\"}", 0, 0);
+  check_one(port, "read-missing", "GET /posts/9 HTTP/1.1\r\nHost: t\r\n\r\n", 404, "post-missing", 0, 0);
+  check_one(port, "read-zero", "GET /posts/0 HTTP/1.1\r\nHost: t\r\n\r\n", 400, "invalid-id", 0, 0);
+  check_one(port, "read-pad", "GET /posts/01 HTTP/1.1\r\nHost: t\r\n\r\n", 400, "invalid-id", 0, 0);
+  check_one(port, "get-posts", "GET /posts HTTP/1.1\r\nHost: t\r\n\r\n", 404, "not-found", 0, 0);
   snprintf(req, sizeof req,
-           "POST /posts HTTP/1.1\r\nAuthorization: Bearer %s\r\nContent-Length: 0\r\n\r\n", tok_ada);
+           "POST /posts HTTP/1.1\r\nAuthorization: Bearer %s\r\nContent-Length: 0\r\nHost: t\r\n\r\n", tok_ada);
   check_one(port, "post-empty-body", req, 400, "malformed", 0, 0);
-  check_one(port, "post-on-id", "POST /posts/1 HTTP/1.1\r\n\r\n", 404, "not-found", 0, 0);
+  check_one(port, "post-on-id", "POST /posts/1 HTTP/1.1\r\nHost: t\r\n\r\n", 404, "not-found", 0, 0);
   post_like(req, sizeof req, "1", NULL);
   check_one(port, "like-no-auth", req, 401, "missing-bearer", 0, 0);
   post_like(req, sizeof req, "1", tok_expired);
@@ -970,13 +990,13 @@ static void check_routes(int port) {
   check_one(port, "like-again", req, 200, "{\"id\":1,\"likes\":1}", 0, 0);
   post_like(req, sizeof req, "9", tok_ada);
   check_one(port, "like-missing", req, 404, "post-missing", 0, 0);
-  check_one(port, "feed-rows", "GET /feed HTTP/1.1\r\n\r\n", 200,
+  check_one(port, "feed-rows", "GET /feed HTTP/1.1\r\nHost: t\r\n\r\n", 200,
             "[{\"id\":1,\"text\":\"hi\"},{\"id\":2,\"text\":\"A\"},{\"id\":3,\"text\":\"a\\\"b\"}]", 0, 0);
-  check_one(port, "post-health", "POST /health HTTP/1.1\r\n\r\n", 404, "not-found", 0, 0);
-  check_one(port, "post-feed", "POST /feed HTTP/1.1\r\n\r\n", 404, "not-found", 0, 0);
-  check_one(port, "get-like", "GET /posts/1/like HTTP/1.1\r\n\r\n", 404, "not-found", 0, 0);
-  check_one(port, "put-health", "PUT /health HTTP/1.1\r\n\r\n", 404, "not-found", 0, 0);
-  snprintf(req, sizeof req, "GET /health HTTP/1.1\r\nAuthorization: Bearer %s\r\n\r\n", tok_bad);
+  check_one(port, "post-health", "POST /health HTTP/1.1\r\nHost: t\r\n\r\n", 404, "not-found", 0, 0);
+  check_one(port, "post-feed", "POST /feed HTTP/1.1\r\nHost: t\r\n\r\n", 404, "not-found", 0, 0);
+  check_one(port, "get-like", "GET /posts/1/like HTTP/1.1\r\nHost: t\r\n\r\n", 404, "not-found", 0, 0);
+  check_one(port, "put-health", "PUT /health HTTP/1.1\r\nHost: t\r\n\r\n", 404, "not-found", 0, 0);
+  snprintf(req, sizeof req, "GET /health HTTP/1.1\r\nAuthorization: Bearer %s\r\nHost: t\r\n\r\n", tok_bad);
   check_one(port, "health-bad-auth", req, 200, "ok", 0, 0);
 }
 
@@ -989,11 +1009,11 @@ static void check_db_down(void) {
   pid = start_server(10000, 4, &port, NULL, NULL, NULL);
   srv_db = saved;
   if (pid < 0) return;
-  check_one(port, "down-health", "GET /health HTTP/1.1\r\n\r\n", 503, "db", 0, 0);
-  check_one(port, "down-feed", "GET /feed HTTP/1.1\r\n\r\n", 500, "internal", 0, 0);
+  check_one(port, "down-health", "GET /health HTTP/1.1\r\nHost: t\r\n\r\n", 503, "db", 0, 0);
+  check_one(port, "down-feed", "GET /feed HTTP/1.1\r\nHost: t\r\n\r\n", 500, "internal", 0, 0);
   post_json(req, sizeof req, tok_ada, "{\"text\":\"hi\"}");
   check_one(port, "down-create", req, 500, "internal", 0, 0);
-  check_one(port, "down-read", "GET /posts/1 HTTP/1.1\r\n\r\n", 500, "internal", 0, 0);
+  check_one(port, "down-read", "GET /posts/1 HTTP/1.1\r\nHost: t\r\n\r\n", 500, "internal", 0, 0);
   post_like(req, sizeof req, "1", tok_ada);
   check_one(port, "down-like", req, 500, "internal", 0, 0);
   if (stop_server(pid) < 0) return;
@@ -1008,10 +1028,10 @@ static void check_memory(void) {
   pid = start_server(10000, 4, &port, NULL, NULL, NULL);
   srv_db = saved;
   if (pid < 0) return;
-  check_one(port, "memory-health", "GET /health HTTP/1.1\r\n\r\n", 200, "ok", 0, 0);
+  check_one(port, "memory-health", "GET /health HTTP/1.1\r\nHost: t\r\n\r\n", 200, "ok", 0, 0);
   post_json(req, sizeof req, tok_ada, "{\"text\":\"hi\"}");
   check_one(port, "memory-create", req, 201, "{\"id\":1,\"text\":\"hi\"}", 0, 0);
-  check_one(port, "memory-read", "GET /posts/1 HTTP/1.1\r\n\r\n", 200, "{\"id\":1,\"text\":\"hi\"}", 0,
+  check_one(port, "memory-read", "GET /posts/1 HTTP/1.1\r\nHost: t\r\n\r\n", 200, "{\"id\":1,\"text\":\"hi\"}", 0,
             0);
   if (stop_server(pid) < 0) return;
 }
@@ -1048,7 +1068,7 @@ static void check_reopen(void) {
     unlink_db(path);
     return;
   }
-  check_one(port, "reopen-read", "GET /posts/1 HTTP/1.1\r\n\r\n", 200, "{\"id\":1,\"text\":\"hi\"}", 0,
+  check_one(port, "reopen-read", "GET /posts/1 HTTP/1.1\r\nHost: t\r\n\r\n", 200, "{\"id\":1,\"text\":\"hi\"}", 0,
             0);
   stop_server(pid);
   srv_db = saved;
@@ -1098,7 +1118,7 @@ static void check_precedence(void) {
   env_sqlite = file_a;
   pid = start_server(10000, 4, &port, NULL, NULL, NULL);
   if (pid >= 0) {
-    check_one(port, "prec-flag", "GET /posts/1 HTTP/1.1\r\n\r\n", 404, "post-missing", 0, 0);
+    check_one(port, "prec-flag", "GET /posts/1 HTTP/1.1\r\nHost: t\r\n\r\n", 404, "post-missing", 0, 0);
     stop_server(pid);
   }
   pass_db = 0;
@@ -1106,14 +1126,14 @@ static void check_precedence(void) {
   env_muro_db = file_b;
   pid = start_server(10000, 4, &port, NULL, NULL, NULL);
   if (pid >= 0) {
-    check_one(port, "prec-muro-db", "GET /posts/1 HTTP/1.1\r\n\r\n", 404, "post-missing", 0, 0);
+    check_one(port, "prec-muro-db", "GET /posts/1 HTTP/1.1\r\nHost: t\r\n\r\n", 404, "post-missing", 0, 0);
     stop_server(pid);
   }
   pass_db = 0;
   env_sqlite = file_a;
   pid = start_server(10000, 4, &port, NULL, NULL, NULL);
   if (pid >= 0) {
-    check_one(port, "prec-sqlite-path", "GET /posts/1 HTTP/1.1\r\n\r\n", 200,
+    check_one(port, "prec-sqlite-path", "GET /posts/1 HTTP/1.1\r\nHost: t\r\n\r\n", 200,
               "{\"id\":1,\"text\":\"hi\"}", 0, 0);
     stop_server(pid);
   }
@@ -1149,6 +1169,7 @@ static void check_exit2(const char *name, char **av, const char *sqlite_env, con
     if (dup2(sp[1], STDERR_FILENO) < 0) _exit(127);
     close(sp[0]);
     close(sp[1]);
+    unsetenv("MURO_HTTP_BIND");
     unsetenv("MURO_HTTP_DB");
     unsetenv("MURO_HTTP_JWT_KEY");
     unsetenv("MURO_HTTP_PORT");
@@ -1205,6 +1226,22 @@ static void check_exit2(const char *name, char **av, const char *sqlite_env, con
   }
 }
 
+/* --bind wins over MURO_HTTP_BIND. The environment value is not an
+   address, so a listening banner means the flag was applied. */
+static void check_bind(void) {
+  const char *saved_db = srv_db;
+  pid_t pid;
+  int port = -1;
+  srv_db = ":memory:";
+  srv_bind = "127.0.0.1";
+  srv_bind_env = "nope";
+  pid = start_server(5000, 4, &port, NULL, NULL, NULL);
+  srv_db = saved_db;
+  if (pid < 0) return;
+  check_one(port, "bind", "GET /health HTTP/1.1\r\nHost: t\r\n\r\n", 200, "ok", 0, 0);
+  stop_server(pid);
+}
+
 static void check_empty_db(void) {
   char *flag[] = {"muro-httpd", "--port", "0", "--db", "", NULL};
   char *envonly[] = {"muro-httpd", "--port", "0", NULL};
@@ -1240,7 +1277,7 @@ static void check_commit_status(void) {
   check_one(port, "commit-create", req, 500, "internal", 1, 1);
   post_like(req, sizeof req, "1", tok_ada);
   check_one(port, "commit-like", req, 500, "internal", 1, 1);
-  check_one(port, "commit-read", "GET /posts/1 HTTP/1.1\r\n\r\n", 200, "{\"id\":1,\"text\":\"hi\"}", 0,
+  check_one(port, "commit-read", "GET /posts/1 HTTP/1.1\r\nHost: t\r\n\r\n", 200, "{\"id\":1,\"text\":\"hi\"}", 0,
             0);
   post_like(req, sizeof req, "1", tok_ada);
   check_one(port, "commit-like-again", req, 200, "{\"id\":1,\"likes\":1}", 0, 0);
@@ -1258,10 +1295,10 @@ static void check_no_key(void) {
   pid = start_server(10000, 4, &port, NULL, NULL, NULL);
   srv_jwt = saved;
   if (pid < 0) return;
-  check_one(port, "nokey-health", "GET /health HTTP/1.1\r\n\r\n", 200, "ok", 0, 0);
+  check_one(port, "nokey-health", "GET /health HTTP/1.1\r\nHost: t\r\n\r\n", 200, "ok", 0, 0);
   post_json(req, sizeof req, tok_ada, "{\"text\":\"hi\"}");
   check_one(port, "nokey-token", req, 401, "bad-token", 0, 0);
-  check_one(port, "nokey-absent", "POST /posts HTTP/1.1\r\nContent-Length: 2\r\n\r\n{}", 401,
+  check_one(port, "nokey-absent", "POST /posts HTTP/1.1\r\nContent-Length: 2\r\nHost: t\r\n\r\n{}", 401,
             "missing-bearer", 0, 0);
   if (stop_server(pid) < 0) return;
 }
@@ -1343,7 +1380,7 @@ static void check_interleaved(void) {
   char feed_req[1600];
   const char *saved = srv_db;
   const char *partial = "GET /health HTTP/1.1\r\nHost: slow\r\n";
-  const char *part_body = "POST /posts HTTP/1.1\r\nContent-Length: 20\r\n\r\n{\"tex";
+  const char *part_body = "POST /posts HTTP/1.1\r\nContent-Length: 20\r\nHost: t\r\n\r\n{\"tex";
   pid_t pid;
   int port = -1;
   int slow = -1;
@@ -1382,7 +1419,7 @@ static void check_interleaved(void) {
       goto done;
     }
     if ((i % 8) == 7)
-      check_one(port, "interleave-drip", "GET /health HTTP/1.1\r\n\r\n", 200, "ok", 0, 0);
+      check_one(port, "interleave-drip", "GET /health HTTP/1.1\r\nHost: t\r\n\r\n", 200, "ok", 0, 0);
   }
   if (send_all(body, part_body) < 0) {
     fail("interleave", "partial body");
@@ -1399,9 +1436,9 @@ static void check_interleaved(void) {
     fail("interleave", "fast connect");
     goto done;
   }
-  snprintf(feed_req, sizeof feed_req, "GET /feed HTTP/1.1\r\nAuthorization: Bearer %s\r\n\r\n", tok_ada);
+  snprintf(feed_req, sizeof feed_req, "GET /feed HTTP/1.1\r\nAuthorization: Bearer %s\r\nHost: t\r\n\r\n", tok_ada);
   post_json(req, sizeof req, tok_ada, "{\"text\":\"concurrent\"}");
-  if (send_all(health, "GET /health HTTP/1.1\r\n\r\n") < 0 || send_all(feed, feed_req) < 0 ||
+  if (send_all(health, "GET /health HTTP/1.1\r\nHost: t\r\n\r\n") < 0 || send_all(feed, feed_req) < 0 ||
       send_all(post, req) < 0 || send_all(bad, "GET/feed HTTP/1.1\r\n\r\n") < 0) {
     fail("interleave", "fast send");
     goto done;
@@ -1427,8 +1464,8 @@ static void check_interleaved(void) {
     goto done;
   }
   post_like(req, sizeof req, "1", tok_ada);
-  snprintf(feed_req, sizeof feed_req, "GET /feed HTTP/1.1\r\nAuthorization: Bearer %s\r\n\r\n", tok_ada);
-  if (send_all(like, req) < 0 || send_all(readp, "GET /posts/1 HTTP/1.1\r\n\r\n") < 0 ||
+  snprintf(feed_req, sizeof feed_req, "GET /feed HTTP/1.1\r\nAuthorization: Bearer %s\r\nHost: t\r\n\r\n", tok_ada);
+  if (send_all(like, req) < 0 || send_all(readp, "GET /posts/1 HTTP/1.1\r\nHost: t\r\n\r\n") < 0 ||
       send_all(feed2, feed_req) < 0) {
     fail("interleave", "second send");
     goto done;
@@ -1501,7 +1538,7 @@ static void check_abort_write(void) {
   srv_db = saved;
   if (pid < 0) return;
   fd = dial(port);
-  if (fd < 0 || send_all(fd, "GET /health HTTP/1.1\r\n\r\n") < 0) {
+  if (fd < 0 || send_all(fd, "GET /health HTTP/1.1\r\nHost: t\r\n\r\n") < 0) {
     fail("abort-write", "send");
     if (fd >= 0) close(fd);
     stop_server(pid);
@@ -1525,7 +1562,7 @@ static void check_abort_write(void) {
   }
   rst_close(fd);
   fd = -1;
-  if (check_one(port, "abort-write-next", "GET /health HTTP/1.1\r\n\r\n", 200, "ok", 0, 0) < 0) {
+  if (check_one(port, "abort-write-next", "GET /health HTTP/1.1\r\nHost: t\r\n\r\n", 200, "ok", 0, 0) < 0) {
     stop_server(pid);
     return;
   }
@@ -1577,15 +1614,15 @@ int main(int argc, char **argv) {
     unlink_db(dbpath);
     return 1;
   }
-  check_one(port, "health", "GET /health HTTP/1.1\r\n\r\n", 200, "ok", 0, 0);
+  check_one(port, "health", "GET /health HTTP/1.1\r\nHost: t\r\n\r\n", 200, "ok", 0, 0);
   check_keepalive(port);
   check_pipeline(port);
-  check_one(port, "close", "GET /health HTTP/1.1\r\nConnection: close\r\n\r\n", 200, "ok", 1, 1);
+  check_one(port, "close", "GET /health HTTP/1.1\r\nConnection: close\r\nHost: t\r\n\r\n", 200, "ok", 1, 1);
   check_one(port, "malformed", "GET/feed HTTP/1.1\r\n\r\n", 400, "malformed", 1, 1);
   check_fin(port);
-  check_one(port, "feed", "GET /feed HTTP/1.1\r\n\r\n", 200, "[]", 0, 0);
-  check_one(port, "missing", "GET /missing HTTP/1.1\r\n\r\n", 404, "not-found", 0, 0);
-  check_one(port, "post", "POST /posts HTTP/1.1\r\nContent-Length: 2\r\n\r\n{}", 401, "missing-bearer",
+  check_one(port, "feed", "GET /feed HTTP/1.1\r\nHost: t\r\n\r\n", 200, "[]", 0, 0);
+  check_one(port, "missing", "GET /missing HTTP/1.1\r\nHost: t\r\n\r\n", 404, "not-found", 0, 0);
+  check_one(port, "post", "POST /posts HTTP/1.1\r\nContent-Length: 2\r\nHost: t\r\n\r\n{}", 401, "missing-bearer",
             0, 0);
   check_split_body(port);
   check_routes(port);
@@ -1617,6 +1654,7 @@ int main(int argc, char **argv) {
   check_reopen();
   check_precedence();
   check_empty_db();
+  check_bind();
   check_commit_status();
   unlink_db(dbpath);
   if (failures != 0) {
