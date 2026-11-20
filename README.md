@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="assets/muro-http-logo.jpg" alt="muro-http" width="280">
+</p>
+
 # muro-http
 
 `muro-http` is a separate library. It is not part of muro's standard
@@ -171,7 +175,7 @@ copies `httpMalformed`.
 
 `c/host.c` owns the sockets, the buffers, the connection table, the
 clock, and `poll`. `make c-check` compiles it with
-`-Wall -Wextra -Werror -std=c11`, then runs the drivers. The loop
+`-Wall -Wextra -Werror -std=c11 -O2`, then runs the drivers. The loop
 does not choose a move, a status, a header, or a body.
 
 `c/host_poll.c` waits with `poll(2)` on macOS and on Linux. The idle
@@ -473,23 +477,24 @@ scanner, and the default fuel of 2000 is not enough.
 ## C driver
 
 `make c-check` compiles the drivers, `c/muro-httpd`, and `c/muro-hello`
-with `-Wall -Wextra -Werror -std=c11` and runs them. `c/test_hello`
+with `-Wall -Wextra -Werror -std=c11 -O2` and runs them. `c/test_hello`
 runs the hello server. `c/test_route` and `c/test_tags` check the
 challenge route book and the decide constructor tags. `c/test_admit`
 is not
 in that target. It reads a trace on stdin. It is not a pass/fail
 driver.
 
-`c/shim.c` defines `muro__ALLOC` as a bump arena. The driver links
-`c/generated/request.c` and the shim. It does not link `decide.c`:
-`request.muro` already imports that book, so the symbols would be
-duplicated.
+`c/shim.c` defines `muro__ALLOC` as a bump arena. The classifier
+driver links `c/generated/request.c` and the shim. It does not link
+`decide.c`. `request.muro` does not import that book. Do not link
+`request.o` with `conn.o`: `conn.muro` already imports the request
+book, so the symbols would be duplicated.
 
 ```sh
-cc -Wall -Wextra -Werror -std=c11 -I c -I c/generated -include c/shim.h \
+cc -Wall -Wextra -Werror -std=c11 -O2 -I c -I c/generated -include c/shim.h \
   -c -o c/test_classify.o c/test_classify.c
-cc -Wall -Wextra -Werror -std=c11 -I c -c -o c/shim.o c/shim.c
-cc -Wall -Wextra -Werror -std=c11 \
+cc -Wall -Wextra -Werror -std=c11 -O2 -I c -c -o c/shim.o c/shim.c
+cc -Wall -Wextra -Werror -std=c11 -O2 \
   -I c -I c/generated -include c/shim.h \
   -c -o c/request.o c/generated/request.c
 cc -o c/test_classify c/test_classify.o c/request.o c/shim.o
@@ -522,21 +527,21 @@ Their headers both define `struct muro__nat`, so `c/admit_glue.c`
 is the only file that includes `admit.h`.
 
 ```sh
-cc -Wall -Wextra -Werror -std=c11 -I c -I c/generated -include c/shim.h \
+cc -Wall -Wextra -Werror -std=c11 -O2 -I c -I c/generated -include c/shim.h \
   -c -o c/test_conn.o c/test_conn.c
-cc -Wall -Wextra -Werror -std=c11 -I c -c -o c/shim.o c/shim.c
-cc -Wall -Wextra -Werror -std=c11 \
+cc -Wall -Wextra -Werror -std=c11 -O2 -I c -c -o c/shim.o c/shim.c
+cc -Wall -Wextra -Werror -std=c11 -O2 \
   -I c -I c/generated -include c/shim.h \
   -c -o c/conn.o c/generated/conn.c
-cc -Wall -Wextra -Werror -std=c11 \
+cc -Wall -Wextra -Werror -std=c11 -O2 \
   -I c -I c/generated -include c/shim.h \
   -c -o c/session.o c/generated/session.c
-cc -Wall -Wextra -Werror -std=c11 \
+cc -Wall -Wextra -Werror -std=c11 -O2 \
   -I c -I c/generated -include c/shim.h \
   -c -o c/admit.o c/generated/admit.c
-cc -Wall -Wextra -Werror -std=c11 -I c -I c/generated \
+cc -Wall -Wextra -Werror -std=c11 -O2 -I c -I c/generated \
   -c -o c/admit_glue.o c/admit_glue.c
-cc -Wall -Wextra -Werror -std=c11 -I c -I c/generated \
+cc -Wall -Wextra -Werror -std=c11 -O2 -I c -I c/generated \
   -c -o c/proto.o c/proto.c
 cc -o c/test_conn c/test_conn.o c/conn.o c/session.o c/admit.o c/admit_glue.o c/proto.o c/shim.o
 ./c/test_conn
@@ -555,12 +560,12 @@ resets the arena before the next call.
 prints `OK`.
 
 ```sh
-cc -Wall -Wextra -Werror -std=c11 \
+cc -Wall -Wextra -Werror -std=c11 -O2 \
   -I c -I c/generated -include c/shim.h \
   -c -o c/session.o c/generated/session.c
-cc -Wall -Wextra -Werror -std=c11 -I c -I c/generated \
+cc -Wall -Wextra -Werror -std=c11 -O2 -I c -I c/generated \
   -c -o c/test_sess.o c/test_sess.c
-cc -Wall -Wextra -Werror -std=c11 -I c -c -o c/shim.o c/shim.c
+cc -Wall -Wextra -Werror -std=c11 -O2 -I c -c -o c/shim.o c/shim.c
 cc -o c/test_sess c/test_sess.o c/session.o c/shim.o
 ./c/test_sess
 ```
