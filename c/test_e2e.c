@@ -507,7 +507,8 @@ static void check_idle_after(int port) {
 }
 
 /* Headers with Content-Length, then the body in a later write.
-   The image stays in need-more until those bytes arrive. */
+   The image stays in need-more until those bytes arrive. The 401
+   closes, the same as any other 4xx. */
 static void check_split_body(int port) {
   int fd = dial(port);
   struct pollfd pfd;
@@ -539,7 +540,7 @@ static void check_split_body(int port) {
     close(fd);
     return;
   }
-  if (status != 401 || strcmp(body, "missing-bearer") != 0 || conn_close)
+  if (status != 401 || strcmp(body, "missing-bearer") != 0 || !conn_close)
     fail("split-body", "status");
   close(fd);
 }
