@@ -328,10 +328,10 @@ The three books under `priv/muro/http/neg/` are still refused by
 `mix muro.check`. They are not in `muro.exs`.
 
 An unboxed field has to be a machine word, a `WBool`, a `Slice`, an
-`Opt` of those, or more unboxed data. `Conn` does not store a verb,
-a path, or an id. Those are the handler's. Unused words in the
-fifteen-word image stay 0. Word 8 is the origin: 0 is a handler
-response, 1 is the book's malformed response.
+`Opt` of those, or more unboxed data. `Conn` does not store a verb
+or a path. One unused id word stays 0. The image is thirteen words.
+Word 6 is the origin: 0 is a handler response, 1 is the book's
+malformed response.
 
 A session payload of `Bytes` or `Slice` is refused. `Piece` and
 `Reply` are fieldless data. The buffer stays on the `Ev` of the image.

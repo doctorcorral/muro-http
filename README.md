@@ -59,7 +59,7 @@ The host owns the socket, the buffer, and the clock. It calls `step`
 and performs the action. The book does not loop. It does not call
 `decide`.
 
-`Conn` is unboxed data: fifteen machine words, passed by value. `Ev`
+`Conn` is unboxed data: thirteen machine words, passed by value. `Ev`
 is unboxed. `step` returns the next `Conn`. The phase is read, decide,
 write, idle, or closed. Half-closed is a flag. While it is set the
 peer has sent FIN: the step may still write the pending response, and

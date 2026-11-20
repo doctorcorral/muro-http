@@ -51,8 +51,6 @@ static uint64_t field(Conn st, int i) {
   case 10: return st.muro__as.conn.muro__f_10;
   case 11: return st.muro__as.conn.muro__f_11;
   case 12: return st.muro__as.conn.muro__f_12;
-  case 13: return st.muro__as.conn.muro__f_13;
-  case 14: return st.muro__as.conn.muro__f_14;
   default: return 0;
   }
 }
@@ -60,7 +58,7 @@ static uint64_t field(Conn st, int i) {
 static int same(Conn a, Conn b) {
   int i;
   if (a.muro__field_tag != b.muro__field_tag) return 0;
-  for (i = 0; i < 15; i++) {
+  for (i = 0; i < 13; i++) {
     if (field(a, i) != field(b, i)) return 0;
   }
   return 1;
@@ -165,8 +163,8 @@ static void check_begin(void) {
   printf("begin-allocs %lu\n", n);
   if (n != 0) bad("begin", "allocs");
   want("begin", st, 0, PH_READ);
-  want("begin", st, 6, ACT_READ);
-  want("begin", st, 7, 1);
+  want("begin", st, 4, ACT_READ);
+  want("begin", st, 5, 1);
   muro_http_reset();
   proto = proto_begin();
   n = muro_http_allocs();
@@ -195,12 +193,12 @@ static void check_need(void) {
   n = take("need-allocs", &st, proto, evBytes(of(partial)));
   if (n != 1) bad("need", "allocs");
   want("need", st, 0, PH_READ);
-  want("need", st, 6, ACT_READ);
+  want("need", st, 4, ACT_READ);
   if (proto_done(proto)) bad("need", "session ended on a chunk");
   n = take("need-rest-allocs", &st, proto, evBytes(of(health)));
   if (n != 1) bad("need-rest", "allocs");
   want("need-rest", st, 0, PH_DECIDE);
-  want("need-rest", st, 6, ACT_DECIDE);
+  want("need-rest", st, 4, ACT_DECIDE);
   if (proto_done(proto)) bad("need-rest", "session ended before the reply");
   proto_free(proto);
 }
@@ -215,46 +213,43 @@ static void check_keepalive(void) {
   want("health", st, 0, PH_DECIDE);
   want("health", st, 1, 0);
   want("health", st, 2, 0);
-  want("health", st, 3, 0);
-  want("health", st, 4, 0);
-  want("health", st, 6, ACT_DECIDE);
-  want("health", st, 13, 33);
-  want("health", st, 14, 0);
+  want("health", st, 4, ACT_DECIDE);
+  want("health", st, 11, 33);
+  want("health", st, 12, 0);
   n = take("reply-allocs", &st, proto, evReply(0));
   if (n != 0) bad("reply", "allocs");
   want("db", st, 0, PH_WRITE);
-  want("db", st, 6, ACT_WRITE);
+  want("db", st, 4, ACT_WRITE);
+  want("db", st, 6, 0);
+  want("db", st, 7, 0);
   want("db", st, 8, 0);
   want("db", st, 9, 0);
-  want("db", st, 10, 0);
-  want("db", st, 11, 0);
-  want("db", st, 12, 16);
+  want("db", st, 10, 16);
   n = take("progress-allocs", &st, proto, evProgress(8));
   if (n != 0) bad("progress", "allocs");
   want("progress", st, 0, PH_WRITE);
-  want("progress", st, 11, 8);
+  want("progress", st, 9, 8);
   n = take("progress-full-allocs", &st, proto, evProgress(8));
   if (n != 0) bad("progress-full", "allocs");
-  want("progress-full", st, 11, 16);
+  want("progress-full", st, 9, 16);
   n = take("idle-allocs", &st, proto, evDone());
   if (n != 0) bad("idle", "allocs");
   want("idle", st, 0, PH_IDLE);
-  want("idle", st, 6, ACT_READ);
-  want("idle", st, 7, 1);
+  want("idle", st, 4, ACT_READ);
+  want("idle", st, 5, 1);
   n = take("second-allocs", &st, proto, evBytes(of(feed)));
   if (n != 1) bad("second", "allocs");
   want("second", st, 0, PH_DECIDE);
-  want("second", st, 4, 0);
   n = take("second-reply-allocs", &st, proto, evReply(0));
   if (n != 0) bad("second-reply", "allocs");
-  want("second-reply", st, 10, 0);
+  want("second-reply", st, 8, 0);
   n = take("second-idle-allocs", &st, proto, evDone());
   if (n != 0) bad("second-idle", "allocs");
   want("second-idle", st, 0, PH_IDLE);
   n = take("idle-tick-allocs", &st, proto, evTick());
   if (n != 0) bad("idle-tick", "allocs");
   want("idle-tick", st, 0, PH_CLOSED);
-  want("idle-tick", st, 6, ACT_CLOSE);
+  want("idle-tick", st, 4, ACT_CLOSE);
   if (!proto_done(proto)) bad("idle-tick", "session open");
   if (!proto_refuses(proto, PROTO_RECV, PROTO_DATA, 0, "piece-req"))
     bad("idle-tick", "piece accepted after end");
@@ -279,7 +274,7 @@ static void check_close_header(const char *name, const char *raw) {
   n = take(label, &st, proto, evDone());
   if (n != 0) bad(name, "done allocs");
   want(name, st, 0, PH_CLOSED);
-  want(name, st, 6, ACT_CLOSE);
+  want(name, st, 4, ACT_CLOSE);
   if (!proto_done(proto)) bad(name, "session open after close");
   proto_free(proto);
 }
@@ -293,10 +288,10 @@ static void check_malformed(void) {
   if (n != 1) bad("malformed", "allocs");
   want("malformed", st, 0, PH_WRITE);
   want("malformed", st, 2, 1);
-  want("malformed", st, 6, ACT_WRITE);
-  want("malformed", st, 8, 1);
-  want("malformed", st, 9, 0);
-  want("malformed", st, 10, 0);
+  want("malformed", st, 4, ACT_WRITE);
+  want("malformed", st, 6, 1);
+  want("malformed", st, 7, 0);
+  want("malformed", st, 8, 0);
   if (!proto_done(proto)) bad("malformed", "session open");
   n = take("malformed-done-allocs", &st, proto, evDone());
   if (n != 0) bad("malformed-done", "allocs");
@@ -323,7 +318,7 @@ static void check_half(void) {
   want("half-eof", st, 0, PH_DECIDE);
   want("half-eof", st, 1, 1);
   want("half-eof", st, 2, 1);
-  want("half-eof", st, 6, ACT_DECIDE);
+  want("half-eof", st, 4, ACT_DECIDE);
   if (proto_done(proto)) bad("half-eof", "session ended on a host flag");
   n = take("half-reply-allocs", &st, proto, evReply(0));
   if (n != 0) bad("half-reply", "allocs");
@@ -332,7 +327,7 @@ static void check_half(void) {
   n = take("half-progress-allocs", &st, proto, evProgress(8));
   if (n != 0) bad("half-progress", "allocs");
   want("half-progress", st, 1, 1);
-  want("half-progress", st, 11, 8);
+  want("half-progress", st, 9, 8);
   n = take("half-done-allocs", &st, proto, evDone());
   if (n != 0) bad("half-done", "allocs");
   want("half-done", st, 0, PH_CLOSED);
@@ -353,7 +348,7 @@ static void check_half(void) {
   if (n != 1) bad("trunc", "allocs");
   want("trunc", fin, 0, PH_WRITE);
   want("trunc", fin, 1, 1);
-  want("trunc", fin, 8, 1);
+  want("trunc", fin, 6, 1);
   if (!proto_done(proto)) bad("trunc", "session open");
   proto_free(proto);
 }
@@ -366,22 +361,20 @@ static void check_pipe(void) {
   n = take("pipe-allocs", &st, proto, evBytes(of(piped)));
   if (n != 1) bad("pipe", "allocs");
   want("pipe", st, 0, PH_DECIDE);
-  want("pipe", st, 4, 0);
-  want("pipe", st, 13, 33);
-  want("pipe", st, 14, 1);
+  want("pipe", st, 11, 33);
+  want("pipe", st, 12, 1);
   n = take("pipe-reply-allocs", &st, proto, evReply(0));
   if (n != 0) bad("pipe-reply", "allocs");
-  want("pipe-db", st, 14, 1);
+  want("pipe-db", st, 12, 1);
   n = take("pipe-idle-allocs", &st, proto, evDone());
   if (n != 0) bad("pipe-idle", "allocs");
   want("pipe-idle", st, 0, PH_IDLE);
-  want("pipe-idle", st, 14, 1);
+  want("pipe-idle", st, 12, 1);
   if (proto_done(proto)) bad("pipe-idle", "session ended on keep");
   n = take("pipe-tail-allocs", &st, proto, evBytes(of(piped + 33)));
   if (n != 1) bad("pipe-tail", "allocs");
   want("pipe-tail", st, 0, PH_DECIDE);
-  want("pipe-tail", st, 4, 0);
-  want("pipe-tail", st, 14, 0);
+  want("pipe-tail", st, 12, 0);
   if (proto_done(proto)) bad("pipe-tail", "session ended before the reply");
   proto_free(proto);
 }
@@ -415,7 +408,7 @@ static void check_closed(void) {
   n = take("closed-reply-allocs", &st, proto, evReply(0));
   if (n != 0 || !same(st, again)) bad("closed-db", "state");
   want("closed", st, 0, PH_CLOSED);
-  want("closed", st, 6, ACT_CLOSE);
+  want("closed", st, 4, ACT_CLOSE);
   proto_free(proto);
 }
 
@@ -443,7 +436,7 @@ static void check_ignore_tick_while_writing(void) {
   n = take("wtick-allocs", &st, proto, evTick());
   if (n != 0) bad("wtick", "allocs");
   want("wtick", st, 0, PH_WRITE);
-  want("wtick", st, 6, ACT_WRITE);
+  want("wtick", st, 4, ACT_WRITE);
   if (proto_done(proto)) bad("wtick", "session ended on a host tick");
   proto_free(proto);
 }
@@ -463,7 +456,7 @@ static void check_gate(void) {
   n = take("read-tick-allocs", &st, proto, evTick());
   if (n != 0) bad("read-tick", "allocs");
   want("read-tick", st, 0, PH_CLOSED);
-  want("read-tick", st, 6, ACT_CLOSE);
+  want("read-tick", st, 4, ACT_CLOSE);
   if (!proto_done(proto)) bad("read-tick", "session open");
   again = st;
   n = take("after-tick-bytes-allocs", &st, proto, evBytes(of(health)));
@@ -481,7 +474,7 @@ static void check_fin(void) {
   n = take("bare-fin-allocs", &st, proto, evEof(of("")));
   if (n != 0) bad("bare-fin", "allocs");
   want("bare-fin", st, 0, PH_CLOSED);
-  want("bare-fin", st, 6, ACT_CLOSE);
+  want("bare-fin", st, 4, ACT_CLOSE);
   if (!proto_done(proto)) bad("bare-fin", "session open");
   proto_free(proto);
 }

@@ -16,7 +16,7 @@
 -- A reply event is the handler's answer. n0 is 1 when that answer
 -- forces Connection: close. progress stores the delta in n0.
 -- writeLen is 16 for every response. The shim owns the bytes; the
--- range is writeOff and writeLen. Field 8 is the origin: 0 handler,
+-- range is writeOff and writeLen. Field 6 is the origin: 0 handler,
 -- 1 protocol malformed. The book chooses the 400. The shim does not.
 -- endOff is the first byte after the request. more is 1 when the
 -- buffer holds bytes past that, so the shim can re-step the tail.
@@ -28,7 +28,7 @@
 import "request.muro"
 
 unboxed data Conn : Type where
-  conn : Π (+ phase : U64) → Π (+ half : U64) → Π (+ keep : U64) → Π (+ verb : U64) → Π (+ path : U64) → Π (+ idc : U64) → Π (+ action : U64) → Π (+ timer : U64) → Π (+ code : U64) → Π (+ err : U64) → Π (+ act : U64) → Π (+ off : U64) → Π (+ len : U64) → Π (+ endOff : U64) → Π (+ more : U64) → Conn
+  conn : Π (+ phase : U64) → Π (+ half : U64) → Π (+ keep : U64) → Π (+ idc : U64) → Π (+ action : U64) → Π (+ timer : U64) → Π (+ code : U64) → Π (+ err : U64) → Π (+ act : U64) → Π (+ off : U64) → Π (+ len : U64) → Π (+ endOff : U64) → Π (+ more : U64) → Conn
 
 unboxed data Ev : Type where
   ev : Π (+ tag : U64) → Π (+ buf : Slice) → Π (+ n0 : U64) → Π (+ n1 : U64) → Π (+ n2 : U64) → Π (+ n3 : U64) → Π (+ n4 : U64) → Ev
@@ -56,25 +56,25 @@ def respLen : run U64 :=
   toU64 16
 
 def shut : run Conn :=
-  conn (toU64 4) (toU64 0) (toU64 1) (toU64 0) (toU64 0) (toU64 0) (toU64 3) (toU64 0) (toU64 0) (toU64 0) (toU64 0) (toU64 0) (toU64 0) (toU64 0) (toU64 0)
+  conn (toU64 4) (toU64 0) (toU64 1) (toU64 0) (toU64 3) (toU64 0) (toU64 0) (toU64 0) (toU64 0) (toU64 0) (toU64 0) (toU64 0) (toU64 0)
 
 def waitRead : run Conn :=
-  conn (toU64 0) (toU64 0) (toU64 0) (toU64 0) (toU64 0) (toU64 0) (toU64 1) (toU64 1) (toU64 0) (toU64 0) (toU64 0) (toU64 0) (toU64 0) (toU64 0) (toU64 0)
+  conn (toU64 0) (toU64 0) (toU64 0) (toU64 0) (toU64 1) (toU64 1) (toU64 0) (toU64 0) (toU64 0) (toU64 0) (toU64 0) (toU64 0) (toU64 0)
 
 def begin : run Conn :=
   waitRead
 
-def hold : run Π (+ phase : U64) → Π (+ half : U64) → Π (+ keep : U64) → Π (+ verb : U64) → Π (+ path : U64) → Π (+ idc : U64) → Π (+ action : U64) → Π (+ timer : U64) → Π (+ code : U64) → Π (+ err : U64) → Π (+ act : U64) → Π (+ off : U64) → Π (+ len : U64) → Π (+ endOff : U64) → Π (+ more : U64) → Conn :=
-  λ (+ phase : U64) → λ (+ half : U64) → λ (+ keep : U64) → λ (+ verb : U64) → λ (+ path : U64) → λ (+ idc : U64) → λ (+ action : U64) → λ (+ timer : U64) → λ (+ code : U64) → λ (+ err : U64) → λ (+ act : U64) → λ (+ off : U64) → λ (+ len : U64) → λ (+ endOff : U64) → λ (+ more : U64) →
-    conn phase half keep verb path idc action timer code err act off len endOff more
+def hold : run Π (+ phase : U64) → Π (+ half : U64) → Π (+ keep : U64) → Π (+ idc : U64) → Π (+ action : U64) → Π (+ timer : U64) → Π (+ code : U64) → Π (+ err : U64) → Π (+ act : U64) → Π (+ off : U64) → Π (+ len : U64) → Π (+ endOff : U64) → Π (+ more : U64) → Conn :=
+  λ (+ phase : U64) → λ (+ half : U64) → λ (+ keep : U64) → λ (+ idc : U64) → λ (+ action : U64) → λ (+ timer : U64) → λ (+ code : U64) → λ (+ err : U64) → λ (+ act : U64) → λ (+ off : U64) → λ (+ len : U64) → λ (+ endOff : U64) → λ (+ more : U64) →
+    conn phase half keep idc action timer code err act off len endOff more
 
 def idleOf : run Π (+ endOff : U64) → Π (+ more : U64) → Conn :=
   λ (+ endOff : U64) → λ (+ more : U64) →
-    conn (toU64 3) (toU64 0) (toU64 0) (toU64 0) (toU64 0) (toU64 0) (toU64 1) (toU64 1) (toU64 0) (toU64 0) (toU64 0) (toU64 0) (toU64 0) endOff more
+    conn (toU64 3) (toU64 0) (toU64 0) (toU64 0) (toU64 1) (toU64 1) (toU64 0) (toU64 0) (toU64 0) (toU64 0) (toU64 0) endOff more
 
 def badWrite : run Π (+ fin : U64) → Conn :=
   λ (+ fin : U64) →
-    conn (toU64 2) fin (toU64 1) (toU64 0) (toU64 0) (toU64 0) (toU64 2) (toU64 0) (toU64 1) (toU64 0) (toU64 0) (toU64 0) respLen (toU64 0) (toU64 0)
+    conn (toU64 2) fin (toU64 1) (toU64 0) (toU64 2) (toU64 0) (toU64 1) (toU64 0) (toU64 0) (toU64 0) respLen (toU64 0) (toU64 0)
 
 def keepTag : run Π (k : Keep) → U64 :=
   λ (k : Keep) →
@@ -99,7 +99,7 @@ def moreAt : run Π (+ buf : Slice) → U64 :=
 
 def handleWait : run Π (+ fin : U64) → Π (+ buf : Slice) → Π (k : Keep) → Conn :=
   λ (+ fin : U64) → λ (+ buf : Slice) → λ (k : Keep) →
-    conn (toU64 1) fin (keepBit fin k) (toU64 0) (toU64 0) (toU64 0) (toU64 4) (toU64 0) (toU64 0) (toU64 0) (toU64 0) (toU64 0) (toU64 0) (endAt buf) (moreAt buf)
+    conn (toU64 1) fin (keepBit fin k) (toU64 0) (toU64 4) (toU64 0) (toU64 0) (toU64 0) (toU64 0) (toU64 0) (toU64 0) (endAt buf) (moreAt buf)
 
 def onClass : run Π (+ fin : U64) → Π (+ buf : Slice) → Π (c : Classified) → Conn :=
   λ (+ fin : U64) → λ (+ buf : Slice) → λ (c : Classified) →
@@ -144,8 +144,8 @@ def forceKeep : run Π (+ half : U64) → Π (+ keep : U64) → Π (+ bit : U64)
       | true => toU64 1
       | false => keep
 
-def onRead : run Π (+ phase : U64) → Π (+ half : U64) → Π (+ keep : U64) → Π (+ verb : U64) → Π (+ path : U64) → Π (+ idc : U64) → Π (+ action : U64) → Π (+ timer : U64) → Π (+ code : U64) → Π (+ err : U64) → Π (+ act : U64) → Π (+ off : U64) → Π (+ len : U64) → Π (+ endOff : U64) → Π (+ more : U64) → Π (+ tag : U64) → Π (+ buf : Slice) → Conn :=
-  λ (+ phase : U64) → λ (+ half : U64) → λ (+ keep : U64) → λ (+ verb : U64) → λ (+ path : U64) → λ (+ idc : U64) → λ (+ action : U64) → λ (+ timer : U64) → λ (+ code : U64) → λ (+ err : U64) → λ (+ act : U64) → λ (+ off : U64) → λ (+ len : U64) → λ (+ endOff : U64) → λ (+ more : U64) → λ (+ tag : U64) → λ (+ buf : Slice) →
+def onRead : run Π (+ phase : U64) → Π (+ half : U64) → Π (+ keep : U64) → Π (+ idc : U64) → Π (+ action : U64) → Π (+ timer : U64) → Π (+ code : U64) → Π (+ err : U64) → Π (+ act : U64) → Π (+ off : U64) → Π (+ len : U64) → Π (+ endOff : U64) → Π (+ more : U64) → Π (+ tag : U64) → Π (+ buf : Slice) → Conn :=
+  λ (+ phase : U64) → λ (+ half : U64) → λ (+ keep : U64) → λ (+ idc : U64) → λ (+ action : U64) → λ (+ timer : U64) → λ (+ code : U64) → λ (+ err : U64) → λ (+ act : U64) → λ (+ off : U64) → λ (+ len : U64) → λ (+ endOff : U64) → λ (+ more : U64) → λ (+ tag : U64) → λ (+ buf : Slice) →
     match (u64eq tag (toU64 0)) motive (λ _ → Conn)
       | true => onBytes (toU64 0) buf
       | false =>
@@ -154,25 +154,25 @@ def onRead : run Π (+ phase : U64) → Π (+ half : U64) → Π (+ keep : U64) 
             | false =>
                 (match (u64eq tag (toU64 5)) motive (λ _ → Conn)
                   | true => shut
-                  | false => hold phase half keep verb path idc action timer code err act off len endOff more))
+                  | false => hold phase half keep idc action timer code err act off len endOff more))
 
 -- A reply leaves handle for write. Origin stays 0: the handler chose
 -- the bytes. n0 1, or a half-close, forces keep. EOF stays in handle
 -- so the handler still runs, and the response closes.
-def onHandle : run Π (+ phase : U64) → Π (+ half : U64) → Π (+ keep : U64) → Π (+ verb : U64) → Π (+ path : U64) → Π (+ idc : U64) → Π (+ action : U64) → Π (+ timer : U64) → Π (+ code : U64) → Π (+ err : U64) → Π (+ act : U64) → Π (+ off : U64) → Π (+ len : U64) → Π (+ endOff : U64) → Π (+ more : U64) → Π (+ tag : U64) → Π (+ n0 : U64) → Conn :=
-  λ (+ phase : U64) → λ (+ half : U64) → λ (+ keep : U64) → λ (+ verb : U64) → λ (+ path : U64) → λ (+ idc : U64) → λ (+ action : U64) → λ (+ timer : U64) → λ (+ code : U64) → λ (+ err : U64) → λ (+ act : U64) → λ (+ off : U64) → λ (+ len : U64) → λ (+ endOff : U64) → λ (+ more : U64) → λ (+ tag : U64) → λ (+ n0 : U64) →
+def onHandle : run Π (+ phase : U64) → Π (+ half : U64) → Π (+ keep : U64) → Π (+ idc : U64) → Π (+ action : U64) → Π (+ timer : U64) → Π (+ code : U64) → Π (+ err : U64) → Π (+ act : U64) → Π (+ off : U64) → Π (+ len : U64) → Π (+ endOff : U64) → Π (+ more : U64) → Π (+ tag : U64) → Π (+ n0 : U64) → Conn :=
+  λ (+ phase : U64) → λ (+ half : U64) → λ (+ keep : U64) → λ (+ idc : U64) → λ (+ action : U64) → λ (+ timer : U64) → λ (+ code : U64) → λ (+ err : U64) → λ (+ act : U64) → λ (+ off : U64) → λ (+ len : U64) → λ (+ endOff : U64) → λ (+ more : U64) → λ (+ tag : U64) → λ (+ n0 : U64) →
     match (u64eq tag (toU64 6)) motive (λ _ → Conn)
       | true =>
-          conn (toU64 2) half (forceKeep half keep n0) (toU64 0) (toU64 0) (toU64 0) (toU64 2) (toU64 0) (toU64 0) (toU64 0) (toU64 0) (toU64 0) respLen endOff more
+          conn (toU64 2) half (forceKeep half keep n0) (toU64 0) (toU64 2) (toU64 0) (toU64 0) (toU64 0) (toU64 0) (toU64 0) respLen endOff more
       | false =>
           (match (u64eq tag (toU64 1)) motive (λ _ → Conn)
-            | true => conn phase (toU64 1) (toU64 1) verb path idc (toU64 4) (toU64 0) code err act off len endOff more
-            | false => hold phase half keep verb path idc action timer code err act off len endOff more)
+            | true => conn phase (toU64 1) (toU64 1) idc (toU64 4) (toU64 0) code err act off len endOff more
+            | false => hold phase half keep idc action timer code err act off len endOff more)
 
-def onWrite : run Π (+ phase : U64) → Π (+ half : U64) → Π (+ keep : U64) → Π (+ verb : U64) → Π (+ path : U64) → Π (+ idc : U64) → Π (+ action : U64) → Π (+ timer : U64) → Π (+ code : U64) → Π (+ err : U64) → Π (+ act : U64) → Π (+ off : U64) → Π (+ len : U64) → Π (+ endOff : U64) → Π (+ more : U64) → Π (+ tag : U64) → Π (+ n0 : U64) → Conn :=
-  λ (+ phase : U64) → λ (+ half : U64) → λ (+ keep : U64) → λ (+ verb : U64) → λ (+ path : U64) → λ (+ idc : U64) → λ (+ action : U64) → λ (+ timer : U64) → λ (+ code : U64) → λ (+ err : U64) → λ (+ act : U64) → λ (+ off : U64) → λ (+ len : U64) → λ (+ endOff : U64) → λ (+ more : U64) → λ (+ tag : U64) → λ (+ n0 : U64) →
+def onWrite : run Π (+ phase : U64) → Π (+ half : U64) → Π (+ keep : U64) → Π (+ idc : U64) → Π (+ action : U64) → Π (+ timer : U64) → Π (+ code : U64) → Π (+ err : U64) → Π (+ act : U64) → Π (+ off : U64) → Π (+ len : U64) → Π (+ endOff : U64) → Π (+ more : U64) → Π (+ tag : U64) → Π (+ n0 : U64) → Conn :=
+  λ (+ phase : U64) → λ (+ half : U64) → λ (+ keep : U64) → λ (+ idc : U64) → λ (+ action : U64) → λ (+ timer : U64) → λ (+ code : U64) → λ (+ err : U64) → λ (+ act : U64) → λ (+ off : U64) → λ (+ len : U64) → λ (+ endOff : U64) → λ (+ more : U64) → λ (+ tag : U64) → λ (+ n0 : U64) →
     match (u64eq tag (toU64 2)) motive (λ _ → Conn)
-      | true => conn phase half keep verb path idc (toU64 2) (toU64 0) code err act (addCap off n0 len) len endOff more
+      | true => conn phase half keep idc (toU64 2) (toU64 0) code err act (addCap off n0 len) len endOff more
       | false =>
           (match (u64eq tag (toU64 3)) motive (λ _ → Conn)
             | true => finish half keep endOff more
@@ -181,11 +181,11 @@ def onWrite : run Π (+ phase : U64) → Π (+ half : U64) → Π (+ keep : U64)
                   | true => shut
                   | false =>
                       (match (u64eq tag (toU64 1)) motive (λ _ → Conn)
-                        | true => conn phase (toU64 1) (toU64 1) verb path idc (toU64 2) (toU64 0) code err act off len endOff more
-                        | false => hold phase half keep verb path idc action timer code err act off len endOff more)))
+                        | true => conn phase (toU64 1) (toU64 1) idc (toU64 2) (toU64 0) code err act off len endOff more
+                        | false => hold phase half keep idc action timer code err act off len endOff more)))
 
-def onIdle : run Π (+ phase : U64) → Π (+ half : U64) → Π (+ keep : U64) → Π (+ verb : U64) → Π (+ path : U64) → Π (+ idc : U64) → Π (+ action : U64) → Π (+ timer : U64) → Π (+ code : U64) → Π (+ err : U64) → Π (+ act : U64) → Π (+ off : U64) → Π (+ len : U64) → Π (+ endOff : U64) → Π (+ more : U64) → Π (+ tag : U64) → Π (+ buf : Slice) → Conn :=
-  λ (+ phase : U64) → λ (+ half : U64) → λ (+ keep : U64) → λ (+ verb : U64) → λ (+ path : U64) → λ (+ idc : U64) → λ (+ action : U64) → λ (+ timer : U64) → λ (+ code : U64) → λ (+ err : U64) → λ (+ act : U64) → λ (+ off : U64) → λ (+ len : U64) → λ (+ endOff : U64) → λ (+ more : U64) → λ (+ tag : U64) → λ (+ buf : Slice) →
+def onIdle : run Π (+ phase : U64) → Π (+ half : U64) → Π (+ keep : U64) → Π (+ idc : U64) → Π (+ action : U64) → Π (+ timer : U64) → Π (+ code : U64) → Π (+ err : U64) → Π (+ act : U64) → Π (+ off : U64) → Π (+ len : U64) → Π (+ endOff : U64) → Π (+ more : U64) → Π (+ tag : U64) → Π (+ buf : Slice) → Conn :=
+  λ (+ phase : U64) → λ (+ half : U64) → λ (+ keep : U64) → λ (+ idc : U64) → λ (+ action : U64) → λ (+ timer : U64) → λ (+ code : U64) → λ (+ err : U64) → λ (+ act : U64) → λ (+ off : U64) → λ (+ len : U64) → λ (+ endOff : U64) → λ (+ more : U64) → λ (+ tag : U64) → λ (+ buf : Slice) →
     match (u64eq tag (toU64 0)) motive (λ _ → Conn)
       | true => onBytes (toU64 0) buf
       | false =>
@@ -194,33 +194,33 @@ def onIdle : run Π (+ phase : U64) → Π (+ half : U64) → Π (+ keep : U64) 
             | false =>
                 (match (u64eq tag (toU64 5)) motive (λ _ → Conn)
                   | true => shut
-                  | false => hold phase half keep verb path idc action timer code err act off len endOff more))
+                  | false => hold phase half keep idc action timer code err act off len endOff more))
 
-def stepAt : run Π (+ phase : U64) → Π (+ half : U64) → Π (+ keep : U64) → Π (+ verb : U64) → Π (+ path : U64) → Π (+ idc : U64) → Π (+ action : U64) → Π (+ timer : U64) → Π (+ code : U64) → Π (+ err : U64) → Π (+ act : U64) → Π (+ off : U64) → Π (+ len : U64) → Π (+ endOff : U64) → Π (+ more : U64) → Π (+ tag : U64) → Π (+ buf : Slice) → Π (+ n0 : U64) → Π (+ n1 : U64) → Π (+ n2 : U64) → Π (+ n3 : U64) → Π (+ n4 : U64) → Conn :=
-  λ (+ phase : U64) → λ (+ half : U64) → λ (+ keep : U64) → λ (+ verb : U64) → λ (+ path : U64) → λ (+ idc : U64) → λ (+ action : U64) → λ (+ timer : U64) → λ (+ code : U64) → λ (+ err : U64) → λ (+ act : U64) → λ (+ off : U64) → λ (+ len : U64) → λ (+ endOff : U64) → λ (+ more : U64) → λ (+ tag : U64) → λ (+ buf : Slice) → λ (+ n0 : U64) → λ (+ n1 : U64) → λ (+ n2 : U64) → λ (+ n3 : U64) → λ (+ n4 : U64) →
+def stepAt : run Π (+ phase : U64) → Π (+ half : U64) → Π (+ keep : U64) → Π (+ idc : U64) → Π (+ action : U64) → Π (+ timer : U64) → Π (+ code : U64) → Π (+ err : U64) → Π (+ act : U64) → Π (+ off : U64) → Π (+ len : U64) → Π (+ endOff : U64) → Π (+ more : U64) → Π (+ tag : U64) → Π (+ buf : Slice) → Π (+ n0 : U64) → Π (+ n1 : U64) → Π (+ n2 : U64) → Π (+ n3 : U64) → Π (+ n4 : U64) → Conn :=
+  λ (+ phase : U64) → λ (+ half : U64) → λ (+ keep : U64) → λ (+ idc : U64) → λ (+ action : U64) → λ (+ timer : U64) → λ (+ code : U64) → λ (+ err : U64) → λ (+ act : U64) → λ (+ off : U64) → λ (+ len : U64) → λ (+ endOff : U64) → λ (+ more : U64) → λ (+ tag : U64) → λ (+ buf : Slice) → λ (+ n0 : U64) → λ (+ n1 : U64) → λ (+ n2 : U64) → λ (+ n3 : U64) → λ (+ n4 : U64) →
     match (u64eq phase (toU64 4)) motive (λ _ → Conn)
       | true => shut
       | false =>
           (match (u64eq phase (toU64 0)) motive (λ _ → Conn)
-            | true => onRead phase half keep verb path idc action timer code err act off len endOff more tag buf
+            | true => onRead phase half keep idc action timer code err act off len endOff more tag buf
             | false =>
                 (match (u64eq phase (toU64 1)) motive (λ _ → Conn)
-                  | true => onHandle phase half keep verb path idc action timer code err act off len endOff more tag n0
+                  | true => onHandle phase half keep idc action timer code err act off len endOff more tag n0
                   | false =>
                       (match (u64eq phase (toU64 2)) motive (λ _ → Conn)
-                        | true => onWrite phase half keep verb path idc action timer code err act off len endOff more tag n0
+                        | true => onWrite phase half keep idc action timer code err act off len endOff more tag n0
                         | false =>
                             (match (u64eq phase (toU64 3)) motive (λ _ → Conn)
-                              | true => onIdle phase half keep verb path idc action timer code err act off len endOff more tag buf
+                              | true => onIdle phase half keep idc action timer code err act off len endOff more tag buf
                               | false => shut))))
 
 def step : run Π (+ st : Conn) → Π (+ ev : Ev) → Conn :=
   λ (+ st : Conn) → λ (+ ev : Ev) →
     match st motive (λ _ → Conn)
-      | conn phase half keep verb path idc action timer code err act off len endOff more =>
+      | conn phase half keep idc action timer code err act off len endOff more =>
           (match ev motive (λ _ → Conn)
             | ev tag buf n0 n1 n2 n3 n4 =>
-                stepAt phase half keep verb path idc action timer code err act off len endOff more tag buf n0 n1 n2 n3 n4)
+                stepAt phase half keep idc action timer code err act off len endOff more tag buf n0 n1 n2 n3 n4)
 
 def modeOf : run Π (+ phase : U64) → Π (+ half : U64) → Mode :=
   λ (+ phase : U64) → λ (+ half : U64) →
@@ -246,7 +246,7 @@ def modeOf : run Π (+ phase : U64) → Π (+ half : U64) → Mode :=
 def mode : run Π (+ st : Conn) → Mode :=
   λ (+ st : Conn) →
     match st motive (λ _ → Mode)
-      | conn phase half _keep _verb _path _idc _action _timer _code _err _act _off _len _endOff _more =>
+      | conn phase half _keep _idc _action _timer _code _err _act _off _len _endOff _more =>
           modeOf phase half
 
 def doOf : run Π (+ n : U64) → Do :=
@@ -270,7 +270,7 @@ def doOf : run Π (+ n : U64) → Do :=
 def actionOf : run Π (+ st : Conn) → Do :=
   λ (+ st : Conn) →
     match st motive (λ _ → Do)
-      | conn _phase _half _keep _verb _path _idc action _timer _code _err _act _off _len _endOff _more =>
+      | conn _phase _half _keep _idc action _timer _code _err _act _off _len _endOff _more =>
           doOf action
 
 def flagOf : run Π (+ n : U64) → Flag :=
@@ -282,7 +282,7 @@ def flagOf : run Π (+ n : U64) → Flag :=
 def moreFlag : run Π (+ st : Conn) → Flag :=
   λ (+ st : Conn) →
     match st motive (λ _ → Flag)
-      | conn _phase _half _keep _verb _path _idc _action _timer _code _err _act _off _len _endOff more =>
+      | conn _phase _half _keep _idc _action _timer _code _err _act _off _len _endOff more =>
           flagOf more
 
 def evBytes : run Π (+ s : Slice) → Ev :=
@@ -376,7 +376,7 @@ def sawProgress : run Mode :=
 
 def sawProgressFlag : run Flag :=
   flagOf (match (step healthWritten (evProgress (toU64 8))) motive (λ _ → U64)
-    | conn _phase _half _keep _verb _path _idc _action _timer _code _err _act off _len _endOff _more => off)
+    | conn _phase _half _keep _idc _action _timer _code _err _act off _len _endOff _more => off)
 
 def sawIdle : run Mode :=
   mode (step healthWritten evDone)

@@ -79,8 +79,6 @@ static uint64_t field(Conn st, int i) {
   case 10: return st.muro__as.conn.muro__f_10;
   case 11: return st.muro__as.conn.muro__f_11;
   case 12: return st.muro__as.conn.muro__f_12;
-  case 13: return st.muro__as.conn.muro__f_13;
-  case 14: return st.muro__as.conn.muro__f_14;
   default: return 0;
   }
 }
@@ -359,7 +357,7 @@ static void status_before_close(Server *sv, Slot *s) {
 }
 
 static int fill_request(Slot *s, MuroHttpRequest *req) {
-  uint64_t end = field(s->st, 13);
+  uint64_t end = field(s->st, 11);
   muro__slice buf;
   if (end == 0 || end > (uint64_t)s->in_len || !s->in) return -1;
   buf.p = s->in;
@@ -432,10 +430,10 @@ static int pump(Server *sv, Slot *s) {
   int spins = 0;
   while (s->used && spins < PUMP_FUSE) {
     int phase = (int)field(s->st, 0);
-    int action = (int)field(s->st, 6);
-    int timer = (int)field(s->st, 7);
-    uint64_t end_off = field(s->st, 13);
-    uint64_t more = field(s->st, 14);
+    int action = (int)field(s->st, 4);
+    int timer = (int)field(s->st, 5);
+    uint64_t end_off = field(s->st, 11);
+    uint64_t more = field(s->st, 12);
     spins += 1;
     if (phase == PH_CLOSED || action == HOST_ACT_CLOSE) {
       close_slot(sv, s);
@@ -480,7 +478,7 @@ static int pump(Server *sv, Slot *s) {
       if (!s->rendered) {
         /* Origin 1 is the book's malformed response. A handler
            reply was copied before the image entered write. */
-        if (field(s->st, 8) != 1 || copy_fixed(s, 0) < 0) {
+        if (field(s->st, 6) != 1 || copy_fixed(s, 0) < 0) {
           close_slot(sv, s);
           return 0;
         }
