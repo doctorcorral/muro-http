@@ -29,7 +29,8 @@
 --   closeAfter: 0 keep. Any other word, or a write error: close.
 --              That offer is only at at 5. A write end at talk is a
 --              refusal: pick 1 there is the idle timeout, not close.
---   at:        `st.at` on the muro 0.21.14 conn stepper.
+--   at:        `st.at` on the conn stepper. These numbers are the ones
+--              `c/generated/session.c` assigns on muro 0.22.14.
 --              1 talk or timeout, 4 open reply, 5 keep or close,
 --              7 open bad reply, 10 half chunk reply, 11 half request
 --              reply, 12 half bad reply.
@@ -56,11 +57,11 @@
 --
 -- muro checks these equations by reduction. It does not check that an
 -- offer is a legal prefix of `session conn` from `at`. A `run` is not
--- a `conform`, and there is no judgment that takes a position and a
--- list of directed moves. `test/sess_agree_test.exs` steps each offer
--- on the machine emitted from `session.muro`. That check is
--- conformance. The full traces those offers concatenate are the
--- conforms already in that book.
+-- a `conform`. The checker has `prefix` for a list of directed moves
+-- from a position. This book does not declare one.
+-- `test/sess_agree_test.exs` steps each offer on the machine emitted
+-- from `session.muro`. That check is conformance. The full traces
+-- those offers concatenate are the conforms already in that book.
 
 unboxed data Move : Type where
   mv : Π (+ present : U64) → Π (+ dir : U64) → Π (+ tag : U64) → Π (+ bit : U64) → Π (+ ctor : U64) → Move

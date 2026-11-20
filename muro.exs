@@ -1,5 +1,5 @@
 [
-  muro: "0.21.14",
+  muro: "0.22.14",
   fuel: 5_000_000,
   modules: [
     {"priv/muro/http/request.muro", "c/generated/request.c", [kind: :c]},
@@ -9,6 +9,8 @@
     {"priv/muro/http/session.muro", "c/generated/session.c", [kind: :c]},
     {"priv/muro/http/admit.muro", "c/generated/admit.c", [kind: :c]},
     {"priv/muro/http/session.muro", MuroHttp.SessionFsm, "lib/muro_http/session_fsm.ex",
+     [kind: :fsm]},
+    {"priv/muro/http/family.muro", MuroHttp.FamilyFsm, "lib/muro_http/family_fsm.ex",
      [kind: :fsm]},
     {"priv/muro/http/conn.muro", "c/generated/conn.c", [kind: :c]},
     {"priv/muro/http/render.muro", "c/generated/render.c", [kind: :c]},

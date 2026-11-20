@@ -8,24 +8,16 @@
    name that enum, so it copies the numbers. The asserts below fail
    if this emit's enums move away from those copies.
 
-   admit.h and session.h both define struct muro__nat, and the emitter
-   does not put that prelude under one include guard (GAPS.md). The
-   session prelude is renamed for this translation unit so the enums
-   are visible beside admit.h.
+   The prelude is under MURO__PRELUDE, so this file includes session.h
+   and admit.h together.
 
-   Constructor words are not stepper enums. session.h only comments
-   the Piece tags (0, 1, 2) and the Reply tags (0, 1). The book uses
-   one numbering for both, so reply-ok is 3 and reply-bad is 4.
-   There is no session.h constant to assert those against. */
+   The flat constructor word is muro__word_session_*. The book numbers
+   piece-chunk, piece-req, piece-bad, reply-ok, and reply-bad as
+   0, 1, 2, 3, and 4. The per-type tag of reply-ok is 0. That is not
+   the flat word. */
 
 #include "admit_glue.h"
-
-#define muro__nat muro__sess_nat_hide
-#define muro__unit muro__sess_unit_hide
 #include "session.h"
-#undef muro__nat
-#undef muro__unit
-
 #include "admit.h"
 
 #include <stddef.h>
@@ -34,6 +26,11 @@ _Static_assert(MURO_SESS_SEND == 1, "admit.muro dirSend");
 _Static_assert(MURO_SESS_RECV == 2, "admit.muro dirRecv");
 _Static_assert(MURO_SESS_PICK == 4, "admit.muro tagPick");
 _Static_assert(MURO_SESS_DATA == 8, "admit.muro tagData");
+_Static_assert(muro__word_session_Piece_piecezdchunk == 0, "piece-chunk");
+_Static_assert(muro__word_session_Piece_piecezdreq == 1, "piece-req");
+_Static_assert(muro__word_session_Piece_piecezdbad == 2, "piece-bad");
+_Static_assert(muro__word_session_Reply_replyzdok == 3, "reply-ok");
+_Static_assert(muro__word_session_Reply_replyzdbad == 4, "reply-bad");
 
 static const char *ctor_name(uint64_t ctor) {
   if (ctor == 0) return "piece-chunk";

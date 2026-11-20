@@ -1,0 +1,72 @@
+-- Per-key reply order. One key is one connection.
+--
+-- This book is a hold rule over a fixed script. It is not the poll
+-- loop, and it does not order replies across different keys.
+-- `c/host.c` never calls this dispatcher. `--backend c` omits a
+-- family. `--backend fsm` emits `MuroHttp.FamilyFsm`.
+--
+-- `accept` opens on arrival. It is never held. `reply` stays held
+-- while any earlier instance of the same key is unresolved. An
+-- earlier accept counts, and so does an earlier reply. An instance
+-- that has not arrived does not. Another key does not. An older
+-- reply that arrives after a newer one has opened runs beside it.
+-- This is not one reply at a time. `earlier_resolved` names the
+-- earlier replies of this key known when this reply opened. It does
+-- not count the reply that is opening, and it does not count an
+-- accept.
+--
+-- The meeting is one reply: the peer puts `ok`, the host takes it,
+-- and both end. It is not `session conn`. It does not classify, and
+-- it does not choose a status. The host still admits one socket at
+-- a time through `admitChoice` and `muro__sess_conn_step`.
+--
+-- `mix muro.check` walks one fixed script. Key `a` is accept, then
+-- reply, then reply. Key `b` is accept. `reply-order`, `accept-free`,
+-- and `reply-opens` share that graph. The counts on those lines are
+-- a regression pin of the script. A different count means the
+-- script, the meeting, the hold rule, or the checker explored a
+-- different graph. They are not a proof for every key count, and
+-- they are not a bound on live sockets. The pin proves the hold
+-- rule for any number of keys and any number of instances, in that
+-- package's `agda/Muro/Family.agda`. This book does not contain
+-- that proof. The program that writes the dispatcher is not proved.
+--
+-- Not stated here. This pin has no formula for them:
+--   `nconn` never exceeds `max_conn`
+--   an accepted connection is eventually closed
+--   a resolved connection never arrives another reply
+-- The host keeps a slot until `close_slot`. The hold rule does not
+-- make the host resolve. A later `reply` of a key can still open.
+
+data Act : Type where
+  accept : Act
+  reply : Act
+
+data Report : Type where
+  ok : Report
+
+session reply-out := send Report end
+session reply-in := recv Report end
+
+conform peer : reply-out := put ok done
+
+conform host : reply-in :=
+  get (r : Report) done
+
+meet turn : host with peer buffer 1
+
+family conns : turn per key of Act
+  accept never held
+  reply held while earlier unresolved
+
+temporal drained : turn :=
+  always ((host done) implies (inbox host is empty))
+
+temporal reply-order : conns :=
+  forall (k : key). always ((opened k reply) implies (earlier_resolved k reply))
+
+temporal accept-free : conns :=
+  forall (k : key). always (not (held k accept))
+
+temporal reply-opens : conns :=
+  forall (k : key). (held k reply) leads_to (opened k reply)

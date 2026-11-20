@@ -1,11 +1,11 @@
 # Compiler gaps
 
-muro 0.21.14. The books check, and the runs emit. The generated C is
+muro 0.22.14. The books check, and the runs emit. The generated C is
 not edited. The three limits below were real on muro 0.20.36. They
 are closed as of muro 0.20.39. The header record is unboxed as of
-muro 0.20.42. On 0.21.14, `classify` still allocates the one
-`Classified` result, and the C driver still prints `view-allocs 0`,
-`health-allocs 1`, `post-allocs 1`.
+muro 0.20.42. On 0.22.14, as on 0.21.14, `classify` still allocates
+the one `Classified` result, and the C driver still prints
+`view-allocs 0`, `health-allocs 1`, `post-allocs 1`.
 
 ## Closed on muro 0.20.39
 
@@ -110,7 +110,7 @@ the request buffer, including a zero-length value. Comparing the
 pointer with the including file's `muro__empty_bytes` does not
 detect a miss.
 
-## The connection stepper, on muro 0.21.14
+## The connection stepper, on muro 0.22.14
 
 `--backend c` emits `priv/muro/http/session.muro` as a stepper
 (`c/generated/session.c`). That file is generated. The emitted stepper
@@ -160,12 +160,12 @@ function:
 
 muro checks the equations in `admit.muro` by reduction. That is not a
 check that an offer is a legal prefix of `conn` from `st.at`. A `run`
-is not a `conform`. The grammar has no judgment that a list of
-directed moves is legal from a position, where the position is a named
-continuation or the numeric `at` the C stepper assigns. Until that
-judgment exists, `test/sess_agree_test.exs` is the prefix check: it
-steps each offer on the emitted stepper and compares the move list
-with the frozen scenario traces and with
+is not a `conform`. The checker has `prefix` for a list of directed
+moves from a position, including the numeric `at` the C stepper
+assigns. `admit.muro` does not declare one, so the checker does not
+connect `admitChoice` to `session conn`. `test/sess_agree_test.exs`
+is that check: it steps each offer on the emitted stepper and
+compares the move list with the frozen scenario traces and with
 `Conn.check_trace`. That is conformance. The bounded
 emitter walk is not a proof. `session.muro` already records the full
 traces those offers concatenate as `conform` (keep, close, timeout,
@@ -254,45 +254,98 @@ positive length does not finish, so a ten-byte body is not an
 equation. `c/test_render` checks the five strings and that longer
 body in the emitted C.
 
-`render.h` defines the same prelude as `conn.h`. `c/host.c` does not
-include it. `c/host_render.c` includes the emitted header and copies
-the slice into the host buffer, so the `httpRender` signature cannot
-drift. The host then calls `muro_http_reset`.
+`c/host_render.c` includes `render.h` and copies the slice into the
+host buffer, so the `httpRender` signature cannot drift. `conn.h` and
+`render.h` both put the prelude under `MURO__PRELUDE`, so one
+translation unit can include both. `c/host.c` calls
+`host_copy_response` and does not include `render.h`. The host then
+calls `muro_http_reset`.
 
-muro 0.21.15 and muro 0.21.16 do not change this. 0.21.15 is a
-temporal check over a keyed family. 0.21.16 ranks a recursive `State`
-that does not declare `all-states`. Neither emits response bytes or
-a socket loop. The pin stays 0.21.14.
+muro 0.21.15 and muro 0.21.16 do not change the response bytes.
+0.21.15 is a temporal check over a keyed family. 0.21.16 ranks a
+recursive `State` that does not declare `all-states`. Neither emits
+a socket loop. The pin is 0.22.14. The per-key family is below.
+
+## Reply order per key
+
+`priv/muro/http/family.muro` is a hold rule over a fixed script. It
+is not `host_poll`. One key is one connection. `accept` is never
+held. `reply` is held while an earlier instance of that key is
+unresolved. Another key does not wait. The rule does not order
+replies across different connections. `--backend fsm` emits
+`MuroHttp.FamilyFsm.Conns`. `--backend c` omits the family.
+`c/host.c` never calls that dispatcher.
+
+The pin's `agda/Muro/Family.agda` proves the hold rule for any number
+of keys and any number of instances. An opened `reply` has every
+earlier instance of its connection, known when it opened, resolved,
+when that rule is `held while earlier unresolved`. Whether an
+instance is held depends only on its own key. A held instance has
+some opened instance of its key. The host is not obliged to resolve.
+`withdraw` drops a held instance and releases the same way `resolved`
+does. This repository does not contain that proof. The program that
+writes the dispatcher is not proved.
+
+`mix muro.check` walks a fixed script and prints:
+
+- `temporal drained: holds in 3 reachable states, 3 transitions`
+- `temporal reply-order: holds in 3721 reachable states, 10521 transitions`
+- `temporal accept-free: holds in 3721 reachable states, 10521 transitions`
+- `temporal reply-opens: holds in 3721 reachable states, 10521 transitions`
+
+The three family lines share one graph. 3721 states and 10521
+successor-table entries are a regression pin of the script (key `a`
+is accept, then reply, then reply; key `b` is accept). A different
+count means that graph changed. It is not the proof above, and it
+is not a bound on live sockets. `test/family_test.exs` is a second
+check: two keys on the emitted dispatcher, in host order (accept
+before reply), a refused step on a held reply, a withdraw that does
+not open the reply, a finished reply reported until `resolved`, and
+one send on the reply turn.
+
+Not proved, and not stated as a formula, because this pin cannot
+discharge them for the poll loop:
+
+- `nconn` never exceeds `max_conn`. The family has no numeric cap.
+  The host tests that cap.
+- An accepted connection is eventually closed. `reply-opens` is the
+  script. A keep-alive connection stays in the table.
+- A closed connection never arrives another reply. A later `reply`
+  of that key can still open. The per-connection refusal is
+  `neg/write_closed.muro`, the stepper, `closed-refuses` in
+  `admit.muro`, and `close_slot`.
+
+An older reply that arrives late opens beside a newer one that is
+already running. The host does not read the next request while a
+response is in progress. The formula does not say that.
 
 ## Emitter gaps this book hit
 
 These are missing muro emitter features. This repository does not
 patch murolang/muro for them.
 
-1. No checker judgment that a list of directed moves is a legal prefix
-   of a session from a position (a named continuation, or the numeric
-   `at` the C stepper assigns). The book's evidence is reduction only.
-   The prefix check is the conformance test above.
+1. `admit.muro` does not declare `prefix`. The checker can judge a
+   list of directed moves from a position. The book's evidence is
+   still reduction only. It does not tie `admitChoice` to `session
+   conn` at `st.at`. The prefix check for those offers is the
+   conformance test above.
 
-2. The C prelude structs (`struct muro__nat`, `struct muro__unit`)
-   are not under a shared include guard. A direct include of both
-   `c/generated/admit.h` and `c/generated/session.h` fails. The unpack
-   stays in its own translation unit, and that file renames the
-   session prelude before including it. The feature needed is one
-   include guard around that prelude.
+2. Closed on this pin. The C prelude structs (`struct muro__nat`,
+   `struct muro__unit`) are under `MURO__PRELUDE`. `c/admit_glue.c`
+   includes `c/generated/admit.h` and `c/generated/session.h` in one
+   translation unit.
 
 3. A book cannot name the stepper's C enum. `dir` and `tag` in
    `admit.muro` are copied literals (send 1, recv 2, pick 4, data 8).
-   The feature needed is a way for a `run` to name those enums, or for
-   the emitter to share them. `c/admit_glue.c` cannot include
-   `session.h` beside `admit.h` (gap 2). It renames the session
-   prelude, compares `dir` and `tag` with `MURO_SESS_SEND`,
-   `MURO_SESS_RECV`, `MURO_SESS_PICK`, and `MURO_SESS_DATA`, and
-   `_Static_assert`s those enums against the book's copied numbers.
-   Constructor words are not stepper enums. `session.h` only comments
-   the `Piece` tags (0, 1, 2) and the `Reply` tags (0, 1). The book's
-   ctor word numbers both (reply-ok is 3, reply-bad is 4), so there is
-   no constant to assert. The name strings in the glue stay literals.
+   The feature needed is a way for a `run` to name those enums.
+   `c/admit_glue.c` includes `session.h`, compares `dir` and `tag`
+   with `MURO_SESS_SEND`, `MURO_SESS_RECV`, `MURO_SESS_PICK`, and
+   `MURO_SESS_DATA`, and `_Static_assert`s those enums against the
+   book's copied numbers. The flat constructor word is
+   `muro__word_session_*`. The glue asserts piece-chunk, piece-req,
+   piece-bad, reply-ok, and reply-bad as 0, 1, 2, 3, and 4. The
+   per-type tag of reply-ok is 0. The name strings in the glue stay
+   literals. The stepper still takes the name, not the word.
 
 4. `muro__sess_conn_step` takes a constructor name string, not the
    data value the book built. The tag-to-string map lives in

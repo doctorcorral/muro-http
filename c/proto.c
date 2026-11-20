@@ -6,8 +6,9 @@
    into the book's words, and calls `muro__sess_conn_step` once per
    offered move. A refused move leaves the session where it was.
 
-   admit.h and session.h cannot share a translation unit. c/admit_glue.c
-   is the unpack between them.
+   c/admit_glue.c unpacks the offer. The prelude is under
+   MURO__PRELUDE, so that file includes admit.h and session.h
+   together.
 
    The HTTP image (classify, the handler, write ranges, keep-alive, the
    idle timer, the half-close flag, pipelined endOff/more) stays in

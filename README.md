@@ -11,8 +11,8 @@ admission, and the response bytes, plus a C host that dispatches to a
 handler. The challenge server is an example on that core. This
 repository is version `0.1.0-dev`.
 
-It pins the released Hex package muro `0.21.14` (`{:muro, "~> 0.21.14"}`
-in `mix.exs`, `muro: "0.21.14"` in `muro.exs`). It does not depend on a
+It pins the released Hex package muro `0.22.14` (`{:muro, "~> 0.22.14"}`
+in `mix.exs`, `muro: "0.22.14"` in `muro.exs`). It does not depend on a
 compiler checkout.
 
 It is hosted at https://github.com/doctorcorral/muro-http. There is no Hex publish.
@@ -118,8 +118,9 @@ emits it as `admitChoice` (`c/generated/admit.c`). The inputs are the
 host event and `st.at` on this stepper. The output is the sequence of
 moves to offer, or a refusal, or no move. muro checks that function
 by reduction. It does not check that an offer is a legal prefix of
-`conn` from that position: a `run` is not a `conform`, and there is
-no judgment that takes a position and a list of directed moves.
+`conn` from that position: a `run` is not a `conform`. The checker
+has `prefix` for a list of directed moves from a position. This book
+does not declare one.
 `test/sess_agree_test.exs` steps each offer on the machine emitted
 from `session.muro` and checks it against frozen scenario traces and
 `Conn.check_trace`. That check is conformance. A two-request
@@ -131,8 +132,8 @@ It does not choose talk versus timeout, open versus FIN, the piece
 constructor, an immediate reply, the handler reply, or the
 keep-or-close bit. `c/admit_glue.c` unpacks the unboxed offer and
 turns the book's constructor tag into the name string the stepper
-compares. Those two generated headers both define `struct muro__nat`,
-so they cannot be included from one translation unit.
+compares. The prelude is under `MURO__PRELUDE`, so that file includes
+`session.h` and `admit.h` in one translation unit.
 `c/test_conn` calls `proto_admit` before the HTTP image. A refused
 move does not run the image.
 
@@ -224,6 +225,67 @@ Pipelined bytes stay in the receive buffer. `endOff` and `more` say
 where the next request starts. The host does not read the socket
 while a response is in progress. The arena resets after that copy.
 Header walks do not reset it, so a handler may still hold slices.
+
+### Reply order per key
+
+`priv/muro/http/family.muro` is a hold rule over a fixed script. It
+is not the poll loop. One key is one connection. `accept` opens on
+arrival and is never held. `reply` stays held while any earlier
+instance of that same key is unresolved. An earlier accept counts,
+and so does an earlier reply. Another key does not. The rule does
+not order replies across different connections. `--backend fsm` emits
+the dispatcher as `MuroHttp.FamilyFsm.Conns`. `--backend c` omits a
+family, so `c/host.c` never calls it. The poll loop still admits
+one socket through `admitChoice` and `muro__sess_conn_step`.
+
+`mix muro.check` walks one fixed script: key `a` is accept, then
+reply, then reply, and key `b` is accept. These lines hold:
+
+- `drained`, on the one-reply meeting: 3 reachable states, 3
+  transitions. When the host has taken the reply, its inbox is empty.
+- `reply-order`: 3721 reachable states, 10521 transitions. An opened
+  reply has every earlier reply of that key, known when it opened,
+  resolved.
+- `accept-free`: the same 3721 states and 10521 transitions. An
+  accept is not held.
+- `reply-opens`: the same 3721 states and 10521 transitions. A held
+  reply is later opened. This is the script. It has no fairness
+  filter.
+
+`reply-order`, `accept-free`, and `reply-opens` share one graph.
+3721 and 10521 are a regression pin of that script. 10521 is the
+successor table, not a breadth-first parent map. A different count
+means the script, the meeting, the hold rule, or the checker
+explored a different graph. The walk is not a proof for every key
+count, and it is not a bound on live sockets. The pin proves the
+hold rule for any number of keys and any number of instances
+(`agda/Muro/Family.agda` in muro 0.22.14). This repository does not
+contain that proof. The program that writes the dispatcher is not
+proved. `test/family_test.exs` replays two keys on the emitted
+dispatcher, in host order: accept, then reply. An accept on one key
+opens while the other key has a live reply. A later reply stays held
+until the earlier reply of that key resolves. A session step on a
+held reply is refused. Withdrawing the held reply does not open it.
+A reply whose turn has finished is reported until `resolved`. A
+second send on `reply-out` is refused. That is the emitted machine.
+
+The same pin does not prove three properties of the poll loop.
+
+- `nconn` stays at most `max_conn`. The family has no numeric cap.
+  `accept_some` accepts while `nconn < max_conn`. `c/test_serve`
+  refuses a cap outside 1..1024. `c/test_e2e` fills the table.
+- An accepted connection is eventually closed. `reply-opens` is the
+  script above. A keep-alive connection stays open. The hold rule
+  does not make the host resolve.
+- A closed connection never arrives another reply. A later `reply`
+  of that key can still open. On one connection, `neg/write_closed.muro`
+  is refused, the stepper refuses a send after `end`, `admitChoice`
+  on phase closed refuses, and the image returns the closed state.
+  `close_slot` drops the fd. Those checks are not the family.
+
+An older reply that arrives after a newer one has opened runs beside
+it. The host does not do that. It does not read the next request
+while a response is in progress. The formula does not say so.
 
 ## The challenge example
 
@@ -378,7 +440,9 @@ in the emitted C, plus the challenge health bytes, a JSON array, a
 405, and a ten-byte body. That is a test.
 
 muro 0.21.15 and 0.21.16 add a temporal check and a synthesis cover.
-They do not change response bytes or this loop. The pin stays 0.21.14.
+They do not change response bytes or this loop. The pin is 0.22.14.
+The per-key reply-order check is `priv/muro/http/family.muro`. It is
+a hold rule over a fixed script, not this loop.
 
 The server end is `conn`. The client end `peer` is `dual conn`.
 
@@ -415,7 +479,10 @@ timeout, a bad request, half-close, bare FIN, and a chunk.
 views, `findHeader`), `conn.muro`, `session.muro`, `admit.muro`, and
 `render.muro` (`httpRender`, `httpMalformed`, `httpInternal`). It
 emits the challenge books `decide.muro`, `route.muro`, and
-`body.muro` (`bodyClass`, `textOff`, `textLen`).
+`body.muro` (`bodyClass`, `textOff`, `textLen`). `--backend fsm`
+emits `family.muro` as `MuroHttp.FamilyFsm`. That backend is the one
+that emits a keyed family. The C backend omits it, and `c/host.c`
+does not call the dispatcher.
 
 Hand-written core: `c/muro_http.h`, `c/host.c`, `c/host_poll.c`,
 `c/host_render.c`, `c/proto.c`, `c/admit_glue.c`, `c/shim.c`.
@@ -424,8 +491,9 @@ Hand-written challenge, under `examples/challenge/`: `httpd.c` (main),
 (SHA-256, HMAC-SHA256, base64url, the HS256 check), `json_text.c`
 (string unescape, the UTF-8 check, and the row JSON), and
 `host_body.c` (the call into `bodyClass`). `examples/hello/hello.c`
-is the second server. Each generated header defines the prelude, so
-one translation unit includes only one of them. `conn.o` already
+is the second server. The prelude is under `MURO__PRELUDE`.
+`c/admit_glue.c` includes `admit.h` and `session.h` together.
+`conn.o` already
 contains `request.muro`. Do not also link `request.o`. `conn.o`
 emits `not`, `and`, and `or` because it imports `std:bool.muro`. A
 book linked beside it must not import that book. `decide.muro` and
@@ -521,7 +589,7 @@ The shim, the driver, and the generated file are compiled with
 
 The driver prints `OK` and allocation counts. `methodView`,
 `targetView`, `pathView`, `queryView`, `versionView`, and `bodyView`
-allocate 0. On muro 0.21.14, as on 0.20.42, `classify` of
+allocate 0. On muro 0.22.14, as on 0.20.42, `classify` of
 `GET /health` allocates 1 and `classify` of `POST /posts` with a
 two-byte body allocates 1. That object is the `Classified` result.
 See `GAPS.md`. `bodyClass`, `textOff`, and `textLen` allocate 0,
@@ -536,8 +604,8 @@ value points inside the buffer and has length 0.
 and calls the stepper in `c/generated/session.c`. The link does not
 include `request.o`: `conn.muro` already imports that book. It does
 not include `decide.o`: the image does not call `decide`. `session.c` and `admit.c` are separate translation units.
-Their headers both define `struct muro__nat`, so `c/admit_glue.c`
-is the only file that includes `admit.h`.
+Their headers share `MURO__PRELUDE`. `c/admit_glue.c` includes both
+and unpacks the offer.
 
 ```sh
 cc -Wall -Wextra -Werror -std=c11 -O2 -I c -I c/generated -include c/shim.h \

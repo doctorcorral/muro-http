@@ -11,8 +11,10 @@
    A committed handler that fails before a status byte leaves is
    httpInternal. This file does not invent those words.
 
-   c/generated/render.h cannot sit in this file. It and conn.h both
-   define the muro prelude. c/host_render.c includes render.h. */
+   The response copy is c/host_render.c, which includes render.h.
+   conn.h and render.h both put the prelude under MURO__PRELUDE, so
+   one translation unit can include both. This file calls
+   host_copy_response and does not include render.h. */
 
 #include "shim.h"
 #include "conn.h"
