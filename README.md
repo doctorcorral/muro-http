@@ -1,6 +1,6 @@
 <table>
   <tr>
-    <td bgcolor="#000000" width="170" align="center">
+    <td align="center">
       <a href="https://github.com/doctorcorral/muro-http"><img src="assets/muro-http-logo.jpg" alt="muro-http" width="150"></a>
     </td>
     <td>
