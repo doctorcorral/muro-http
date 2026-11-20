@@ -1,9 +1,10 @@
 #ifndef MURO_HTTP_HOST_POLL_H
 #define MURO_HTTP_HOST_POLL_H
 
-/* Level-triggered readiness. kqueue on macOS, epoll on Linux.
-   The timer is a one-shot. Arming it again replaces the deadline.
-   ms == 0 disarms it. */
+/* Level-triggered readiness on poll(2), on macOS and on Linux.
+   The timer is a one-shot deadline. Arming it again replaces that
+   deadline. ms == 0 disarms it. A ready socket that wakes the wait
+   early does not move the deadline. */
 
 typedef struct HostPoll HostPoll;
 

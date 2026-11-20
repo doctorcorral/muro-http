@@ -31,7 +31,6 @@
 #include <fcntl.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
-#include <poll.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -497,26 +496,18 @@ static const char k_500_close[] =
     "\r\n"
     "internal";
 
-/* Best-effort. The fd is non-blocking. A short write is retried. */
+/* Best-effort. The fd is non-blocking. A short write is retried.
+   EAGAIN returns. Waiting here would stall every other socket. */
 static void write_status(Server *sv, int fd, const char *p, size_t n) {
   size_t off = 0;
-  int spins = 0;
   if (fd < 0 || !p || n == 0) return;
-  while (off < n && spins < 8) {
+  while (off < n) {
     ssize_t w = write(fd, p + off, n - off);
     if (w < 0 && errno == EINTR) continue;
-    if (w < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
-      struct pollfd pfd;
-      pfd.fd = fd;
-      pfd.events = POLLOUT;
-      if (poll(&pfd, 1, 200) <= 0) return;
-      spins += 1;
-      continue;
-    }
+    if (w < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) return;
     if (w <= 0) return;
     off += (size_t)w;
     note_write(sv, (size_t)w);
-    spins = 0;
   }
 }
 
