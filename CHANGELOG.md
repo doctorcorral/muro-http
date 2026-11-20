@@ -2,6 +2,42 @@
 
 ## 0.1.0-dev — unreleased
 
+- HTTP/1.1 with the headers finished and not exactly one `Host` is
+  400. The previous challenge server accepted a request that omitted
+  `Host`. HTTP/1.0 may still omit it. A second `Host` is malformed
+  on both.
+- A field name with whitespace before the colon is 400. `classify`
+  and `findHeader` both reject it, so `Content-Length : 2` is not a
+  body length on one path and a header on the other. Space after the
+  colon is still legal.
+- A handler status from 400 through 599 is `reply-bad` and closes
+  the connection. A 2xx or 3xx stays `reply-ok` and can keep it.
+- The host rejects a reason or an extra header block that would
+  break CRLF framing, and drops handler `Connection`,
+  `Content-Length`, and `Transfer-Encoding`. The book still writes
+  `Connection` and `Content-Length`. Response pointers must stay
+  valid until that copy, which is after the handler returns.
+- `muro_http_serve` refuses `max_conn` outside 1..1024. Every
+  successful listen prints `listening <host> <port>`, including
+  port 0.
+- The HTTP/1.1 core is the books under `priv/muro/http/` and the C
+  host behind `c/muro_http.h`. `classify` returns status and
+  keep-alive. Method, target, path, query, version, headers, and body
+  are zero-copy slices. HTTP/1.1 with the headers finished requires
+  exactly one `Host`. The image calls a handler (`Request -> Response`)
+  instead of `decide`. The host owns sockets, buffers, the connection
+  table, the clock, and `poll`. It does not choose a status, a header,
+  or a body. `httpRender` takes a status, a reason, extra headers, a
+  body, and keep. `--bind` and `MURO_HTTP_BIND` select the IPv4 listen
+  address. The default remains `127.0.0.1`.
+- The challenge server is `examples/challenge/` (`decide.muro`,
+  `route.muro`, `body.muro`, SQLite, JWT, JSON). `c/muro-httpd` is
+  still that binary and still serves `/health`, `/feed`, `/posts`, and
+  `/posts/:id/like`. `examples/hello/hello.c` is a second server on
+  the same header: GET answers `hello\n`, POST echoes the body, and
+  there is no SQLite. `c/test_hello`, `c/test_route`, and `c/test_tags`
+  run from `make c-check` and `make c-sanitize`. The pin stays
+  0.21.14. The library version stays `0.1.0-dev`.
 - A write-only `POLLHUP` without `POLLOUT` closes that slot instead
   of spinning the poll loop (the macOS case when a peer aborts
   mid-response). A peer FIN while the host is still reading is still

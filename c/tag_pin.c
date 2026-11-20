@@ -1,10 +1,10 @@
-/* decision_tags.h is a hand copy of constructor order. conn.h's
+/* decision_tags.h is a hand copy of constructor order. decide.h's
    *From helpers are the emitted map. This file checks one against
-   the other. It does not choose a response. conn.h cannot be included
-   next to render.h (GAPS.md, the prelude). */
+   the other. It does not choose a response. decide.h cannot be
+   included next to conn.h (each generated header defines the prelude). */
 
 #include "shim.h"
-#include "conn.h"
+#include "decide.h"
 #include "decision_tags.h"
 
 #include <stdio.h>

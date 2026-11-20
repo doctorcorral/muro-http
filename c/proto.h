@@ -40,12 +40,13 @@ int proto_live(const Proto *p);
 int proto_done(const Proto *p);
 
 /* Admit the protocol moves for one HTTP event, before the image runs.
-   phase is the image phase (0 read, 1 decide, 2 write, 3 idle, 4 closed).
+   phase is the image phase (0 read, 1 handle, 2 write, 3 idle, 4 closed).
+   Phase 1 is still the phase the admit map calls decide.
    ev_tag is the Ev tag. status is the classifier tag when this event
    classifies a buffer, otherwise -1. reply is 0 for reply-ok, 1 for
    reply-bad, or -1 when this event does not send one. observe is 1 when
-   a db result stays in decide. close_after is 1 when the image will
-   close after the response.
+   the handler has not sent the reply yet. The core host passes 0.
+   close_after is 1 when the image will close after the response.
 
    The host may offer several moves for this one event. Each move is
    one stepper call. Which moves are offered is `admitChoice`, emitted

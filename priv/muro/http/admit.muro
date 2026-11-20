@@ -4,21 +4,28 @@
 -- does not step it. It chooses the moves the host offers. The host
 -- calls `admitChoice`, then `muro__sess_conn_step` once per move.
 -- A refused offer is `ok` 0 and no moves. An event that is host state
--- is `ok` 1 and no moves. The image (classify, decide, the socket,
+-- is `ok` 1 and no moves. The image (classify, the handler, the socket,
 -- the buffer, the clock) stays in the caller.
 --
 -- Inputs are machine words, the same numbers the image and this emit
 -- of the stepper already use.
---   phase:     0 read, 1 decide, 2 write, 3 idle. Anything else refuses
---              when the session is not done. Closed is 4.
---   ev:        0 bytes, 1 eof, 2 progress, 3 done, 4 error, 5 tick, 6 db.
+--   phase:     0 read, 1 handle, 2 write, 3 idle. Anything else refuses
+--              when the session is not done. Closed is 4. Phase 1 is
+--              still the phase this map calls decide.
+--   ev:        0 bytes, 1 eof, 2 progress, 3 done, 4 error, 5 tick,
+--              6 handler reply. The symbol stays `aEvDb`. The trace
+--              word stays `db`.
 --   n:         buffer length. Only zero against nonzero matters.
 --   hasCls:    0 when the host has no classifier tag (the C `int` was
 --              negative). 1 when `cls` is that tag.
 --   cls:       0 status-ok, 1 status-malformed, anything else a chunk.
---   hasRep:    0 when the host has no decide code. 1 when `rep` is it.
---   rep:       0 reply-ok. Any other word is reply-bad.
---   observe:   0 send the reply. Any other word: the image is observing.
+--   hasRep:    0 when this event is not a handler reply. 1 when `rep`
+--              is that reply word.
+--   rep:       0 reply-ok. Any other word is reply-bad. A 4xx or 5xx
+--              status is reply-bad.
+--   observe:   0 send the reply. Any other word: the image is observing
+--              and this event offers no reply. The core host passes 0.
+--              It does not pass a db result.
 --   closeAfter: 0 keep. Any other word, or a write error: close.
 --              That offer is only at at 5. A write end at talk is a
 --              refusal: pick 1 there is the idle timeout, not close.
@@ -73,6 +80,8 @@ def aEvProgress : run U64 := toU64 2
 def aEvDone : run U64 := toU64 3
 def aEvError : run U64 := toU64 4
 def aEvTick : run U64 := toU64 5
+-- Tag 6 is the handler reply. The name stays aEvDb so the emitted
+-- symbol and the trace word `db` do not move.
 def aEvDb : run U64 := toU64 6
 
 def clsOk : run U64 := toU64 0
@@ -244,6 +253,8 @@ def waitingChoice : run Π (+ at : U64) → Π (+ stuck : U64) → Π (+ key : U
       | wtrue => same at atKeep
       | wfalse => wfalse
 
+-- Phase 1. Tag 6 is the handler reply (`aEvDb`). A non-zero observe
+-- offers no reply. The host does not pass a db result here.
 def aOnDecide : run Π (+ ev : U64) → Π (+ hasRep : U64) → Π (+ rep : U64) → Π (+ observe : U64) → Π (+ at : U64) → Π (+ stuck : U64) → Π (+ key : U64) → Offer :=
   λ (+ ev : U64) → λ (+ hasRep : U64) → λ (+ rep : U64) → λ (+ observe : U64) → λ (+ at : U64) → λ (+ stuck : U64) → λ (+ key : U64) →
     match (same ev aEvDb) motive (λ _ → Offer)

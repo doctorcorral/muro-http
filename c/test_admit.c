@@ -14,6 +14,7 @@
 
    phase: read decide write idle closed
    ev: bytes eof progress done error tick db
+       `db` is tag 6, the handler reply. The word was not renamed.
    status: ok (0), bad (1), chunk (2), none (no tag), or a number.
            A tag other than 0 or 1 is a chunk, including one outside
            {0, 1, 2}.

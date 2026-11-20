@@ -1,0 +1,398 @@
+/* The HTTP/1.1 core without the challenge app. GET answers hello,
+   POST echoes the body, and any other method is 405. /health is not
+   a special route. A request with no Host is the book's 400. */
+
+#include <arpa/inet.h>
+#include <errno.h>
+#include <netinet/in.h>
+#include <poll.h>
+#include <signal.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/socket.h>
+#include <sys/time.h>
+#include <sys/wait.h>
+#include <unistd.h>
+
+static int failures;
+static const char *bin_path = "c/muro-hello";
+
+static void fail(const char *name, const char *what) {
+  fprintf(stderr, "FAIL %s: %s\n", name, what);
+  failures += 1;
+}
+
+static int parse_port(const char *line, const char *host) {
+  char prefix[80];
+  int port = -1;
+  int n;
+  if (!host || !host[0]) host = "127.0.0.1";
+  n = snprintf(prefix, sizeof prefix, "listening %s ", host);
+  if (n < 0 || (size_t)n >= sizeof prefix) return -1;
+  if (strncmp(line, prefix, (size_t)n) != 0) return -1;
+  if (sscanf(line + n, "%d", &port) != 1) return -1;
+  if (port <= 0 || port > 65535) return -1;
+  return port;
+}
+
+static pid_t start_hello(const char *env_bind, const char *bind_host, int *port) {
+  int sp[2];
+  pid_t pid;
+  char buf[128];
+  size_t n = 0;
+  const char *host = (bind_host && bind_host[0]) ? bind_host : "127.0.0.1";
+  if (pipe(sp) < 0) return -1;
+  pid = fork();
+  if (pid < 0) {
+    close(sp[0]);
+    close(sp[1]);
+    return -1;
+  }
+  if (pid == 0) {
+    char *av[12];
+    int argc = 0;
+    alarm(0);
+    if (dup2(sp[1], STDOUT_FILENO) < 0) _exit(127);
+    close(sp[0]);
+    close(sp[1]);
+    unsetenv("MURO_HTTP_BIND");
+    if (env_bind && env_bind[0]) setenv("MURO_HTTP_BIND", env_bind, 1);
+    unsetenv("MURO_HTTP_PORT");
+    unsetenv("MURO_HTTP_IDLE_MS");
+    unsetenv("MURO_HTTP_MAX_CONNECTIONS");
+    unsetenv("MURO_HTTP_DB");
+    unsetenv("MURO_HTTP_JWT_KEY");
+    unsetenv("SQLITE_PATH");
+    av[argc++] = "muro-hello";
+    av[argc++] = "--port";
+    av[argc++] = "0";
+    if (bind_host && bind_host[0]) {
+      av[argc++] = "--bind";
+      av[argc++] = (char *)host;
+    }
+    av[argc++] = "--idle-ms";
+    av[argc++] = "5000";
+    av[argc] = NULL;
+    execv(bin_path, av);
+    perror("exec");
+    _exit(127);
+  }
+  close(sp[1]);
+  while (n + 1 < sizeof buf) {
+    struct pollfd pfd;
+    ssize_t r;
+    pfd.fd = sp[0];
+    pfd.events = POLLIN;
+    if (poll(&pfd, 1, 3000) <= 0) break;
+    r = read(sp[0], buf + n, 1);
+    if (r <= 0) break;
+    if (buf[n] == '\n') {
+      buf[n] = 0;
+      break;
+    }
+    n += (size_t)r;
+  }
+  close(sp[0]);
+  buf[n < sizeof buf ? n : sizeof buf - 1] = 0;
+  *port = parse_port(buf, host);
+  if (*port < 0) {
+    fprintf(stderr, "FAIL start: banner '%s'\n", buf);
+    failures += 1;
+    kill(pid, SIGKILL);
+    waitpid(pid, NULL, 0);
+    return -1;
+  }
+  return pid;
+}
+
+static void stop_server(pid_t pid) {
+  int status = 0;
+  int i;
+  if (pid <= 0) return;
+  kill(pid, SIGTERM);
+  for (i = 0; i < 50; i++) {
+    pid_t got = waitpid(pid, &status, WNOHANG);
+    if (got == pid) {
+      if (!(WIFEXITED(status) && WEXITSTATUS(status) == 0)) fail("shutdown", "status");
+      return;
+    }
+    if (got < 0) return;
+    usleep(50000);
+  }
+  kill(pid, SIGKILL);
+  waitpid(pid, NULL, 0);
+  fail("shutdown", "did not stop");
+}
+
+static int dial(const char *host, int port) {
+  int fd = socket(AF_INET, SOCK_STREAM, 0);
+  struct sockaddr_in addr;
+  struct timeval tv;
+  if (fd < 0) return -1;
+  memset(&addr, 0, sizeof addr);
+  addr.sin_family = AF_INET;
+  addr.sin_port = htons((uint16_t)port);
+  if (inet_pton(AF_INET, host, &addr.sin_addr) != 1) {
+    close(fd);
+    return -1;
+  }
+  if (connect(fd, (struct sockaddr *)&addr, sizeof addr) < 0) {
+    close(fd);
+    return -1;
+  }
+  tv.tv_sec = 5;
+  tv.tv_usec = 0;
+  setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv);
+  return fd;
+}
+
+static int send_all(int fd, const char *s) {
+  size_t n = strlen(s);
+  size_t off = 0;
+  while (off < n) {
+    ssize_t w = send(fd, s + off, n - off, 0);
+    if (w < 0 && errno == EINTR) continue;
+    if (w <= 0) return -1;
+    off += (size_t)w;
+  }
+  return 0;
+}
+
+static int find_cl(const char *buf, int hend, int *cl) {
+  int i;
+  for (i = 0; i + 16 < hend; i++) {
+    if (memcmp(buf + i, "Content-Length: ", 16) == 0) {
+      int v = 0;
+      int j = i + 16;
+      if (buf[j] < '0' || buf[j] > '9') return -1;
+      while (j < hend && buf[j] >= '0' && buf[j] <= '9') {
+        v = v * 10 + (buf[j] - '0');
+        j += 1;
+      }
+      *cl = v;
+      return 0;
+    }
+  }
+  return -1;
+}
+
+static int read_response(int fd, int *status, int *conn_close, char *body, size_t body_cap,
+                         size_t *body_n) {
+  char buf[2048];
+  size_t n = 0;
+  for (;;) {
+    int hend = -1;
+    size_t i;
+    int cl = -1;
+    size_t total;
+    ssize_t r;
+    for (i = 0; i + 3 < n; i++) {
+      if (buf[i] == '\r' && buf[i + 1] == '\n' && buf[i + 2] == '\r' && buf[i + 3] == '\n') {
+        hend = (int)i;
+        break;
+      }
+    }
+    if (hend >= 0 && find_cl(buf, hend, &cl) == 0) {
+      total = (size_t)hend + 4 + (size_t)cl;
+      if (n >= total) {
+        int code = 0;
+        if (sscanf(buf, "HTTP/1.1 %d", &code) != 1) return -1;
+        *status = code;
+        *conn_close = memmem(buf, (size_t)hend, "Connection: close", 17) != NULL;
+        if ((size_t)cl >= body_cap) return -1;
+        memcpy(body, buf + hend + 4, (size_t)cl);
+        body[cl] = 0;
+        *body_n = (size_t)cl;
+        return 0;
+      }
+    }
+    if (n + 1 >= sizeof buf) return -1;
+    r = read(fd, buf + n, sizeof buf - n);
+    if (r < 0 && errno == EINTR) continue;
+    if (r <= 0) return -1;
+    n += (size_t)r;
+  }
+}
+
+static void expect_one(const char *host, int port, const char *name, const char *req, int want_status,
+                       const char *want_body, int want_close) {
+  int fd = dial(host, port);
+  int status = 0;
+  int conn_close = 0;
+  char body[128];
+  size_t body_n = 0;
+  if (fd < 0) {
+    fail(name, "connect");
+    return;
+  }
+  if (send_all(fd, req) < 0 ||
+      read_response(fd, &status, &conn_close, body, sizeof body, &body_n) < 0) {
+    fail(name, "exchange");
+    close(fd);
+    return;
+  }
+  if (status != want_status || strcmp(body, want_body) != 0) {
+    fprintf(stderr, "FAIL %s: status %d body '%s'\n", name, status, body);
+    failures += 1;
+  }
+  if (conn_close != want_close) fail(name, want_close ? "wanted close" : "wanted keep-alive");
+  close(fd);
+}
+
+static void check_bad_bind(void) {
+  int sp[2];
+  pid_t pid;
+  char buf[512];
+  size_t n = 0;
+  int status = 0;
+  int i;
+  int reaped = 0;
+  if (pipe(sp) < 0) {
+    fail("bad-bind", "pipe");
+    return;
+  }
+  pid = fork();
+  if (pid < 0) {
+    close(sp[0]);
+    close(sp[1]);
+    fail("bad-bind", "fork");
+    return;
+  }
+  if (pid == 0) {
+    char *av[] = {"muro-hello", "--bind", "nope", "--port", "0", NULL};
+    alarm(0);
+    if (dup2(sp[1], STDOUT_FILENO) < 0) _exit(127);
+    if (dup2(sp[1], STDERR_FILENO) < 0) _exit(127);
+    close(sp[0]);
+    close(sp[1]);
+    unsetenv("MURO_HTTP_BIND");
+    execv(bin_path, av);
+    _exit(127);
+  }
+  close(sp[1]);
+  for (;;) {
+    struct pollfd pfd;
+    ssize_t r;
+    if (n + 1 >= sizeof buf) break;
+    pfd.fd = sp[0];
+    pfd.events = POLLIN;
+    if (poll(&pfd, 1, 2000) <= 0) break;
+    r = read(sp[0], buf + n, sizeof buf - 1 - n);
+    if (r <= 0) break;
+    n += (size_t)r;
+  }
+  close(sp[0]);
+  buf[n] = 0;
+  for (i = 0; i < 40; i++) {
+    pid_t got = waitpid(pid, &status, WNOHANG);
+    if (got == pid) {
+      reaped = 1;
+      break;
+    }
+    if (got < 0) break;
+    usleep(50000);
+  }
+  if (!reaped) {
+    kill(pid, SIGKILL);
+    waitpid(pid, NULL, 0);
+    fail("bad-bind", "still running");
+    return;
+  }
+  if (!WIFEXITED(status) || WEXITSTATUS(status) != 2) fail("bad-bind", "status");
+  if (strstr(buf, "listening") != NULL) fail("bad-bind", "listened");
+  if (strstr(buf, "bad bind host") == NULL) fail("bad-bind", "message");
+}
+
+static void check_help(void) {
+  int sp[2];
+  pid_t pid;
+  char buf[1024];
+  size_t n = 0;
+  int status = 0;
+  int i;
+  if (pipe(sp) < 0) {
+    fail("help", "pipe");
+    return;
+  }
+  pid = fork();
+  if (pid < 0) {
+    close(sp[0]);
+    close(sp[1]);
+    fail("help", "fork");
+    return;
+  }
+  if (pid == 0) {
+    char *av[] = {"muro-hello", "--help", NULL};
+    alarm(0);
+    if (dup2(sp[1], STDOUT_FILENO) < 0) _exit(127);
+    close(sp[0]);
+    close(sp[1]);
+    execv(bin_path, av);
+    _exit(127);
+  }
+  close(sp[1]);
+  while (n + 1 < sizeof buf) {
+    ssize_t r = read(sp[0], buf + n, sizeof buf - 1 - n);
+    if (r <= 0) break;
+    n += (size_t)r;
+  }
+  close(sp[0]);
+  buf[n] = 0;
+  for (i = 0; i < 40; i++) {
+    pid_t got = waitpid(pid, &status, WNOHANG);
+    if (got == pid) break;
+    if (got < 0) break;
+    usleep(20000);
+  }
+  if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) fail("help", "status");
+  if (strstr(buf, "--bind") == NULL) fail("help", "usage");
+}
+
+int main(int argc, char **argv) {
+  const char *host = "127.0.0.1";
+  pid_t pid;
+  int port = -1;
+  int fd;
+  int status = 0;
+  int conn_close = 0;
+  char body[128];
+  size_t body_n = 0;
+  if (argc > 1) bin_path = argv[1];
+  signal(SIGPIPE, SIG_IGN);
+  alarm(60);
+  check_help();
+  check_bad_bind();
+  pid = start_hello("nope", host, &port);
+  if (pid < 0) return 1;
+  expect_one(host, port, "hello", "GET / HTTP/1.1\r\nHost: t\r\n\r\n", 200, "hello\n", 0);
+  expect_one(host, port, "health-is-hello", "GET /health HTTP/1.1\r\nHost: t\r\n\r\n", 200, "hello\n",
+             0);
+  expect_one(host, port, "echo", "POST /echo HTTP/1.1\r\nHost: t\r\nContent-Length: 4\r\n\r\nping", 200,
+             "ping", 0);
+  expect_one(host, port, "method", "PUT / HTTP/1.1\r\nHost: t\r\n\r\n", 405, "method\n", 1);
+  expect_one(host, port, "no-host", "GET / HTTP/1.1\r\n\r\n", 400, "malformed", 1);
+  fd = dial(host, port);
+  if (fd < 0) {
+    fail("keep", "connect");
+  } else if (send_all(fd, "GET / HTTP/1.1\r\nHost: t\r\n\r\n") < 0 ||
+             read_response(fd, &status, &conn_close, body, sizeof body, &body_n) < 0 ||
+             status != 200 || strcmp(body, "hello\n") != 0 || conn_close) {
+    fail("keep", "first");
+    close(fd);
+  } else if (send_all(fd, "POST /echo HTTP/1.1\r\nHost: t\r\nContent-Length: 3\r\n\r\nbye") < 0 ||
+             read_response(fd, &status, &conn_close, body, sizeof body, &body_n) < 0 ||
+             status != 200 || strcmp(body, "bye") != 0 || conn_close) {
+    fail("keep", "second");
+    close(fd);
+  } else {
+    close(fd);
+  }
+  stop_server(pid);
+  if (failures != 0) {
+    fprintf(stderr, "%d failures\n", failures);
+    return 1;
+  }
+  printf("OK\n");
+  return 0;
+}

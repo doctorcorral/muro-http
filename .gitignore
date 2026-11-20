@@ -14,5 +14,9 @@ c/test_jwt
 c/test_json
 c/test_store
 c/test_poll
+c/test_route
+c/test_tags
+c/test_hello
 c/muro-httpd
+c/muro-hello
 *.o
