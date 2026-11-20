@@ -9,7 +9,7 @@
    admit.h and session.h cannot share a translation unit. c/admit_glue.c
    is the unpack between them.
 
-   The HTTP image (classify, decide, write ranges, keep-alive, the
+   The HTTP image (classify, the handler, write ranges, keep-alive, the
    idle timer, the half-close flag, pipelined endOff/more) stays in
    the caller. This file does not classify.
 

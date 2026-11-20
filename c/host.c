@@ -391,6 +391,8 @@ static int begin_reply(Server *sv, Slot *s, const MuroHttpResponse *resp) {
   size_t body_n = body ? resp->body_len : 0;
   n = host_copy_response(s->out, s->out_cap, (uint64_t)resp->status, reason, reason_n, extra,
                          extra_n, body, body_n, eff, &got);
+  /* A rejected reason or extra block yields n == 0. owe_status still
+     sends the book's 500 and closes. */
   if (n == 0 && resp->owe_status) {
     n = host_copy_internal(s->out, s->out_cap, NULL);
     bit = 1;
@@ -459,6 +461,8 @@ static int pump(Server *sv, Slot *s) {
       memset(&resp, 0, sizeof resp);
       rc = sv->handler(&req, &resp, sv->user);
       if (rc < 0) {
+        /* owe_status still sends the book's 500 before close when no
+           status byte has been written. Clear means send nothing. */
         if (resp.owe_status) {
           s->owe = 1;
           if (copy_fixed(s, 1) == 0) {
@@ -906,8 +910,10 @@ int muro_http_serve(const MuroHttpConfig *cfg, MuroHttpHandler handler, void *us
   const char *name;
   int port;
   int rc = 0;
+  /* The flag parser already caps 1..1024. A caller that fills the
+     struct directly gets the same refusal, before any allocation. */
   if (!cfg || !handler || cfg->port < 0 || cfg->port > 65535 || cfg->idle_ms < 1 ||
-      cfg->max_conn < 1)
+      cfg->max_conn < 1 || cfg->max_conn > 1024)
     return -1;
   stop_flag = 0;
   memset(&sv, 0, sizeof sv);
