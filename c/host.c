@@ -31,7 +31,6 @@
 #include <fcntl.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
-#include <poll.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -68,12 +67,6 @@ static int fail_db_admit;
 static void on_signal(int sig) {
   (void)sig;
   stop_flag = 1;
-}
-
-static uint64_t mono_ms(void) {
-  struct timespec ts;
-  clock_gettime(CLOCK_MONOTONIC, &ts);
-  return (uint64_t)ts.tv_sec * 1000ull + (uint64_t)ts.tv_nsec / 1000000ull;
 }
 
 static uint64_t field(Conn st, int i) {
@@ -497,26 +490,21 @@ static const char k_500_close[] =
     "\r\n"
     "internal";
 
-/* Best-effort. The fd is non-blocking. A short write is retried. */
+/* Best-effort status before close. The fd is non-blocking. A short
+   write is retried immediately. EAGAIN or EWOULDBLOCK returns
+   without waiting: a poll or a sleep here would stall every other
+   socket. The peer may miss this last status if its receive window
+   is already full. */
 static void write_status(Server *sv, int fd, const char *p, size_t n) {
   size_t off = 0;
-  int spins = 0;
   if (fd < 0 || !p || n == 0) return;
-  while (off < n && spins < 8) {
+  while (off < n) {
     ssize_t w = write(fd, p + off, n - off);
     if (w < 0 && errno == EINTR) continue;
-    if (w < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
-      struct pollfd pfd;
-      pfd.fd = fd;
-      pfd.events = POLLOUT;
-      if (poll(&pfd, 1, 200) <= 0) return;
-      spins += 1;
-      continue;
-    }
+    if (w < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) return;
     if (w <= 0) return;
     off += (size_t)w;
     note_write(sv, (size_t)w);
-    spins = 0;
   }
 }
 
@@ -694,7 +682,7 @@ static int pump(Server *sv, Slot *s) {
       if (!more && end_off > 0 && end_off <= (uint64_t)s->in_len) consume(s, end_off);
       s->want_read = 1;
       if (timer) {
-        if (s->deadline == 0) s->deadline = mono_ms() + (uint64_t)sv->idle_ms;
+        if (s->deadline == 0) s->deadline = host_poll_now_ms() + (uint64_t)sv->idle_ms;
       } else {
         s->deadline = 0;
       }
@@ -835,7 +823,7 @@ static void accept_some(Server *sv) {
     s->st = begin();
     s->used = 1;
     s->want_read = 1;
-    s->deadline = mono_ms() + (uint64_t)sv->idle_ms;
+    s->deadline = host_poll_now_ms() + (uint64_t)sv->idle_ms;
     sv->nconn += 1;
     sync_watch(sv, s);
     if (sv->fatal) return;
@@ -874,7 +862,7 @@ static void arm_soonest(Server *sv) {
     return;
   }
   if (soon == sv->armed_deadline) return;
-  now = mono_ms();
+  now = host_poll_now_ms();
   if (soon <= now) ms = 1;
   else if (soon - now > 86400000ull) ms = 86400000u;
   else ms = (unsigned)(soon - now);
@@ -1000,7 +988,7 @@ int host_run(const HostConfig *cfg) {
       Slot *s;
       if (sv.fatal) break;
       if (evs[i].timer) {
-        uint64_t now = mono_ms();
+        uint64_t now = host_poll_now_ms();
         int k;
         sv.armed_deadline = 0;
         for (k = 0; k < sv.max_conn; k++) on_tick(&sv, &sv.slots[k], now);
@@ -1019,6 +1007,12 @@ int host_run(const HostConfig *cfg) {
       if (s->used && evs[i].writable && s->want_write) after_io(&sv, s);
       if (s->used && evs[i].readable && s->want_read) on_readable(&sv, s, evs[i].hangup);
       else if (s->used && evs[i].hangup && s->want_read) on_readable(&sv, s, 1);
+      else if (s->used && evs[i].hangup && !evs[i].writable) {
+        /* Write-only hangup with no POLLOUT: close. A peer FIN
+           while want_read is set is evEof above, so a request
+           that already arrived can still be answered. */
+        close_slot(&sv, s);
+      }
     }
     if (sv.fatal) {
       rc = -1;

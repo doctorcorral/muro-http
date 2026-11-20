@@ -1,76 +1,83 @@
-/* The Makefile passes -D_GNU_SOURCE. timerfd needs it under -std=c11. */
+/* Level-triggered readiness on poll(2). macOS and Linux share this
+   file. The idle tick is an absolute deadline: an earlier ready
+   socket does not stretch it. ms == 0 disarms the tick.
+   The Makefile defines _GNU_SOURCE, which exposes POLLRDHUP on Linux.
+   That flag is optional. POLLIN still reports a peer FIN.
+   Ready events are collected from a rotating cursor so a wait that
+   fills `max` still visits high-index fds on the next wait. */
 
 #include "host_poll.h"
 
 #include <errno.h>
-#include <fcntl.h>
+#include <poll.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
-#include <unistd.h>
-
-#if defined(__APPLE__)
-#include <sys/event.h>
-#include <sys/time.h>
-#define HOST_POLL_KQUEUE 1
-#elif defined(__linux__)
-#include <sys/epoll.h>
-#include <sys/timerfd.h>
-#define HOST_POLL_EPOLL 1
-#else
-#error "muro-httpd needs kqueue or epoll"
-#endif
-
-#if HOST_POLL_KQUEUE
-/* Not a socket fd. kqueue timer idents are their own space, but a
-   high value keeps a glance at the event from looking like stdin. */
-static const uintptr_t host_timer_ident = (uintptr_t)0x4d55524f;
-#endif
+#include <time.h>
 
 struct HostPoll {
-  int q;
-  int timer_fd;
+  struct pollfd *pf;
+  int n;
+  int cap;
   int timer_on;
+  uint64_t timer_at;
+  int next_scan;
 };
 
-static int set_cloexec(int fd) {
-  int fl = fcntl(fd, F_GETFD, 0);
-  if (fl < 0) return -1;
-  return fcntl(fd, F_SETFD, fl | FD_CLOEXEC);
+uint64_t host_poll_now_ms(void) {
+  struct timespec ts;
+  clock_gettime(CLOCK_MONOTONIC, &ts);
+  return (uint64_t)ts.tv_sec * 1000ull + (uint64_t)ts.tv_nsec / 1000000ull;
+}
+
+static int find_fd(const HostPoll *p, int fd) {
+  int i;
+  for (i = 0; i < p->n; i++) {
+    if (p->pf[i].fd == fd) return i;
+  }
+  return -1;
+}
+
+static void drop_at(HostPoll *p, int i) {
+  p->n -= 1;
+  if (i < p->n) p->pf[i] = p->pf[p->n];
+  /* Swap-from-end leaves indices after i in place. Only wrap the
+     cursor when it now sits past the last live slot. */
+  if (p->n <= 0) p->next_scan = 0;
+  else if (p->next_scan >= p->n) p->next_scan = 0;
+}
+
+static short interest(int read, int write) {
+  short ev = 0;
+  if (read) {
+    ev = (short)(ev | POLLIN);
+#ifdef POLLRDHUP
+    ev = (short)(ev | POLLRDHUP);
+#endif
+  }
+  if (write) ev = (short)(ev | POLLOUT);
+  return ev;
+}
+
+static int grow(HostPoll *p) {
+  int cap = p->cap < 8 ? 8 : p->cap * 2;
+  struct pollfd *np;
+  /* One listen socket plus the connection cap (1024). */
+  if (cap > 2048) return -1;
+  np = realloc(p->pf, (size_t)cap * sizeof *np);
+  if (!np) return -1;
+  p->pf = np;
+  p->cap = cap;
+  return 0;
 }
 
 HostPoll *host_poll_open(void) {
   HostPoll *p = calloc(1, sizeof *p);
   if (!p) return NULL;
-  p->timer_fd = -1;
-#if HOST_POLL_KQUEUE
-  p->q = kqueue();
-#else
-  p->q = epoll_create1(EPOLL_CLOEXEC);
-  if (p->q >= 0) {
-    p->timer_fd = timerfd_create(CLOCK_MONOTONIC, TFD_NONBLOCK | TFD_CLOEXEC);
-    if (p->timer_fd < 0) {
-      close(p->q);
-      p->q = -1;
-    } else {
-      struct epoll_event ev;
-      memset(&ev, 0, sizeof ev);
-      ev.events = EPOLLIN;
-      ev.data.fd = p->timer_fd;
-      if (epoll_ctl(p->q, EPOLL_CTL_ADD, p->timer_fd, &ev) < 0) {
-        close(p->timer_fd);
-        close(p->q);
-        p->q = -1;
-      }
-    }
-  }
-#endif
-  if (p->q < 0) {
+  p->cap = 8;
+  p->pf = calloc((size_t)p->cap, sizeof *p->pf);
+  if (!p->pf) {
     free(p);
-    return NULL;
-  }
-  if (set_cloexec(p->q) < 0) {
-    host_poll_close(p);
     return NULL;
   }
   return p;
@@ -78,153 +85,129 @@ HostPoll *host_poll_open(void) {
 
 void host_poll_close(HostPoll *p) {
   if (!p) return;
-  if (p->timer_fd >= 0) close(p->timer_fd);
-  if (p->q >= 0) close(p->q);
+  free(p->pf);
   free(p);
 }
 
-#if HOST_POLL_KQUEUE
-static int kq_set(int q, uintptr_t ident, short filter, int on) {
-  struct kevent ch;
-  EV_SET(&ch, ident, filter, on ? (EV_ADD | EV_ENABLE) : EV_DELETE, 0, 0, NULL);
-  if (kevent(q, &ch, 1, NULL, 0, NULL) < 0) {
-    if (!on && errno == ENOENT) return 0;
-    return -1;
-  }
-  return 0;
-}
-#endif
-
 int host_poll_watch(HostPoll *p, int fd, int read, int write) {
+  int i;
+  short ev;
   if (!p || fd < 0) return -1;
-#if HOST_POLL_KQUEUE
-  if (kq_set(p->q, (uintptr_t)fd, EVFILT_READ, read) < 0) return -1;
-  if (kq_set(p->q, (uintptr_t)fd, EVFILT_WRITE, write) < 0) return -1;
-  return 0;
-#else
-  {
-    struct epoll_event ev;
-    memset(&ev, 0, sizeof ev);
-    ev.data.fd = fd;
-    if (!read && !write) {
-      if (epoll_ctl(p->q, EPOLL_CTL_DEL, fd, &ev) < 0 && errno != ENOENT && errno != EBADF)
-        return -1;
-      return 0;
-    }
-    ev.events = EPOLLRDHUP;
-    if (read) ev.events |= EPOLLIN;
-    if (write) ev.events |= EPOLLOUT;
-    if (epoll_ctl(p->q, EPOLL_CTL_MOD, fd, &ev) < 0) {
-      if (errno != ENOENT) return -1;
-      if (epoll_ctl(p->q, EPOLL_CTL_ADD, fd, &ev) < 0) return -1;
-    }
+  i = find_fd(p, fd);
+  if (!read && !write) {
+    if (i >= 0) drop_at(p, i);
     return 0;
   }
-#endif
+  ev = interest(read, write);
+  if (i >= 0) {
+    p->pf[i].events = ev;
+    p->pf[i].revents = 0;
+    return 0;
+  }
+  if (p->n == p->cap && grow(p) < 0) return -1;
+  p->pf[p->n].fd = fd;
+  p->pf[p->n].events = ev;
+  p->pf[p->n].revents = 0;
+  p->n += 1;
+  return 0;
 }
 
 int host_poll_arm(HostPoll *p, unsigned ms) {
   if (!p) return -1;
-#if HOST_POLL_KQUEUE
-  {
-    struct kevent ch;
-    if (ms == 0) {
-      if (!p->timer_on) return 0;
-      EV_SET(&ch, host_timer_ident, EVFILT_TIMER, EV_DELETE, 0, 0, NULL);
-      if (kevent(p->q, &ch, 1, NULL, 0, NULL) < 0 && errno != ENOENT) return -1;
-      p->timer_on = 0;
-      return 0;
-    }
-    EV_SET(&ch, host_timer_ident, EVFILT_TIMER, EV_ADD | EV_ENABLE | EV_ONESHOT, 0,
-           (intptr_t)ms, NULL);
-    if (kevent(p->q, &ch, 1, NULL, 0, NULL) < 0) return -1;
-    p->timer_on = 1;
+  if (ms == 0) {
+    p->timer_on = 0;
     return 0;
   }
-#else
-  {
-    struct itimerspec its;
-    memset(&its, 0, sizeof its);
-    if (ms > 0) {
-      its.it_value.tv_sec = (time_t)(ms / 1000u);
-      its.it_value.tv_nsec = (long)(ms % 1000u) * 1000000L;
-    }
-    if (timerfd_settime(p->timer_fd, 0, &its, NULL) < 0) return -1;
-    p->timer_on = ms > 0;
-    return 0;
-  }
+  p->timer_on = 1;
+  p->timer_at = host_poll_now_ms() + (uint64_t)ms;
+  return 0;
+}
+
+static int wait_timeout(const HostPoll *p) {
+  uint64_t now;
+  uint64_t left;
+  if (!p->timer_on) return -1;
+  now = host_poll_now_ms();
+  if (p->timer_at <= now) return 0;
+  left = p->timer_at - now;
+  if (left > 86400000ull) return 86400000;
+  return (int)left;
+}
+
+static void fill_ev(HostEv *e, const struct pollfd *pf) {
+  short r = pf->revents;
+  memset(e, 0, sizeof *e);
+  e->fd = pf->fd;
+  if (r & (POLLERR | POLLNVAL)) e->error = 1;
+  if (r & POLLIN) e->readable = 1;
+  if (r & POLLOUT) e->writable = 1;
+  if (r & POLLHUP) e->hangup = 1;
+#ifdef POLLRDHUP
+  if (r & POLLRDHUP) e->hangup = 1;
 #endif
+  /* POLLHUP is unmaskable. A write-only watch that gets hangup
+     without POLLOUT has nothing to do; report error so the loop
+     closes the fd instead of spinning. A read interest still
+     reports hangup alone so a peer FIN can become evEof and the
+     pending response can be written. */
+  if (e->hangup && !(pf->events & POLLIN) && !e->writable) e->error = 1;
 }
 
 int host_poll_wait(HostPoll *p, HostEv *out, int max) {
+  struct pollfd scratch;
+  struct pollfd *pf;
+  nfds_t nfds;
+  int timeout;
   int n;
   int i;
   int count;
+  int timer_due;
+  int room;
+  int start;
+  int seen;
   if (!p || !out || max <= 0) return -1;
   if (max > 64) max = 64;
-#if HOST_POLL_KQUEUE
-  {
-    struct kevent evs[64];
-    n = kevent(p->q, NULL, 0, evs, max, NULL);
-    if (n < 0) return errno == EINTR ? 0 : -1;
-    count = 0;
-    for (i = 0; i < n; i++) {
-      HostEv *e = &out[count++];
-      memset(e, 0, sizeof *e);
-      e->fd = -1;
-      if (evs[i].filter == EVFILT_TIMER) {
-        e->timer = 1;
-        continue;
-      }
-      e->fd = (int)evs[i].ident;
-      if (evs[i].flags & EV_ERROR) e->error = 1;
-      if (evs[i].filter == EVFILT_READ) {
-        e->readable = 1;
-        if (evs[i].flags & EV_EOF) e->hangup = 1;
-      } else if (evs[i].filter == EVFILT_WRITE) {
-        e->writable = 1;
-        if (evs[i].flags & EV_EOF) e->hangup = 1;
-      }
-    }
-    return count;
+  /* poll with no fds is not portable. A negative fd waits for the
+     timeout and contributes no readiness. */
+  if (p->n == 0) {
+    scratch.fd = -1;
+    scratch.events = 0;
+    scratch.revents = 0;
+    pf = &scratch;
+    nfds = 1;
+  } else {
+    pf = p->pf;
+    nfds = (nfds_t)p->n;
   }
-#else
-  {
-    struct epoll_event evs[64];
-    n = epoll_wait(p->q, evs, max, -1);
-    if (n < 0) return errno == EINTR ? 0 : -1;
-    count = 0;
-    for (i = 0; i < n; i++) {
-      HostEv *e = &out[count++];
-      memset(e, 0, sizeof *e);
-      e->fd = evs[i].data.fd;
-      if (e->fd == p->timer_fd) {
-        /* One expiration is 8 bytes. A short read leaves the fd
-           readable, and level-triggered epoll returns at once.
-           Read until 8 bytes or EAGAIN. A hard error stops the wait
-           so the process does not spin. */
-        uint8_t raw[8];
-        size_t have = 0;
-        while (have < sizeof raw) {
-          ssize_t got = read(p->timer_fd, raw + have, sizeof raw - have);
-          if (got < 0) {
-            if (errno == EINTR) continue;
-            if (errno == EAGAIN || errno == EWOULDBLOCK) break;
-            return -1;
-          }
-          if (got == 0) return -1;
-          have += (size_t)got;
-        }
-        e->fd = -1;
-        e->timer = 1;
-        continue;
-      }
-      if (evs[i].events & (EPOLLERR | EPOLLHUP)) e->error = 1;
-      if (evs[i].events & EPOLLIN) e->readable = 1;
-      if (evs[i].events & EPOLLOUT) e->writable = 1;
-      if (evs[i].events & (EPOLLRDHUP | EPOLLHUP)) e->hangup = 1;
+  timeout = wait_timeout(p);
+  n = poll(pf, nfds, timeout);
+  if (n < 0) return errno == EINTR ? 0 : -1;
+  timer_due = p->timer_on && host_poll_now_ms() >= p->timer_at;
+  room = max;
+  if (timer_due && room > 0) room -= 1;
+  count = 0;
+  if (n > 0 && p->n > 0) {
+    start = p->next_scan;
+    if (start < 0 || start >= p->n) start = 0;
+    for (seen = 0; seen < p->n && count < room; seen++) {
+      i = start + seen;
+      if (i >= p->n) i -= p->n;
+      if (p->pf[i].revents == 0) continue;
+      fill_ev(&out[count], &p->pf[i]);
+      count += 1;
     }
-    return count;
+    p->next_scan = start + seen;
+    if (p->next_scan >= p->n) p->next_scan -= p->n;
+    if (p->next_scan < 0 || p->next_scan >= p->n) p->next_scan = 0;
   }
-#endif
+  /* Socket events come first. A byte that arrived in this wait can
+     refresh a deadline before the tick is delivered. */
+  if (timer_due) {
+    HostEv *e = &out[count++];
+    memset(e, 0, sizeof *e);
+    e->fd = -1;
+    e->timer = 1;
+    p->timer_on = 0;
+  }
+  return count;
 }

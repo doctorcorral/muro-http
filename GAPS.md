@@ -182,7 +182,7 @@ It is not the choice.
 decide, the write range, keep-alive, the idle timer, the half-close
 flag, and the pipelined offset stay in `conn.muro`.
 
-`c/host.c` is the socket loop. `c/host_poll.c` is kqueue or epoll.
+`c/host.c` is the socket loop. `c/host_poll.c` waits with `poll(2)`.
 `c/httpd.c` is `main`. They own the file descriptors, the buffers,
 and the clock. They perform the action `step` returns. They do not
 choose it. A read error closes the fd. It is not `evError`. That

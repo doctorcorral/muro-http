@@ -13,5 +13,6 @@ c/test_body
 c/test_jwt
 c/test_json
 c/test_store
+c/test_poll
 c/muro-httpd
 *.o

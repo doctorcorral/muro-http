@@ -61,11 +61,13 @@ jobs:
   # doctorcorral/muro-http is public. Standard macos-latest is not
   # billed. Larger macOS runners are billed, so this job does not use
   # them. Self-hosted muro-mac-1 and muro-mac-2 are not used.
-  kqueue:
-    name: kqueue
+  # The wait is poll(2) on both platforms. This job runs the same
+  # drivers on macOS.
+  macos:
+    name: macos
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v5
 
-      - name: C drivers and muro-httpd with kqueue
+      - name: C drivers and muro-httpd with poll
         run: make c-check

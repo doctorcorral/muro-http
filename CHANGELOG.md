@@ -2,6 +2,27 @@
 
 ## 0.1.0-dev — unreleased
 
+- A write-only `POLLHUP` without `POLLOUT` closes that slot instead
+  of spinning the poll loop (the macOS case when a peer aborts
+  mid-response). A peer FIN while the host is still reading is still
+  `evEof`, so a request that already arrived can be answered.
+  `host_poll_wait` scans ready fds from a rotating cursor so a full
+  event cap does not starve high-index sockets. `write_status`
+  stays best-effort and non-blocking: `EAGAIN` returns immediately.
+  `c/test_poll` checks the absolute timer, an empty wait, hangup
+  and error flags (including write-only interest), and scan fairness.
+  `c/test_e2e` aborts a client mid-response and still serves the next
+  socket, and it finishes the paused POST in the interleaved case.
+- `c/host_poll.c` waits with `poll(2)` on macOS and on Linux. The idle
+  tick is that poll timeout, armed for the soonest connection
+  deadline. One socket that has sent only part of a header, or only
+  part of a body, does not stall the others. A close that still owes
+  a status writes it without waiting on that socket. `c/test_e2e`
+  keeps the earlier cases and adds the interleaved clients (`/health`,
+  authenticated `/feed`, `/posts`, `/posts/:id/like`, a malformed
+  request) plus SIGINT and SIGTERM while a partial header is open.
+  The macOS CI job runs the same `make c-check`. The pin stays
+  0.21.14. The library version stays `0.1.0-dev`.
 - A 500 sent because a connection closes after a committed create or
   like, before any status byte, says `Connection: close`.
 - `priv/muro/http/body.muro` is `bodyClass`, `textOff`, and
