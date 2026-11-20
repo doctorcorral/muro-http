@@ -4,6 +4,7 @@
 
 #include "shim.h"
 #include "render.h"
+#include "host_render.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -63,6 +64,52 @@ static void expect_eq(const char *name, muro__slice s, const char *lit) {
   muro_http_reset();
 }
 
+static int has_lit(const uint8_t *p, size_t n, const char *lit) {
+  size_t m = strlen(lit);
+  size_t i;
+  if (m == 0 || m > n) return 0;
+  for (i = 0; i + m <= n; i++) {
+    if (memcmp(p + i, lit, m) == 0) return 1;
+  }
+  return 0;
+}
+
+static int count_lit(const uint8_t *p, size_t n, const char *lit) {
+  size_t m = strlen(lit);
+  size_t i;
+  int c = 0;
+  if (m == 0 || m > n) return 0;
+  for (i = 0; i + m <= n; i++) {
+    if (memcmp(p + i, lit, m) == 0) c += 1;
+  }
+  return c;
+}
+
+static void expect_copy(const char *name, uint64_t status, const char *reason, const char *extra,
+                        const char *body, uint64_t keep, int want_ok) {
+  uint8_t dst[2048];
+  size_t got = 99;
+  size_t n = host_copy_response(dst, sizeof dst, status, (const uint8_t *)reason,
+                                reason ? strlen(reason) : 0, (const uint8_t *)extra,
+                                extra ? strlen(extra) : 0, (const uint8_t *)body,
+                                body ? strlen(body) : 0, keep, &got);
+  if (!want_ok) {
+    if (n != 0 || got != 0) bad(name);
+    return;
+  }
+  if (n == 0 || !has_lit(dst, n, "\r\n\r\n")) {
+    bad(name);
+    return;
+  }
+  if (reason && strstr(reason, "OK") && !has_lit(dst, n, "OK")) bad(name);
+  if (extra && strstr(extra, "X-Trace") && !has_lit(dst, n, "X-Trace: 1")) bad(name);
+  if (count_lit(dst, n, "Content-Length:") != 1) bad(name);
+  if (has_lit(dst, n, "Content-Length: 0") && body && body[0]) bad(name);
+  if (has_lit(dst, n, "Transfer-Encoding")) bad(name);
+  if (keep == 0 && has_lit(dst, n, "Connection: close")) bad(name);
+  if (keep == 1 && !has_lit(dst, n, "Connection: close")) bad(name);
+}
+
 static void expect_render(const char *name, uint64_t status, const char *reason, const char *extra,
                           const char *body, uint64_t keep, const char *lit) {
   muro__slice s = httpRender(status, of(reason), of(extra), of(body), keep);
@@ -102,6 +149,15 @@ int main(void) {
   if (!content_length(row, &cl, &body) || cl != 10 || body != 10 || !contains(row, "1234567890"))
     bad("row-ten");
   muro_http_reset();
+  expect_copy("reason-crlf", 200, "OK\r\nX: y", "X-Trace: 1\r\n", "ab", 0, 0);
+  expect_copy("extra-blank", 200, "OK", "X-Trace: 1\r\n\r\n", "ab", 0, 0);
+  expect_copy("extra-lf", 200, "OK", "X-Trace: 1\n", "ab", 0, 0);
+  expect_copy("extra-ws", 200, "OK", "X-Trace : 1\r\n", "ab", 0, 0);
+  expect_copy("extra-owned", 200, "OK",
+              "Content-Length: 0\r\nConnection: close\r\nTransfer-Encoding: chunked\r\nX-Trace: 1\r\n",
+              "ab", 0, 1);
+  expect_copy("extra-good", 200, "OK", "X-Trace: 1\r\n", "ab", 0, 1);
+  expect_copy("extra-bare", 200, "OK", "X-Trace: 1", "ab", 0, 1);
   if (failures != 0) {
     fprintf(stderr, "%d failures\n", failures);
     return 1;

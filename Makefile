@@ -74,8 +74,8 @@ c/test_conn: c/test_conn.o $(CORE)
 c/test_sess: c/test_sess.o c/session.o c/shim.o
 	$(CC) $(LDFLAGS) -o $@ c/test_sess.o c/session.o c/shim.o
 
-c/test_render: c/test_render.o c/render.o c/shim.o
-	$(CC) $(LDFLAGS) -o $@ c/test_render.o c/render.o c/shim.o
+c/test_render: c/test_render.o c/host_render.o c/render.o c/shim.o
+	$(CC) $(LDFLAGS) -o $@ c/test_render.o c/host_render.o c/render.o c/shim.o
 
 c/test_e2e: c/test_e2e.o c/jwt.o
 	$(CC) $(LDFLAGS) -o $@ c/test_e2e.o c/jwt.o
