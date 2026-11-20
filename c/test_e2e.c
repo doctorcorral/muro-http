@@ -133,16 +133,22 @@ static pid_t start_server(int idle_ms, int max_conn, int *port, const char *writ
   return pid;
 }
 
-static int stop_server(pid_t pid) {
+static void kill_server(pid_t pid) {
+  if (pid <= 0) return;
+  kill(pid, SIGKILL);
+  waitpid(pid, NULL, 0);
+}
+
+static int stop_with(pid_t pid, int sig, const char *name) {
   int status = 0;
   int i;
   if (pid <= 0) return -1;
-  kill(pid, SIGTERM);
+  kill(pid, sig);
   for (i = 0; i < 50; i++) {
     pid_t got = waitpid(pid, &status, WNOHANG);
     if (got == pid) {
       if (WIFEXITED(status) && WEXITSTATUS(status) == 0) return 0;
-      fprintf(stderr, "FAIL shutdown: status %d\n", status);
+      fprintf(stderr, "FAIL %s: status %d\n", name, status);
       failures += 1;
       return -1;
     }
@@ -151,9 +157,11 @@ static int stop_server(pid_t pid) {
   }
   kill(pid, SIGKILL);
   waitpid(pid, NULL, 0);
-  fail("shutdown", "SIGTERM did not stop the server");
+  fail(name, "did not stop the server");
   return -1;
 }
+
+static int stop_server(pid_t pid) { return stop_with(pid, SIGTERM, "shutdown"); }
 
 static int dial(int port) {
   int fd = socket(AF_INET, SOCK_STREAM, 0);
@@ -1258,6 +1266,229 @@ static void check_no_key(void) {
   if (stop_server(pid) < 0) return;
 }
 
+/* One response already on the socket. want_body NULL checks only the
+   status line. A JSON body must carry the JSON content type. */
+static int take_resp(int fd, const char *name, int want_status, const char *want_body, int want_close,
+                     int want_eof) {
+  char buf[8192];
+  char body[4096];
+  size_t body_n = 0;
+  size_t used = 0;
+  int status = 0;
+  int conn_close = 0;
+  struct pollfd pfd;
+  int pr;
+  pfd.fd = fd;
+  pfd.events = POLLIN;
+  pr = poll(&pfd, 1, 2000);
+  if (pr < 0) {
+    fail(name, "poll");
+    return -1;
+  }
+  if (pr == 0) {
+    fail(name, "timed out");
+    return -1;
+  }
+  if (read_response(fd, buf, sizeof buf, 0, &used, &status, &conn_close, body, sizeof body - 1,
+                    &body_n) < 0) {
+    fail(name, "response");
+    return -1;
+  }
+  if (status != want_status) {
+    fprintf(stderr, "FAIL %s: status %d body '%s'\n", name, status, body);
+    failures += 1;
+    return -1;
+  }
+  if (want_body && strcmp(body, want_body) != 0) {
+    fprintf(stderr, "FAIL %s: body '%s'\n", name, body);
+    failures += 1;
+    return -1;
+  }
+  if (want_body && (want_body[0] == '{' || want_body[0] == '[') && !last_json)
+    fail(name, "content-type");
+  if (conn_close != want_close) {
+    fail(name, want_close ? "wanted close" : "wanted keep-alive");
+    return -1;
+  }
+  if (want_eof && !expect_eof(fd)) {
+    fail(name, "expected eof");
+    return -1;
+  }
+  return 0;
+}
+
+static int expect_silent(int fd, const char *name) {
+  struct pollfd pfd;
+  int pr;
+  pfd.fd = fd;
+  pfd.events = POLLIN;
+  pr = poll(&pfd, 1, 200);
+  if (pr < 0) {
+    fail(name, "poll");
+    return -1;
+  }
+  if (pr > 0) {
+    fail(name, "responded early");
+    return -1;
+  }
+  return 0;
+}
+
+/* A partial header and a partial body stay open. Other sockets still
+   serve health, feed, create, and like. The partial header is then
+   finished on the same connection. */
+static void check_interleaved(void) {
+  char path[] = "/tmp/muro-http-interleave-XXXXXX";
+  char req[2048];
+  char feed_req[1600];
+  const char *saved = srv_db;
+  const char *partial = "GET /health HTTP/1.1\r\nHost: slow\r\n";
+  const char *part_body = "POST /posts HTTP/1.1\r\nContent-Length: 20\r\n\r\n{\"tex";
+  pid_t pid;
+  int port = -1;
+  int slow = -1;
+  int body = -1;
+  int health = -1;
+  int feed = -1;
+  int post = -1;
+  int bad = -1;
+  int like = -1;
+  int readp = -1;
+  int feed2 = -1;
+  int dbfd;
+  size_t i;
+  dbfd = mkstemp(path);
+  if (dbfd < 0) {
+    fail("interleave", "mkstemp");
+    return;
+  }
+  close(dbfd);
+  srv_db = path;
+  pid = start_server(10000, 8, &port, NULL, NULL, NULL);
+  srv_db = saved;
+  if (pid < 0) {
+    unlink_db(path);
+    return;
+  }
+  slow = dial(port);
+  body = dial(port);
+  if (slow < 0 || body < 0) {
+    fail("interleave", "connect");
+    goto done;
+  }
+  for (i = 0; partial[i]; i++) {
+    if (send_buf(slow, partial + i, 1) < 0) {
+      fail("interleave", "drip");
+      goto done;
+    }
+    if ((i % 8) == 7)
+      check_one(port, "interleave-drip", "GET /health HTTP/1.1\r\n\r\n", 200, "ok", 0, 0);
+  }
+  if (send_all(body, part_body) < 0) {
+    fail("interleave", "partial body");
+    goto done;
+  }
+  if (expect_silent(slow, "interleave-slow") < 0) goto done;
+  if (expect_silent(body, "interleave-body") < 0) goto done;
+
+  health = dial(port);
+  feed = dial(port);
+  post = dial(port);
+  bad = dial(port);
+  if (health < 0 || feed < 0 || post < 0 || bad < 0) {
+    fail("interleave", "fast connect");
+    goto done;
+  }
+  snprintf(feed_req, sizeof feed_req, "GET /feed HTTP/1.1\r\nAuthorization: Bearer %s\r\n\r\n", tok_ada);
+  post_json(req, sizeof req, tok_ada, "{\"text\":\"concurrent\"}");
+  if (send_all(health, "GET /health HTTP/1.1\r\n\r\n") < 0 || send_all(feed, feed_req) < 0 ||
+      send_all(post, req) < 0 || send_all(bad, "GET/feed HTTP/1.1\r\n\r\n") < 0) {
+    fail("interleave", "fast send");
+    goto done;
+  }
+  if (take_resp(health, "interleave-health", 200, "ok", 0, 0) < 0) goto done;
+  if (take_resp(feed, "interleave-feed", 200, "[]", 0, 0) < 0) goto done;
+  if (take_resp(post, "interleave-create", 201, "{\"id\":1,\"text\":\"concurrent\"}", 0, 0) < 0)
+    goto done;
+  if (take_resp(bad, "interleave-bad", 400, "malformed", 1, 1) < 0) goto done;
+  close(health);
+  close(feed);
+  close(post);
+  close(bad);
+  health = feed = post = bad = -1;
+  if (expect_silent(slow, "interleave-slow-held") < 0) goto done;
+  if (expect_silent(body, "interleave-body-held") < 0) goto done;
+
+  like = dial(port);
+  readp = dial(port);
+  feed2 = dial(port);
+  if (like < 0 || readp < 0 || feed2 < 0) {
+    fail("interleave", "second connect");
+    goto done;
+  }
+  post_like(req, sizeof req, "1", tok_ada);
+  snprintf(feed_req, sizeof feed_req, "GET /feed HTTP/1.1\r\nAuthorization: Bearer %s\r\n\r\n", tok_ada);
+  if (send_all(like, req) < 0 || send_all(readp, "GET /posts/1 HTTP/1.1\r\n\r\n") < 0 ||
+      send_all(feed2, feed_req) < 0) {
+    fail("interleave", "second send");
+    goto done;
+  }
+  if (take_resp(like, "interleave-like", 201, "{\"id\":1,\"likes\":1}", 0, 0) < 0) goto done;
+  if (take_resp(readp, "interleave-read", 200, "{\"id\":1,\"text\":\"concurrent\"}", 0, 0) < 0)
+    goto done;
+  if (take_resp(feed2, "interleave-feed-row", 200, "[{\"id\":1,\"text\":\"concurrent\"}]", 0, 0) < 0)
+    goto done;
+  close(like);
+  close(readp);
+  close(feed2);
+  like = readp = feed2 = -1;
+  if (expect_silent(slow, "interleave-still") < 0) goto done;
+
+  if (send_all(slow, "\r\n") < 0) {
+    fail("interleave", "finish");
+    goto done;
+  }
+  if (take_resp(slow, "interleave-finish", 200, "ok", 0, 0) < 0) goto done;
+  if (expect_silent(body, "interleave-body-end") < 0) goto done;
+
+done:
+  if (slow >= 0) close(slow);
+  if (body >= 0) close(body);
+  if (health >= 0) close(health);
+  if (feed >= 0) close(feed);
+  if (post >= 0) close(post);
+  if (bad >= 0) close(bad);
+  if (like >= 0) close(like);
+  if (readp >= 0) close(readp);
+  if (feed2 >= 0) close(feed2);
+  stop_server(pid);
+  unlink_db(path);
+}
+
+/* A partial header must not keep the process alive after the signal. */
+static void check_signal(int sig, const char *name) {
+  const char *saved = srv_db;
+  pid_t pid;
+  int port = -1;
+  int fd = -1;
+  srv_db = ":memory:";
+  pid = start_server(10000, 4, &port, NULL, NULL, NULL);
+  srv_db = saved;
+  if (pid < 0) return;
+  fd = dial(port);
+  if (fd < 0 || send_all(fd, "GET /hea") < 0) {
+    fail(name, "partial");
+    if (fd >= 0) close(fd);
+    kill_server(pid);
+    return;
+  }
+  if (stop_with(pid, sig, name) < 0) {
+    close(fd);
+    return;
+  }
+  close(fd);
+}
+
 int main(int argc, char **argv) {
   pid_t pid;
   int port = -1;
@@ -1309,6 +1540,9 @@ int main(int argc, char **argv) {
   }
   check_max_conn();
   check_partial_send();
+  check_interleaved();
+  check_signal(SIGINT, "sigint");
+  check_signal(SIGTERM, "sigterm");
   check_db_down();
   check_no_key();
   check_memory();
