@@ -2,6 +2,11 @@
 
 ## 0.1.0-dev — unreleased
 
+- Pin muro 0.22.14. The library version stays `0.1.0-dev`.
+  `mix muro.gen` rewrites the committed C and Elixir. The C prelude
+  is under `MURO__PRELUDE`. `c/admit_glue.c` includes `session.h` and
+  `admit.h` together and asserts the flat constructor words
+  (`piece-chunk` through `reply-bad` are 0 through 4).
 - HTTP/1.1 with the headers finished and not exactly one `Host` is
   400. The previous challenge server accepted a request that omitted
   `Host`. HTTP/1.0 may still omit it. A second `Host` is malformed

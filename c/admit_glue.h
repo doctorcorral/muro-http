@@ -4,10 +4,11 @@
 #include <stdint.h>
 
 /* Unpack of the offer `admitChoice` returns. This is not the choice.
-   `c/generated/admit.h` and `c/generated/session.h` each define
-   `struct muro__nat`, so one translation unit cannot include both.
-   The stepper also takes a constructor name string. The tag-to-name
-   map for that string is here. The words of the offer are the book's. */
+   On muro 0.22.14 the prelude is under MURO__PRELUDE, so one
+   translation unit can include `c/generated/admit.h` and
+   `c/generated/session.h`. The stepper takes a constructor name
+   string. The tag-to-name map for that string is in `admit_glue.c`.
+   The words of the offer are the book's. */
 
 #define ADMIT_MOVES 5
 

@@ -11,8 +11,8 @@ admission, and the response bytes, plus a C host that dispatches to a
 handler. The challenge server is an example on that core. This
 repository is version `0.1.0-dev`.
 
-It pins the released Hex package muro `0.21.14` (`{:muro, "~> 0.21.14"}`
-in `mix.exs`, `muro: "0.21.14"` in `muro.exs`). It does not depend on a
+It pins the released Hex package muro `0.22.14` (`{:muro, "~> 0.22.14"}`
+in `mix.exs`, `muro: "0.22.14"` in `muro.exs`). It does not depend on a
 compiler checkout.
 
 It is hosted at https://github.com/doctorcorral/muro-http. There is no Hex publish.
@@ -118,8 +118,9 @@ emits it as `admitChoice` (`c/generated/admit.c`). The inputs are the
 host event and `st.at` on this stepper. The output is the sequence of
 moves to offer, or a refusal, or no move. muro checks that function
 by reduction. It does not check that an offer is a legal prefix of
-`conn` from that position: a `run` is not a `conform`, and there is
-no judgment that takes a position and a list of directed moves.
+`conn` from that position: a `run` is not a `conform`. The checker
+has `prefix` for a list of directed moves from a position. This book
+does not declare one.
 `test/sess_agree_test.exs` steps each offer on the machine emitted
 from `session.muro` and checks it against frozen scenario traces and
 `Conn.check_trace`. That check is conformance. A two-request
@@ -378,7 +379,7 @@ in the emitted C, plus the challenge health bytes, a JSON array, a
 405, and a ten-byte body. That is a test.
 
 muro 0.21.15 and 0.21.16 add a temporal check and a synthesis cover.
-They do not change response bytes or this loop. The pin stays 0.21.14.
+They do not change response bytes or this loop. The pin is 0.22.14.
 
 The server end is `conn`. The client end `peer` is `dual conn`.
 
@@ -424,8 +425,9 @@ Hand-written challenge, under `examples/challenge/`: `httpd.c` (main),
 (SHA-256, HMAC-SHA256, base64url, the HS256 check), `json_text.c`
 (string unescape, the UTF-8 check, and the row JSON), and
 `host_body.c` (the call into `bodyClass`). `examples/hello/hello.c`
-is the second server. Each generated header defines the prelude, so
-one translation unit includes only one of them. `conn.o` already
+is the second server. The prelude is under `MURO__PRELUDE`.
+`c/admit_glue.c` includes `admit.h` and `session.h` together.
+`conn.o` already
 contains `request.muro`. Do not also link `request.o`. `conn.o`
 emits `not`, `and`, and `or` because it imports `std:bool.muro`. A
 book linked beside it must not import that book. `decide.muro` and
@@ -521,7 +523,7 @@ The shim, the driver, and the generated file are compiled with
 
 The driver prints `OK` and allocation counts. `methodView`,
 `targetView`, `pathView`, `queryView`, `versionView`, and `bodyView`
-allocate 0. On muro 0.21.14, as on 0.20.42, `classify` of
+allocate 0. On muro 0.22.14, as on 0.20.42, `classify` of
 `GET /health` allocates 1 and `classify` of `POST /posts` with a
 two-byte body allocates 1. That object is the `Classified` result.
 See `GAPS.md`. `bodyClass`, `textOff`, and `textLen` allocate 0,
@@ -536,8 +538,8 @@ value points inside the buffer and has length 0.
 and calls the stepper in `c/generated/session.c`. The link does not
 include `request.o`: `conn.muro` already imports that book. It does
 not include `decide.o`: the image does not call `decide`. `session.c` and `admit.c` are separate translation units.
-Their headers both define `struct muro__nat`, so `c/admit_glue.c`
-is the only file that includes `admit.h`.
+Their headers share `MURO__PRELUDE`. `c/admit_glue.c` includes both
+and unpacks the offer.
 
 ```sh
 cc -Wall -Wextra -Werror -std=c11 -O2 -I c -I c/generated -include c/shim.h \
