@@ -8,7 +8,7 @@ LDFLAGS ?=
 SAN_CFLAGS = -Wall -Wextra -Werror -std=c11 -D_GNU_SOURCE -I c -I c/generated -include c/shim.h -g -fno-omit-frame-pointer -fsanitize=address,undefined
 SAN_LDFLAGS = -fsanitize=address,undefined
 
-all: c/muro-httpd c/test_classify c/test_conn c/test_sess c/test_render c/test_e2e c/test_body c/test_jwt c/test_json c/test_store
+all: c/muro-httpd c/test_classify c/test_conn c/test_sess c/test_render c/test_e2e c/test_body c/test_jwt c/test_json c/test_store c/test_poll
 
 c/%.o: c/%.c
 	$(CC) $(CFLAGS) -c -o $@ $<
@@ -60,10 +60,13 @@ c/test_json: c/test_json.o c/json_text.o
 c/test_store: c/test_store.o c/store.o c/json_text.o
 	$(CC) $(LDFLAGS) -o $@ c/test_store.o c/store.o c/json_text.o -lsqlite3
 
+c/test_poll: c/test_poll.o c/host_poll.o
+	$(CC) $(LDFLAGS) -o $@ c/test_poll.o c/host_poll.o
+
 c/muro-httpd: c/httpd.o c/host.o c/host_poll.o c/host_render.o c/host_body.o c/render.o c/body.o c/jwt.o c/json_text.o c/store.o $(CORE)
 	$(CC) $(LDFLAGS) -o $@ c/httpd.o c/host.o c/host_poll.o c/host_render.o c/host_body.o c/render.o c/body.o c/jwt.o c/json_text.o c/store.o $(CORE) -lsqlite3
 
-c-check: c/test_classify c/test_conn c/test_sess c/test_render c/test_body c/test_jwt c/test_json c/test_store c/muro-httpd c/test_e2e
+c-check: c/test_classify c/test_conn c/test_sess c/test_render c/test_body c/test_jwt c/test_json c/test_store c/test_poll c/muro-httpd c/test_e2e
 	./c/test_classify
 	./c/test_conn
 	./c/test_sess
@@ -72,6 +75,7 @@ c-check: c/test_classify c/test_conn c/test_sess c/test_render c/test_body c/tes
 	./c/test_jwt
 	./c/test_json
 	./c/test_store
+	./c/test_poll
 	./c/test_e2e c/muro-httpd
 
 c-sanitize:
@@ -79,4 +83,4 @@ c-sanitize:
 	$(MAKE) c-check CFLAGS="$(SAN_CFLAGS)" LDFLAGS="$(SAN_LDFLAGS)"
 
 clean:
-	rm -f c/*.o c/muro-httpd c/test_classify c/test_conn c/test_sess c/test_render c/test_e2e c/test_admit c/test_body c/test_jwt c/test_json c/test_store
+	rm -f c/*.o c/muro-httpd c/test_classify c/test_conn c/test_sess c/test_render c/test_e2e c/test_admit c/test_body c/test_jwt c/test_json c/test_store c/test_poll
