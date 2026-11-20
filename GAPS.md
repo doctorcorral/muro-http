@@ -10,8 +10,8 @@ muro 0.20.42. On 0.21.14, `classify` still allocates the one
 ## Closed on muro 0.20.39
 
 `match` eliminates `WBool` and `Opt`. A `match` whose result is a
-`Slice` initializes that struct, so `dropCR`, `authValue`, and
-`bodyView` return the view from the match. Fieldless constructors
+`Slice` initializes that struct, so `dropCR` and `bodyView` return
+the view from the match. Fieldless constructors
 initialize the tag and the unused union member. A binder the arm does
 not read is not declared. A static function the book does not call is
 marked unused.

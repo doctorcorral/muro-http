@@ -507,9 +507,22 @@ def finishKnown : run Π (+ buf : Slice) → Π (+ i : U64) → Π (+ ls : U64) 
                         | true => nextLine i (withBit fl (toU64 4)) cl aS aL
                         | false => nextLine i fl cl aS aL)))
 
+-- RFC 9112: no whitespace between the field name and the colon.
+-- A space or tab there must not be a Content-Length for one path
+-- and a different length for the other. Bit 32 rejects the request.
+-- The name is not classified, so the length is not recorded.
+def nameBare : run Π (+ buf : Slice) → Π (+ ls : U64) → Π (+ i : U64) → Bool :=
+  λ (+ buf : Slice) → λ (+ ls : U64) → λ (+ i : U64) →
+    match (u64nil (subi i ls)) motive (λ _ → Bool)
+      | true => true
+      | false =>
+          and (not (leadWS (byteAt buf ls))) (not (trailWS (byteAt buf (subi i (toU64 1)))))
+
 def onColon : run Π (+ buf : Slice) → Π (+ i : U64) → Π (+ ls : U64) → Π (fl : U64) → Π (cl : U64) → Π (aS : U64) → Π (aL : U64) → HSt :=
   λ (+ buf : Slice) → λ (+ i : U64) → λ (+ ls : U64) → λ (fl : U64) → λ (cl : U64) → λ (aS : U64) → λ (aL : U64) →
-    hst (addi i (toU64 1)) ls (toU64 1) (withBit fl (toU64 1)) cl aS aL (whichOf (slice buf ls (subi i ls))) (addi i (toU64 1))
+    match (nameBare buf ls i) motive (λ _ → HSt)
+      | true => hst (addi i (toU64 1)) ls (toU64 1) (withBit fl (toU64 1)) cl aS aL (whichOf (slice buf ls (subi i ls))) (addi i (toU64 1))
+      | false => hst (addi i (toU64 1)) ls (toU64 1) (withBit (withBit fl (toU64 1)) (toU64 32)) cl aS aL (toU64 5) (addi i (toU64 1))
 
 def stepB : run Π (+ buf : Slice) → Π (+ b : U8) → Π (i : U64) → Π (+ st : HSt) → HSt :=
   λ (+ buf : Slice) → λ (+ b : U8) → λ (i : U64) → λ (+ st : HSt) →
@@ -682,7 +695,9 @@ def classify : run Π (+ s : Slice) → Classified :=
   λ (+ s : Slice) → classifySt (scan s) s
 
 -- Header walk. Mode 0 counts. Mode 1 stores the first value whose
--- name matches, ignoring ASCII case. Mode 2 stores the name at an
+-- name matches, ignoring ASCII case. The name is the raw span, the
+-- same bytes the scan classifies, so a space before the colon is
+-- not a match. Values are trimmed. Mode 2 stores the name at an
 -- index. Mode 3 stores the value at an index. A missing header is
 -- an empty slice past the buffer. An empty value is an empty slice
 -- inside it. The fold is unboxed, so the walk allocates nothing.
@@ -729,11 +744,11 @@ def recordN : run Π (+ mode : U64) → Π (+ nameN : U64) → Π (+ valN : U64)
 
 def applyHdr : run Π (+ buf : Slice) → Π (+ mode : U64) → Π (+ want : Slice) → Π (+ index : U64) → Π (+ i : U64) → Π (+ n : U64) → Π (+ ls : U64) → Π (+ col : U64) → Π (+ ce : U64) → Π (+ a0 : U64) → Π (+ a1 : U64) → Π (+ hit : U64) → Hd :=
   λ (+ buf : Slice) → λ (+ mode : U64) → λ (+ want : Slice) → λ (+ index : U64) → λ (+ i : U64) → λ (+ n : U64) → λ (+ ls : U64) → λ (+ col : U64) → λ (+ ce : U64) → λ (+ a0 : U64) → λ (+ a1 : U64) → λ (+ hit : U64) →
-    match (takeHdr mode want index buf n (trimAt buf ls (subi col ls)) (trimN buf ls (subi col ls)) hit) motive (λ _ → Hd)
+    match (takeHdr mode want index buf n ls (subi col ls) hit) motive (λ _ → Hd)
       | true =>
           hd (toU64 1) (addi n (toU64 1)) (addi i (toU64 1)) (toU64 0)
-            (recordAt mode (trimAt buf ls (subi col ls)) (trimAt buf (addi col (toU64 1)) (valLenOf ce col)))
-            (recordN mode (trimN buf ls (subi col ls)) (trimN buf (addi col (toU64 1)) (valLenOf ce col)))
+            (recordAt mode ls (trimAt buf (addi col (toU64 1)) (valLenOf ce col)))
+            (recordN mode (subi col ls) (trimN buf (addi col (toU64 1)) (valLenOf ce col)))
             (toU64 1)
       | false => hd (toU64 1) (addi n (toU64 1)) (addi i (toU64 1)) (toU64 0) a0 a1 hit
 
@@ -821,7 +836,7 @@ def keep-10 : evidence {keepOf b"GET /health HTTP/1.0\r\n\r\n" ≡ keep-no : Kee
 
 def keep-close : evidence {keepOf b"GET /health HTTP/1.1\r\nConnection: close\r\n\r\n" ≡ keep-no : Keep} := refl
 
-def te-bad : evidence {statusOf b"GET /health HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n" ≡ status-malformed : Status} := refl
+def te-bad : evidence {statusOf b"GET /health HTTP/1.1\r\nHost: t\r\nTransfer-Encoding: chunked\r\n\r\n" ≡ status-malformed : Status} := refl
 
 def glued-bad : evidence {statusOf b"GET/feed HTTP/1.1\r\n\r\n" ≡ status-malformed : Status} := refl
 
@@ -835,6 +850,8 @@ def host-10-dup : evidence {statusOf b"GET /health HTTP/1.0\r\nHost: a\r\nHost: 
 
 def find-host : evidence {findHeader b"GET /health HTTP/1.1\r\nHost: t\r\n\r\n" b"host" ≡ b"t" : Slice} := refl
 
+def auth-raw : evidence {findHeader b"GET /health HTTP/1.1\r\nAuthorization: Bearer z\r\n\r\n" b"authorization" ≡ b"Bearer z" : Slice} := refl
+
 def header-count : evidence {headerCount b"GET /health HTTP/1.1\r\nHost: t\r\nConnection: close\r\n\r\n" ≡ toU64 2 : U64} := refl
 
 def header-name-0 : evidence {headerName b"GET /health HTTP/1.1\r\nHost: t\r\n\r\n" (toU64 0) ≡ b"Host" : Slice} := refl
@@ -844,6 +861,18 @@ def need-body : evidence {statusOf b"POST /posts HTTP/1.1\r\nHost: t\r\nContent-
 def post-body : evidence {classify b"POST /posts HTTP/1.1\r\nHost: t\r\nContent-Length: 2\r\n\r\nab" ≡ classified status-ok keep-yes : Classified} := refl
 
 def post-slice : evidence {bodyView b"POST /posts HTTP/1.1\r\nHost: t\r\nContent-Length: 2\r\n\r\nab" ≡ b"ab" : Slice} := refl
+
+def cl-ws-bad : evidence {statusOf b"POST /p HTTP/1.1\r\nHost: t\r\nContent-Length : 2\r\n\r\nab" ≡ status-malformed : Status} := refl
+
+def cl-ws-body : evidence {bodyView b"POST /p HTTP/1.1\r\nHost: t\r\nContent-Length : 2\r\n\r\nab" ≡ b"" : Slice} := refl
+
+def cl-ws-find : evidence {findHeader b"POST /p HTTP/1.1\r\nHost: t\r\nContent-Length : 2\r\n\r\nab" b"content-length" ≡ b"" : Slice} := refl
+
+def cl-tab-bad : evidence {statusOf b"POST /p HTTP/1.1\r\nHost: t\r\nContent-Length\t: 2\r\n\r\nab" ≡ status-malformed : Status} := refl
+
+def cl-lead-bad : evidence {statusOf b"POST /p HTTP/1.1\r\nHost: t\r\n Content-Length: 2\r\n\r\nab" ≡ status-malformed : Status} := refl
+
+def cl-ows : evidence {bodyView b"POST /p HTTP/1.1\r\nHost: t\r\nContent-Length:  2\r\n\r\nab" ≡ b"ab" : Slice} := refl
 
 def health-class : evidence {classify b"GET /health HTTP/1.1\r\nHost: t\r\n\r\n" ≡ classified status-ok keep-yes : Classified} := refl
 

@@ -148,6 +148,29 @@ int main(void) {
   expect_view("post", post, "POST", "/posts", "", "HTTP/1.1", "ab", 0);
   muro_http_reset();
   if (contentLength(of(post)) != 2) bad("post", "content-length");
+  {
+    const char *spaced = "POST /p HTTP/1.1\r\nHost: t\r\nContent-Length : 2\r\n\r\nab";
+    const char *tabbed = "POST /p HTTP/1.1\r\nHost: t\r\nContent-Length\t: 2\r\n\r\nab";
+    const char *lead = "POST /p HTTP/1.1\r\nHost: t\r\n Content-Length: 2\r\n\r\nab";
+    const char *ows = "POST /p HTTP/1.1\r\nHost: t\r\nContent-Length:  2\r\n\r\nab";
+    muro__slice sp = of(spaced);
+    muro__slice cl;
+    classify_of("cl-ws", spaced, ST_BAD, 0, 0);
+    muro_http_reset();
+    if (contentLength(sp) != 0) bad("cl-ws", "content-length");
+    muro_http_reset();
+    if (bodyView(sp).n != 0) bad("cl-ws", "body");
+    muro_http_reset();
+    cl = findHeader(sp, of("content-length"));
+    if (cl.n != 0 || points_at(cl.p, sp)) bad("cl-ws", "find");
+    classify_of("cl-tab", tabbed, ST_BAD, 0, 0);
+    classify_of("cl-lead", lead, ST_BAD, 0, 0);
+    classify_of("cl-ows", ows, ST_OK, 1, K_YES);
+    muro_http_reset();
+    if (contentLength(of(ows)) != 2) bad("cl-ows", "content-length");
+    muro_http_reset();
+    if (!same(bodyView(of(ows)), "ab")) bad("cl-ows", "body");
+  }
   expect_view("query", "GET /feed?x=1 HTTP/1.1\r\nHost: t\r\n\r\n", "GET", "/feed", "x=1",
               "HTTP/1.1", "", 1);
   classify_of("query", "GET /feed?x=1 HTTP/1.1\r\nHost: t\r\n\r\n", ST_OK, 1, K_YES);
