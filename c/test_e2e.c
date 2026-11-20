@@ -1451,6 +1451,16 @@ static void check_interleaved(void) {
   if (take_resp(slow, "interleave-finish", 200, "ok", 0, 0) < 0) goto done;
   if (expect_silent(body, "interleave-body-end") < 0) goto done;
 
+  /* part_body left {"tex of a 20-byte JSON object. Fifteen more
+     bytes complete it. No bearer, so the finished request is 401
+     missing-bearer. */
+  if (send_all(body, "t\":\"paused-ok\"}") < 0) {
+    fail("interleave", "finish body");
+    goto done;
+  }
+  if (take_resp(body, "interleave-body-finish", 401, "missing-bearer", 0, 0) < 0)
+    goto done;
+
 done:
   if (slow >= 0) close(slow);
   if (body >= 0) close(body);
@@ -1463,6 +1473,63 @@ done:
   if (feed2 >= 0) close(feed2);
   stop_server(pid);
   unlink_db(path);
+}
+
+/* A client RST mid-response must close that slot and not spin the
+   poll loop, so a later request on another socket is served at once. */
+static int rst_close(int fd) {
+  struct linger lg;
+  lg.l_onoff = 1;
+  lg.l_linger = 0;
+  if (fd < 0) return -1;
+  (void)setsockopt(fd, SOL_SOCKET, SO_LINGER, &lg, sizeof lg);
+  close(fd);
+  return 0;
+}
+
+static void check_abort_write(void) {
+  const char *saved = srv_db;
+  pid_t pid;
+  int port = -1;
+  int fd = -1;
+  char buf[16];
+  ssize_t r;
+  struct pollfd pfd;
+  int pr;
+  srv_db = ":memory:";
+  pid = start_server(10000, 8, &port, "1", NULL, NULL);
+  srv_db = saved;
+  if (pid < 0) return;
+  fd = dial(port);
+  if (fd < 0 || send_all(fd, "GET /health HTTP/1.1\r\n\r\n") < 0) {
+    fail("abort-write", "send");
+    if (fd >= 0) close(fd);
+    stop_server(pid);
+    return;
+  }
+  pfd.fd = fd;
+  pfd.events = POLLIN;
+  pr = poll(&pfd, 1, 2000);
+  if (pr <= 0) {
+    fail("abort-write", "no response");
+    close(fd);
+    stop_server(pid);
+    return;
+  }
+  r = recv(fd, buf, 1, 0);
+  if (r <= 0) {
+    fail("abort-write", "first byte");
+    close(fd);
+    stop_server(pid);
+    return;
+  }
+  rst_close(fd);
+  fd = -1;
+  if (check_one(port, "abort-write-next", "GET /health HTTP/1.1\r\n\r\n", 200, "ok", 0, 0) < 0) {
+    stop_server(pid);
+    return;
+  }
+  if (stop_server(pid) < 0) return;
 }
 
 /* A partial header must not keep the process alive after the signal. */
@@ -1541,6 +1608,7 @@ int main(int argc, char **argv) {
   check_max_conn();
   check_partial_send();
   check_interleaved();
+  check_abort_write();
   check_signal(SIGINT, "sigint");
   check_signal(SIGTERM, "sigterm");
   check_db_down();
