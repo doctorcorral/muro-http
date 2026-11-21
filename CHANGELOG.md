@@ -23,6 +23,8 @@
   any octet except an unescaped `"`, which is looser than qdtext.
   Those quote cases are C checks in `c/test_classify` and
   `c/test_http11`. The book byte strings have no quotes.
+  `chu;nked` is 400 because `nked` is not a parameter.
+  `chu;n=1` is an unknown coding.
   A chunk size that
   does not fit in a `U64` is 400. `Transfer-Encoding`
   together with `Content-Length` is 400 (RFC 9112 6.3). `chunked`

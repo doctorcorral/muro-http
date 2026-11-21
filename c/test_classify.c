@@ -305,8 +305,12 @@ int main(void) {
     if (teCode(of("POST /p HTTP/1.1\r\nHost: t\r\nTransfer-Encoding: gzip;q=1, chunked\r\n\r\n")) != 2)
       bad("te-gzip-param-final", "code");
     muro_http_reset();
-    if (teCode(of("POST /p HTTP/1.1\r\nHost: t\r\nTransfer-Encoding: chu;nked\r\n\r\n")) != 2)
+    /* chu;nked is not a parameter: the name has no '='. Bad, not chunked. */
+    if (teCode(of("POST /p HTTP/1.1\r\nHost: t\r\nTransfer-Encoding: chu;nked\r\n\r\n")) != 3)
       bad("te-param-cut", "code");
+    muro_http_reset();
+    if (teCode(of("POST /p HTTP/1.1\r\nHost: t\r\nTransfer-Encoding: chu;n=1\r\n\r\n")) != 2)
+      bad("te-param-unknown", "code");
     classify_of("te-cl",
                 "POST /p HTTP/1.1\r\nHost: t\r\nTransfer-Encoding: chunked\r\nContent-Length: 1\r\n\r\n",
                 ST_BAD, 0, 0);

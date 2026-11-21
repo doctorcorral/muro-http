@@ -653,9 +653,11 @@ form is a machine term. The request names are `crlf-end`, `lf-end`,
 `ck-framed-hdr`, `ck-take-hdr`, `stream-take-hi`, `stream-end-hi`,
 `stream-take-edge`, `stream-end-edge`, and `stream-take-lf`.
 `te-param-quote`, `te-param-empty-q`, `te-param-junk`,
-`te-param-twice`, `te-gzip-param-final`, and `te-param-cut` are C
-checks in `c/test_classify`, not book equations. The quote cases
-need a `"` inside the header, and the book byte strings have none.
+`te-param-twice`, `te-gzip-param-final`, `te-param-cut`, and
+`te-param-unknown` are C checks in `c/test_classify`, not book
+equations. The quote cases need a `"` inside the header, and the
+book byte strings have none. `chu;nked` is bad because `nked` is
+not a `transfer-parameter`. `chu;n=1` is an unknown coding.
 `c/test_classify` checks each of those results, and the failure
 name is the equation name. `stream-take-hi` and `stream-take-edge`
 are the header-only buffers. `stream-cl` and `cap-cl` are C checks
