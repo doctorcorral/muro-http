@@ -17,6 +17,17 @@
 
 static int failures;
 static const char *bin_path = "c/muro-hello";
+static char stream_ready[96];
+
+static int wait_file(const char *path, int ms) {
+  int left = ms;
+  while (left > 0) {
+    if (access(path, R_OK) == 0) return 0;
+    usleep(20000);
+    left -= 20;
+  }
+  return -1;
+}
 
 static void fail(const char *name, const char *what) {
   fprintf(stderr, "FAIL %s: %s\n", name, what);
@@ -391,8 +402,27 @@ static void check_stream_echo(const char *host, int port) {
     return;
   }
   memset(payload, 'z', 20000);
-  if (send_n(fd, head, (size_t)hn) < 0 || send_n(fd, payload, 20000) < 0) {
+  /* Headers only. The rest waits until muro_http_body_read is entered
+     for this streamed body. Sending both at once lets one read hold
+     the whole message, streamTake stays 0, and hello echoes req->body
+     without that read. A sleep raced a slow accept. */
+  unlink(stream_ready);
+  if (send_n(fd, head, (size_t)hn) < 0) {
     fail("stream-echo", "send");
+    close(fd);
+    free(payload);
+    free(buf);
+    return;
+  }
+  if (stream_ready[0] == 0 || wait_file(stream_ready, 5000) < 0) {
+    fail("stream-echo", "body-read");
+    close(fd);
+    free(payload);
+    free(buf);
+    return;
+  }
+  if (send_n(fd, payload, 20000) < 0) {
+    fail("stream-echo", "body");
     close(fd);
     free(payload);
     free(buf);
@@ -514,8 +544,19 @@ int main(int argc, char **argv) {
   alarm(60);
   check_help();
   check_bad_bind();
+  if (snprintf(stream_ready, sizeof stream_ready, "/tmp/muro-hello-stream-%ld", (long)getpid()) <
+      0)
+    stream_ready[0] = 0;
+  else {
+    unlink(stream_ready);
+    setenv("MURO_TEST_STREAM_READY", stream_ready, 1);
+  }
   pid = start_hello("nope", host, &port, NULL);
-  if (pid < 0) return 1;
+  unsetenv("MURO_TEST_STREAM_READY");
+  if (pid < 0) {
+    unlink(stream_ready);
+    return 1;
+  }
   expect_one(host, port, "hello", "GET / HTTP/1.1\r\nHost: t\r\n\r\n", 200, "hello\n", 0);
   expect_one(host, port, "health-is-hello", "GET /health HTTP/1.1\r\nHost: t\r\n\r\n", 200, "hello\n",
              0);
@@ -540,6 +581,7 @@ int main(int argc, char **argv) {
     close(fd);
   }
   check_stream_echo(host, port);
+  unlink(stream_ready);
   stop_server(pid);
   check_drain_before_status();
   if (failures != 0) {

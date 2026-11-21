@@ -178,7 +178,7 @@ int main(void) {
   muro_http_reset();
   row = httpChunk(of("hi"));
   expect_eq("chunk-hi", row, "2\r\nhi\r\n");
-  expect_eq("chunk-last", httpLastChunk(), "0\r\n\r\n");
+  expect_eq("last-chunk", httpLastChunk(), "0\r\n\r\n");
   expect_eq("chunked-head", httpChunked(200, of("OK"), of(DATE), of(""), 0),
             "HTTP/1.1 200 OK\r\nDate: Sun, 06 Nov 1994 08:49:37 GMT\r\n"
             "Connection: keep-alive\r\nTransfer-Encoding: chunked\r\n\r\n");

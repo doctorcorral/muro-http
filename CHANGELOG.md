@@ -107,7 +107,9 @@
   those bytes, including `HEAD` of `ok` and one chunk of `hi`.
   The clock, the poll loop, the drain, and a body past the window
   are hand-written. `c/test_http11` and `make c-sanitize` check
-  those.
+  those. `c/test_hello` checks a body past the window: it sends
+  the headers, waits until `muro_http_body_read` is entered, then
+  sends the rest.
 
 - Pin muro 0.22.14. The library version stays `0.1.0-dev`.
   `mix muro.gen` rewrites the committed C and Elixir. The C prelude

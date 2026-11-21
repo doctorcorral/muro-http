@@ -439,7 +439,8 @@ def noBit : run Π (f : U64) → Π (bit : U64) → U64 :=
 -- The test is the value, not one bit: 2^33 is above the bound too.
 -- Overflow during the digit fold returns this same sentinel.
 -- A declared body longer than 16384, and still below the bound, is
--- streamed by the host.
+-- streamed by the host when the length is within --max-body.
+-- Above that max the host answers 413 and does not read the body.
 -- A closed word, so the C emit is a literal and not a Nat walk.
 def clBad : run U64 :=
   toU64 4294967296

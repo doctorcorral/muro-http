@@ -6,6 +6,7 @@
 #include "host_stream.h"
 
 #include <errno.h>
+#include <fcntl.h>
 #include <poll.h>
 #include <stdlib.h>
 #include <string.h>
@@ -471,12 +472,39 @@ static int read_chunk(struct HostIn *in, uint8_t *dst, size_t cap) {
   return (int)produced;
 }
 
+/* MURO_TEST_STREAM_READY is a path created on the first entry to
+   muro_http_body_read for a streamed body (Content-Length past the
+   window, or chunked), before any of those bytes are copied out.
+   A buffered body does not create it. Production leaves it unset.
+   The hello echo test waits for this path before sending the rest
+   of the body, so those bytes cannot land in the classify buffer. */
+static void note_stream_ready(void) {
+  const char *path;
+  int fd;
+  static int done = 0;
+  if (done) return;
+  path = getenv("MURO_TEST_STREAM_READY");
+  if (!path || !path[0]) {
+    done = 1;
+    return;
+  }
+  fd = open(path, O_CREAT | O_WRONLY | O_TRUNC | O_CLOEXEC, 0644);
+  if (fd < 0) return;
+  if (write(fd, "1\n", 2) < 0) {
+    close(fd);
+    return;
+  }
+  close(fd);
+  done = 1;
+}
+
 int muro_http_body_read(MuroHttpBody *body, uint8_t *dst, size_t cap) {
   struct HostIn *in;
   if (!body || !body->in || !dst || cap == 0) return -1;
   in = body->in;
   if (in->err) return -1;
   if (cap > 1u << 20) cap = 1u << 20;
+  if (in->kind == IN_CL || in->kind == IN_CHUNK) note_stream_ready();
   if (in->kind == IN_MEM) return read_mem(in, dst, cap);
   if (in->kind == IN_CL) return read_cl(in, dst, cap);
   if (in->kind == IN_CHUNK) return read_chunk(in, dst, cap);

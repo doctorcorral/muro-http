@@ -469,4 +469,5 @@ and the failure name is the equation name. `stream-take-hi` and
 `stream-take-edge` are header-only buffers. `stream-cl` and
 `cap-cl` are the classify status of those buffers, not a body of
 that size. A body past the window is `c/test_http11` and
-`c/test_hello`.
+`c/test_hello`. The hello echo waits until `muro_http_body_read`
+is entered before it sends the rest of the body.

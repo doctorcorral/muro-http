@@ -65,8 +65,12 @@ a `U64` is `status-malformed`. A coding other than `chunked`,
 including `gzip` and `gzip, chunked`, is `status-unimplemented`.
 The image stores origin 2 and the host copies `httpNotImplemented`.
 `host_in_policy` does not return 501 for that coding. It returns
-501 only for method code 1. A well-formed length above the configured
-max body is `status-ok` in the book. The host answers 413.
+501 only for method code 1. The book does not know the configured
+max body. A well-formed `Content-Length` above 16384 whose bytes
+have not all arrived is `status-ok`. A `Content-Length` of at most
+16384 whose bytes have not arrived is `status-need-more`, including
+when that length is above the max. The host answers 413 for a known
+length over the max once the headers are done.
 
 Known methods are `GET`, `HEAD`, `POST`, `PUT`, `DELETE`, `OPTIONS`,
 and `PATCH`, case-sensitive. `OPTIONS` with target `*` is known. Any
@@ -79,8 +83,11 @@ other Expect value is not malformed. On HTTP/1.1 the host answers
 A line without a colon, whitespace before the colon, a bad version,
 a missing space, an empty request-target, a second `Content-Length`,
 a duplicate `Host`, or a `Content-Length` of 4294967296 or more is
-`status-malformed`. `4294967295` is a legal length. The host streams
-it when the body has not arrived. A leading `+` is malformed (RFC
+`status-malformed`. `4294967295` is a legal length in the book. The
+host does not stream it. A known `Content-Length` over the max body
+(default 8 MiB) is 413 at the headers, and the host does not read
+that body. A body past 16384 is streamed only up to that max. A
+leading `+` is malformed (RFC
 9110 8.6). A trimmed digit string of 32 bytes or more is malformed,
 so the digit fold does not walk an unbounded value. Space or tab
 after the colon is still legal. The request line and the header
@@ -113,7 +120,9 @@ block alone. `c/test_classify` checks the same header-only buffers.
 `stream-cl` and `cap-cl` are the classify status of those buffers,
 not a body of 16385 or 16384 bytes. A body past that window is
 `c/test_http11` (a response of 1 MiB + 1, and a 20000-byte echo)
-and `c/test_hello` (a 20000-byte echo).
+and `c/test_hello` (a 20000-byte echo). The hello echo sends the
+headers, waits until `muro_http_body_read` is entered, then sends
+the body.
 
 Routing lives in the handler. The challenge routes are
 `priv/muro/challenge/route.muro` (`routeVerb`, `routePath`, `routeId`,
@@ -543,10 +552,11 @@ does not know is 501 and does not reach this handler.
 `GET /health` is that same hello. It is not the challenge route.
 `c/test_hello` checks those responses, a missing `Host` (the book's
 400 `malformed`), keep-alive, `--bind 127.0.0.1` winning over
-`MURO_HTTP_BIND=nope`, a 20000-byte streamed POST echo, and SIGTERM
-while a 20000-byte body has only partly arrived (the listen socket
-closes and the process exits 0). A bind host that is not IPv4
-exits 2 and does not listen.
+`MURO_HTTP_BIND=nope`, a 20000-byte POST echo that sends the
+headers and waits until `muro_http_body_read` is entered before
+the rest of the body, and SIGTERM while a 20000-byte body has
+only partly arrived (the listen socket closes and the process
+exits 0). A bind host that is not IPv4 exits 2 and does not listen.
 
 ## The stream example
 
