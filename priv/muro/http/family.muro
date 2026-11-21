@@ -7,7 +7,14 @@
 --
 -- `accept` opens on arrival. It is never held. `reply` stays held
 -- while any earlier instance of the same key is unresolved. An
--- earlier accept counts, and so does an earlier reply. An instance
+-- earlier accept counts, and so does an earlier reply.
+-- The pin's `agda/Muro/Family.agda` names these two kinds `init`
+-- and `signal`. This book names them `accept` and `reply`.
+-- `accept` is that file's `init`: it is never held. `reply` is
+-- that file's `signal`: it is held while an earlier instance of
+-- the same key is unresolved. The Agda names are not used here.
+-- This repository does not contain that proof.
+-- An instance
 -- that has not arrived does not. Another key does not. An older
 -- reply that arrives after a newer one has opened runs beside it.
 -- This is not one reply at a time. `earlier_resolved` names the

@@ -391,6 +391,7 @@ static int take_byte(struct HostIn *in, uint8_t *b) {
     return -1;
   }
   if (r == 0) return 0;
+  host_io_progress(in->fd);
   in->scratch_len = (size_t)r;
   in->scratch_off = 0;
   *b = in->scratch[in->scratch_off++];
@@ -437,6 +438,7 @@ static int read_cl(struct HostIn *in, uint8_t *dst, size_t cap) {
       in->open = 1;
       return -1;
     }
+    host_io_progress(in->fd);
     n = (size_t)r;
     if (n > left) n = left;
     in->got += n;

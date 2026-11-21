@@ -312,7 +312,10 @@ a socket loop. The pin is 0.22.14. The per-key family is below.
 `priv/muro/http/family.muro` is a hold rule over a fixed script. It
 is not `host_poll`. One key is one connection. `accept` is never
 held. `reply` is held while an earlier instance of that key is
-unresolved. Another key does not wait. The rule does not order
+unresolved. The pin's `agda/Muro/Family.agda` calls those two kinds
+`init` and `signal`. `accept` is `init`. `reply` is `signal`. The
+book does not use the Agda names. This repository does not contain
+that proof. Another key does not wait. The rule does not order
 replies across different connections. `--backend fsm` emits
 `MuroHttp.FamilyFsm.Conns`. `--backend c` omits the family.
 `c/host.c` never calls that dispatcher.
@@ -471,7 +474,13 @@ codes, `crlf-end`, `lf-end`, `hdr-prefers-crlf`, `header-count`,
 (`post-framed`, `post-framed-short`, `post-take-short`,
 `ck-framed`, `ck-framed-hdr`, `ck-take-hdr`, `stream-take-hi`,
 `stream-end-hi`, `stream-take-edge`, `stream-end-edge`,
-`stream-take-lf`). `c/test_classify` checks each of those results,
+`stream-take-lf`). `test/route_test.exs` skips sixteen
+`route.muro` equations, also named in `README.md`: `route-verb-get`,
+`route-verb-post`, `route-verb-other`, `route-health`, `route-feed`,
+`route-posts`, `route-id`, `route-like`, `route-tail`,
+`route-id-42`, `route-idn-42`, `route-id-zero`, `route-id-abc`,
+`route-id-lead`, `route-like-id`, and `route-health-id`.
+`c/test_route` checks those results. `c/test_classify` checks each of those results,
 and the failure name is the equation name. `stream-take-hi` and
 `stream-take-edge` are header-only buffers. `stream-cl` and
 `cap-cl` are C checks in `c/test_classify`, not book equations.

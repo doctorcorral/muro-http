@@ -78,8 +78,12 @@ int host_in_take_next(struct HostIn *in, uint8_t **p, size_t *n);
 int host_io_should_stop(void);
 
 /* One turn of the server poll. 0 when the caller should try its
-   read again. -1 when the drain deadline has passed or poll failed.
+   read again. -1 when the drain deadline has passed, the idle
+   deadline passed with no body byte, or poll failed.
    Outside the server this waits on watch_fd alone. */
 int host_io_once(int watch_fd);
+
+/* A body byte arrived on fd. The next wait starts a new idle window. */
+void host_io_progress(int fd);
 
 #endif

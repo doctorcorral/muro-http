@@ -117,6 +117,7 @@ typedef struct Slot {
   size_t out_len;
   size_t out_off;
   uint64_t deadline;
+  int body_idle;
   struct HostIn hin;
   int sent_100;
   uint8_t cont[160];
@@ -541,7 +542,9 @@ static int write_100(Server *sv, Slot *s) {
    bytes into HANDLE, and onHandle holds them until the client writes
    again. -1 on a hard write error. A READ-phase timer still arms the
    idle deadline, so a peer that never takes the interim still times
-   out. HANDLE has the timer off, so that deadline clears. */
+   out. HANDLE has the book timer off, so that deadline clears.
+   A stalled muro_http_body_read arms its own deadline and closes
+   after the idle timeout. That close is not an image tick. */
 static int hold_100(Server *sv, Slot *s) {
   int w100 = write_100(sv, s);
   int timer;
@@ -1062,12 +1065,23 @@ static void on_readable(Server *sv, Slot *s, int hangup) {
   after_io(sv, s);
 }
 
+static int fd_skipped(int fd);
+
 static void on_tick(Server *sv, Slot *s, uint64_t now) {
   int phase;
   if (!s->used || s->deadline == 0 || s->deadline > now) return;
   phase = (int)field(s->st, 0);
   s->deadline = 0;
-  if (phase != PH_READ && phase != PH_IDLE) return;
+  if (phase != PH_READ && phase != PH_IDLE) {
+    /* Decide and write leave the book timer off, so a tick would
+       hold. A deadline in those phases was armed while
+       muro_http_body_read was waiting. Do not close_slot here: the
+       handler or the response pull is still on the stack. The wait
+       returns and that caller closes. */
+    s->body_idle = 1;
+    return;
+  }
+  if (fd_skipped(s->fd)) return;
   if (!step_ev(sv, s, evTick())) {
     close_slot(sv, s);
     return;
@@ -1436,14 +1450,18 @@ static int fd_skipped(int fd) {
   return 0;
 }
 
+/* 1 when the socket is readable or hung up. 0 on timeout or EINTR.
+   -1 when poll fails. */
 static int poll_one(int fd, int ms) {
   struct pollfd pfd;
   int pr;
   pfd.fd = fd;
   pfd.events = POLLIN;
+  pfd.revents = 0;
   pr = poll(&pfd, 1, ms);
   if (pr < 0 && errno == EINTR) return 0;
   if (pr < 0) return -1;
+  if (pr > 0 && (pfd.revents & (POLLIN | POLLHUP | POLLERR | POLLNVAL))) return 1;
   return 0;
 }
 
@@ -1458,6 +1476,7 @@ int host_io_once(int watch_fd) {
   Slot *body = NULL;
   int saved_rd = 0;
   int saved_wr = 0;
+  int saw_body = 0;
   int n;
   int i;
   if (watch_fd < 0) return -1;
@@ -1468,13 +1487,40 @@ int host_io_once(int watch_fd) {
   note_drain(sv);
   if (sv->draining && (sv->nconn == 0 || host_poll_now_ms() >= sv->drain_deadline)) return -1;
   if (io_depth >= 8) {
-    int rc = poll_one(watch_fd, 200);
+    Slot *deep = find_slot(sv, watch_fd);
+    int wait_ms = 200;
+    uint64_t now = host_poll_now_ms();
+    int rc;
+    if (deep && deep->used) {
+      uint64_t left;
+      if (deep->deadline == 0) deep->deadline = now + (uint64_t)sv->idle_ms;
+      if (deep->deadline <= now) {
+        rc = poll_one(watch_fd, 0);
+        if (rc > 0) return 0;
+        if (rc < 0) return -1;
+        deep->deadline = 0;
+        deep->body_idle = 1;
+        return -1;
+      }
+      left = deep->deadline - now;
+      if (left > 86400000ull) left = 86400000ull;
+      wait_ms = (int)left;
+    }
+    rc = poll_one(watch_fd, wait_ms);
     note_drain(sv);
     if (sv->draining && host_poll_now_ms() >= sv->drain_deadline) return -1;
-    return rc;
+    if (rc < 0) return -1;
+    if (rc == 0 && deep && deep->used && deep->deadline != 0 &&
+        host_poll_now_ms() >= deep->deadline) {
+      deep->deadline = 0;
+      deep->body_idle = 1;
+      return -1;
+    }
+    return 0;
   }
   body = find_slot(sv, watch_fd);
   if (body) {
+    uint64_t now = host_poll_now_ms();
     saved_rd = body->want_read;
     saved_wr = body->want_write;
     /* POLLIN only. A writable socket is level-triggered and would
@@ -1483,6 +1529,11 @@ int host_io_once(int watch_fd) {
     body->want_read = 1;
     body->want_write = 0;
     sync_watch(sv, body);
+    /* The book timer is off in decide and write. Arm the host idle
+       deadline so a stalled body still expires. A byte of progress
+       clears it. */
+    body->body_idle = 0;
+    if (body->deadline == 0) body->deadline = now + (uint64_t)sv->idle_ms;
   }
   io_skip[io_depth] = watch_fd;
   io_depth += 1;
@@ -1500,14 +1551,12 @@ int host_io_once(int watch_fd) {
   note_drain(sv);
   for (i = 0; i < n; i++) {
     Slot *s;
+    if (body && evs[i].fd == watch_fd && (evs[i].readable || evs[i].hangup)) saw_body = 1;
     if (evs[i].timer) {
       uint64_t now = host_poll_now_ms();
       int k;
       sv->armed_deadline = 0;
-      for (k = 0; k < sv->max_conn; k++) {
-        if (fd_skipped(sv->slots[k].fd)) continue;
-        on_tick(sv, &sv->slots[k], now);
-      }
+      for (k = 0; k < sv->max_conn; k++) on_tick(sv, &sv->slots[k], now);
       continue;
     }
     if (fd_skipped(evs[i].fd)) continue;
@@ -1527,8 +1576,19 @@ int host_io_once(int watch_fd) {
     else if (s->used && evs[i].hangup && !evs[i].writable) close_slot(sv, s);
   }
   io_depth -= 1;
+  if (body && body->used && body->fd == watch_fd && body->body_idle && !saw_body) return -1;
   if (sv->draining && (sv->nconn == 0 || host_poll_now_ms() >= sv->drain_deadline)) return -1;
   return 0;
+}
+
+/* A body byte arrived. The next wait starts a new idle window. */
+void host_io_progress(int fd) {
+  Slot *s;
+  if (!live_sv || fd < 0) return;
+  s = find_slot(live_sv, fd);
+  if (!s || !s->used) return;
+  s->deadline = 0;
+  s->body_idle = 0;
 }
 
 int muro_http_serve(const MuroHttpConfig *cfg, MuroHttpHandler handler, void *user) {

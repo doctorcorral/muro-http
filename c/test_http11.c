@@ -40,7 +40,8 @@ static int parse_port(const char *line) {
   return port;
 }
 
-static pid_t start_stream(int *port, const char *max_body, const char *drain_ms) {
+static pid_t start_stream_ms(int *port, const char *max_body, const char *drain_ms,
+                             const char *idle_ms) {
   int sp[2];
   pid_t pid;
   char buf[128];
@@ -70,8 +71,9 @@ static pid_t start_stream(int *port, const char *max_body, const char *drain_ms)
     av[argc++] = "0";
     av[argc++] = "--bind";
     av[argc++] = (char *)host_s;
+    if (!idle_ms || !idle_ms[0]) idle_ms = "8000";
     av[argc++] = "--idle-ms";
-    av[argc++] = "8000";
+    av[argc++] = (char *)idle_ms;
     if (max_body) {
       av[argc++] = "--max-body";
       av[argc++] = (char *)max_body;
@@ -111,6 +113,10 @@ static pid_t start_stream(int *port, const char *max_body, const char *drain_ms)
     return -1;
   }
   return pid;
+}
+
+static pid_t start_stream(int *port, const char *max_body, const char *drain_ms) {
+  return start_stream_ms(port, max_body, drain_ms, NULL);
 }
 
 static void stop_server(pid_t pid) {
@@ -462,6 +468,66 @@ static int open_conn(int port, Conn *c) {
 static void close_conn(Conn *c) {
   if (c->fd >= 0) close(c->fd);
   c->fd = -1;
+}
+
+/* Headers for a streamed echo, then no body bytes. The pull blocks
+   in muro_http_body_read. The idle deadline must close the socket.
+   A 200 means the host entered that pull. A 400 would be the
+   classifier, which is a different path. */
+static void check_body_idle(void) {
+  int port = -1;
+  pid_t pid = start_stream_ms(&port, NULL, NULL, "500");
+  Conn c;
+  struct pollfd pfd;
+  char acc[512];
+  size_t n = 0;
+  int i;
+  const char *req = "POST /echo HTTP/1.1\r\nHost: h\r\nContent-Length: 20000\r\n\r\n";
+  if (pid < 0) return;
+  if (open_conn(port, &c) < 0) {
+    fail("body-idle", "connect");
+    stop_server(pid);
+    return;
+  }
+  if (send_str(c.fd, req) < 0) {
+    fail("body-idle", "send");
+    close_conn(&c);
+    stop_server(pid);
+    return;
+  }
+  pfd.fd = c.fd;
+  pfd.events = POLLIN;
+  for (i = 0; i < 40; i++) {
+    int pr = poll(&pfd, 1, 200);
+    ssize_t r;
+    if (pr < 0 && errno == EINTR) continue;
+    if (pr < 0) {
+      fail("body-idle", "poll");
+      break;
+    }
+    if (pr == 0) continue;
+    if (n + 1 >= sizeof acc) {
+      fail("body-idle", "long");
+      break;
+    }
+    r = read(c.fd, acc + n, sizeof acc - 1 - n);
+    if (r < 0 && (errno == EINTR || errno == EAGAIN || errno == EWOULDBLOCK)) continue;
+    if (r < 0) {
+      fail("body-idle", "read");
+      break;
+    }
+    if (r == 0) {
+      acc[n] = 0;
+      if (n < 12 || memcmp(acc, "HTTP/1.1 200", 12) != 0) fail("body-idle", "status");
+      close_conn(&c);
+      stop_server(pid);
+      return;
+    }
+    n += (size_t)r;
+  }
+  fail("body-idle", "still open");
+  close_conn(&c);
+  stop_server(pid);
 }
 
 static int check_fill(Conn *c, size_t n, int ch) {
@@ -1488,18 +1554,18 @@ int main(int argc, char **argv) {
                  "POST /echo HTTP/1.1\r\nHost: h\r\nTransfer-Encoding: chunked\r\n\r\n"
                  "1\r\na\r\n1\r\nb\r\n0\r\n\r\n",
                  "ab");
-  expect_chunked(port, "te-param",
-                 "POST /echo HTTP/1.1\r\nHost: h\r\nTransfer-Encoding: chunked;q=1\r\n\r\n"
-                 "4\r\nwiki\r\n0\r\n\r\n",
-                 "wiki");
-  expect_chunked(port, "te-param-ows",
-                 "POST /echo HTTP/1.1\r\nHost: h\r\nTransfer-Encoding: chunked ; q=1\r\n\r\n"
-                 "4\r\nwiki\r\n0\r\n\r\n",
-                 "wiki");
-  expect_chunked(port, "te-param-quote",
-                 "POST /echo HTTP/1.1\r\nHost: h\r\nTransfer-Encoding: chunked;q=\"a,b\"\r\n\r\n"
-                 "4\r\nwiki\r\n0\r\n\r\n",
-                 "wiki");
+  expect_cl(port, "te-param",
+            "POST /echo HTTP/1.1\r\nHost: h\r\nTransfer-Encoding: chunked;q=1\r\n\r\n"
+            "4\r\nwiki\r\n0\r\n\r\n",
+            400, "malformed", 1);
+  expect_cl(port, "te-param-ows",
+            "POST /echo HTTP/1.1\r\nHost: h\r\nTransfer-Encoding: chunked ; q=1\r\n\r\n"
+            "4\r\nwiki\r\n0\r\n\r\n",
+            400, "malformed", 1);
+  expect_cl(port, "te-param-quote",
+            "POST /echo HTTP/1.1\r\nHost: h\r\nTransfer-Encoding: chunked;q=\"a,b\"\r\n\r\n"
+            "4\r\nwiki\r\n0\r\n\r\n",
+            400, "malformed", 1);
   expect_cl(port, "chunk-bad",
             "POST /echo HTTP/1.1\r\nHost: h\r\nTransfer-Encoding: chunked\r\n\r\nzz\r\n", 400,
             "malformed", 1);
@@ -1531,8 +1597,14 @@ int main(int argc, char **argv) {
             "POST /echo HTTP/1.1\r\nHost: h\r\nTransfer-Encoding: chunked;@@@\r\n\r\n", 400,
             "malformed", 1);
   expect_cl(port, "te-param-gzip",
-            "POST /echo HTTP/1.1\r\nHost: h\r\nTransfer-Encoding: gzip;q=1\r\n\r\n", 501,
-            "unimplemented", 1);
+            "POST /echo HTTP/1.1\r\nHost: h\r\nTransfer-Encoding: gzip;q=1\r\n\r\n", 400,
+            "malformed", 1);
+  expect_cl(port, "te-param-cut",
+            "POST /echo HTTP/1.1\r\nHost: h\r\nTransfer-Encoding: chu;nked\r\n\r\n", 400,
+            "malformed", 1);
+  expect_cl(port, "te-param-unknown",
+            "POST /echo HTTP/1.1\r\nHost: h\r\nTransfer-Encoding: chu;n=1\r\n\r\n", 400,
+            "malformed", 1);
   expect_cl(port, "te-param-not-final",
             "POST /echo HTTP/1.1\r\nHost: h\r\nTransfer-Encoding: chunked;q=1, gzip\r\n\r\n", 400,
             "malformed", 1);
@@ -1621,6 +1693,7 @@ int main(int argc, char **argv) {
   check_drain_cut();
   check_continue_stall();
   check_continue_pipe();
+  check_body_idle();
   if (failures != 0) {
     fprintf(stderr, "%d failures\n", failures);
     return 1;

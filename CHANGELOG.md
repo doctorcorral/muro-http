@@ -13,25 +13,23 @@
   owns `Connection`, `Content-Length`, and `Transfer-Encoding`.
 - `Transfer-Encoding: chunked` is a request body. Extensions on a
   chunk size are ignored. Trailers need a colon and are dropped. A
-  transfer-coding may carry parameters (`chunked;q=1`). RFC 9112 7.1
-  says chunked defines no parameters and their presence SHOULD be an
+  transfer-coding with a parameter is 400. RFC 9112 7.1 says
+  chunked defines no parameters and their presence SHOULD be an
   error. RFC 9112 7.2 says the same SHOULD for compression codings.
-  This server accepts a well-formed `transfer-parameter` and ignores
-  its value. That is a deliberate deviation from those SHOULDs. The
-  grammar is `transfer-coding` from RFC 9110 10.1.4. A bare
-  `chunked;` or `chunked;@@@` is still 400. The quoted-string accepts
-  any octet except an unescaped `"`, which is looser than qdtext.
-  Those quote cases are C checks in `c/test_classify` and
-  `c/test_http11`. The book byte strings have no quotes.
-  `chu;nked` is 400 because `nked` is not a parameter.
-  `chu;n=1` is an unknown coding.
+  `chunked;q=1`, `chunked ; q=1`, `gzip;q=1`, `chu;nked`, and
+  `chu;n=1` are all 400. Accepting the parameter, or stripping it,
+  would let a proxy disagree about where the body ends. A bare
+  `chunked;` or `chunked;@@@` is the same 400. Quote cases stay C
+  checks in `c/test_classify` and `c/test_http11` because the book
+  byte strings have no `"`.
   A chunk size that
   does not fit in a `U64` is 400. `Transfer-Encoding`
   together with `Content-Length` is 400 (RFC 9112 6.3). `chunked`
-  has to be the final coding: `chunked, gzip` and `chunked;q=1, gzip`
-  are 400 (RFC 9112 6.1).
-  Any other coding, including `gzip`, `gzip;q=1`, and `gzip, chunked`, is
-  `status-unimplemented` in `classify`. The image stores origin 2
+  has to be the final coding: `chunked, gzip` is 400 (RFC 9112 6.1).
+  `chunked;q=1, gzip` is 400 because of the parameter.
+  Any other coding, including `gzip` and `gzip, chunked`, is
+  `status-unimplemented` in `classify`. `gzip;q=1` is malformed,
+  not unimplemented. The image stores origin 2
   and the host copies `httpNotImplemented`. `host_in_policy` does
   not return 501 for that coding. It returns 501 only for method
   code 1.
@@ -79,7 +77,12 @@
   `MURO_HTTP_DRAIN_MS`). The same flag arms that drain inside
   `muro_http_body_read`: the listen socket closes immediately, idle
   connections close on that same turn, and the body read continues
-  until the body ends or the deadline passes.
+  until the body ends, the drain deadline passes, or the idle
+  deadline passes with no further body byte. A stalled streamed
+  body closes after the idle timeout. That deadline is armed while
+  the image is in decide or write, where a book tick would hold.
+  `c/test_http11` covers the stream echo: headers with
+  `Content-Length: 20000`, then silence, then 200 and a close.
   While that read waits, the server poll accepts and serves other
   connections. A nested read does not watch a socket already inside
   a read. Past eight nested reads, the wait is that socket alone.
@@ -87,9 +90,11 @@
   an echo of the request body. `c/test_http11` drives it.
 - `mix test` reduces the new `Status` equations in `request.muro`:
   `OPTIONS *`, `GET *`, an empty chunked body, `Transfer-Encoding`
-  with `Content-Length`, chunked on HTTP/1.0, `chunked;q=1` with a
-  last-chunk (`te-param-ok`), `gzip;q=1` (`te-param-gzip`), and a
-  bare `chunked;` (`te-param-empty`). ExUnit skips a
+  with `Content-Length`, chunked on HTTP/1.0, `chunked;q=1`
+  (`te-param-st`), `gzip;q=1` (`te-gzip-param-st`), a bare
+  `chunked;` (`te-param-empty`), `chu;nked` (`te-cut-st`), and
+  `chu;n=1` (`te-unknown-st`). Each of those is
+  `status-malformed`. ExUnit skips a
   closed equation whose result or argument normal form is a machine
   term. `test/request_test.exs` skips these 34: `crlf-end`,
   `lf-end`, `hdr-prefers-crlf`, `meth-head`, `meth-put`,
@@ -101,7 +106,13 @@
   `post-framed`, `post-framed-short`, `post-take-short`,
   `ck-framed`, `ck-framed-hdr`, `ck-take-hdr`, `stream-take-hi`,
   `stream-end-hi`, `stream-take-edge`, `stream-end-edge`, and
-  `stream-take-lf`. `c/test_classify` checks each of those results,
+  `stream-take-lf`. `test/route_test.exs` skips sixteen
+  `route.muro` equations: `route-verb-get`, `route-verb-post`,
+  `route-verb-other`, `route-health`, `route-feed`, `route-posts`,
+  `route-id`, `route-like`, `route-tail`, `route-id-42`,
+  `route-idn-42`, `route-id-zero`, `route-id-abc`, `route-id-lead`,
+  `route-like-id`, and `route-health-id`. `c/test_route` checks
+  those results. `c/test_classify` checks each of those results,
   and the failure name is the equation name. `stream-take-hi` and
   `stream-take-edge` are header-only buffers. `stream-cl` and
   `cap-cl` are C checks in `c/test_classify`, not book equations.
@@ -251,7 +262,7 @@
   `GET /health` and one for a two-byte POST. The book does not
   import `decide.muro` (see `GAPS.md`, gap 6).
 - `c/muro-httpd` is a hand-written loop. It binds `127.0.0.1`, waits
-  with kqueue or epoll, and feeds bytes, peer eof, write progress,
+  with `poll(2)`, and feeds bytes, peer eof, write progress,
   write done, write error, an idle tick, and db facts through
   `proto_admit` and `step`. A refusal closes the socket. Facts are
   SQLite rows, an HS256 check of the `Authorization` value (key from
