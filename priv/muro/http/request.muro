@@ -730,7 +730,7 @@ def teAfter : run Π (+ fl : U64) → Π (+ b : U8) → TeSt :=
       | false =>
           (match (u8eq b (toU8 44)) motive (λ _ → TeSt)
             | true => teSt (toU64 0) (toU64 0) (withBit fl (toU64 16))
-            | false => teSt (toU64 2) (toU64 0) (withBit fl (toU64 1))))
+            | false => teSt (toU64 2) (toU64 0) (withBit fl (toU64 1)))
 
 def teByte : run Π (+ st : TeSt) → Π (+ b : U8) → TeSt :=
   λ (+ st : TeSt) → λ (+ b : U8) →
