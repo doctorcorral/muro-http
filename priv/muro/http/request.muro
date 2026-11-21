@@ -627,8 +627,25 @@ def finishLine : run Π (+ buf : Slice) → Π (+ i : U64) → Π (+ ls : U64) �
                       (match (has fl (toU64 1)) motive (λ _ → HSt)
                         | true => finishKnown buf i ls fl cl aS aL wh mark
                         | false => hst i ls (toU64 3) (withBit fl (toU64 32)) cl aS aL wh mark)))
--- Transfer-Encoding token class. ph 0 before a token, 1 inside,
--- 2 after it. fl: 1 bad, 2 a coding other than chunked, 4 one
+-- Transfer-Encoding token class.
+-- ph 0 before a token, 1 inside, 2 after it.
+-- ph 3 before a parameter name, 6 inside that name,
+-- 7 BWS before '=', 8 BWS before the value, 9 a token value,
+-- 4 a quoted value, 5 the octet after '\', 10 OWS after a parameter.
+-- A well-formed transfer-parameter is parsed and its value is ignored.
+-- RFC 9112 7.1 says chunked defines no parameters and their presence
+-- SHOULD be an error. Accepting one is a deliberate deviation from
+-- that SHOULD, and from the same SHOULD on compression codings in
+-- 7.2. The grammar is transfer-coding from RFC 9110 10.1.4:
+-- token *( OWS ";" OWS transfer-parameter ), and
+-- transfer-parameter = token BWS "=" BWS ( token / quoted-string ).
+-- A bare ';' or a parameter that is not that shape is still bad.
+-- The quoted-string here is any octet except an unescaped '"'.
+-- That is looser than qdtext. The value is ignored, so the extra
+-- octets do not change the coding.
+-- Unknown codings stay unknown, including gzip;q=1. chunked that is
+-- not the final coding stays bad.
+-- fl: 1 bad, 2 a coding other than chunked, 4 one
 -- chunked, 8 chunked twice, 16 a comma still needs a token,
 -- 32 the last coding was chunked.
 unboxed data TeSt : Type where
@@ -704,6 +721,14 @@ def teBefore : run Π (+ fl : U64) → Π (+ b : U8) → TeSt :=
             | true => teSt (toU64 0) (toU64 0) (withBit fl (toU64 1))
             | false => teSt (toU64 1) (teChar (toU64 0) b) (noBit fl (toU64 16)))
 
+def teParamStart : run Π (+ st : TeSt) → TeSt :=
+  λ (+ st : TeSt) →
+    match st motive (λ _ → TeSt)
+      | teSt _ph _idx fl =>
+          (match (has fl (toU64 1)) motive (λ _ → TeSt)
+            | true => st
+            | false => teSt (toU64 3) (toU64 0) fl)
+
 def teInside : run Π (+ idx : U64) → Π (+ fl : U64) → Π (+ b : U8) → TeSt :=
   λ (+ idx : U64) → λ (+ fl : U64) → λ (+ b : U8) →
     match (leadWS b) motive (λ _ → TeSt)
@@ -712,9 +737,12 @@ def teInside : run Π (+ idx : U64) → Π (+ fl : U64) → Π (+ b : U8) → Te
           (match (u8eq b (toU8 44)) motive (λ _ → TeSt)
             | true => teComma (teClose (teSt (toU64 1) idx fl))
             | false =>
-                (match (isTchar b) motive (λ _ → TeSt)
-                  | true => teSt (toU64 1) (teChar idx b) fl
-                  | false => teSt (toU64 1) idx (withBit fl (toU64 1))))
+                (match (u8eq b (toU8 59)) motive (λ _ → TeSt)
+                  | true => teParamStart (teClose (teSt (toU64 1) idx fl))
+                  | false =>
+                      (match (isTchar b) motive (λ _ → TeSt)
+                        | true => teSt (toU64 1) (teChar idx b) fl
+                        | false => teSt (toU64 1) idx (withBit fl (toU64 1)))))
 
 def teAfter : run Π (+ fl : U64) → Π (+ b : U8) → TeSt :=
   λ (+ fl : U64) → λ (+ b : U8) →
@@ -723,7 +751,127 @@ def teAfter : run Π (+ fl : U64) → Π (+ b : U8) → TeSt :=
       | false =>
           (match (u8eq b (toU8 44)) motive (λ _ → TeSt)
             | true => teSt (toU64 0) (toU64 0) (withBit fl (toU64 16))
-            | false => teSt (toU64 2) (toU64 0) (withBit fl (toU64 1)))
+            | false =>
+                (match (u8eq b (toU8 59)) motive (λ _ → TeSt)
+                  | true => teSt (toU64 3) (toU64 0) fl
+                  | false => teSt (toU64 2) (toU64 0) (withBit fl (toU64 1))))
+
+-- Phase 3. OWS, then one tchar starts the parameter name.
+def teParamBefore : run Π (+ fl : U64) → Π (+ b : U8) → TeSt :=
+  λ (+ fl : U64) → λ (+ b : U8) →
+    match (leadWS b) motive (λ _ → TeSt)
+      | true => teSt (toU64 3) (toU64 0) fl
+      | false =>
+          (match (isTchar b) motive (λ _ → TeSt)
+            | true => teSt (toU64 6) (toU64 0) fl
+            | false => teSt (toU64 3) (toU64 0) (withBit fl (toU64 1)))
+
+-- Phase 6. The name is a token. BWS or '=' ends it. The name is not stored.
+def teParamName : run Π (+ fl : U64) → Π (+ b : U8) → TeSt :=
+  λ (+ fl : U64) → λ (+ b : U8) →
+    match (isTchar b) motive (λ _ → TeSt)
+      | true => teSt (toU64 6) (toU64 0) fl
+      | false =>
+          (match (leadWS b) motive (λ _ → TeSt)
+            | true => teSt (toU64 7) (toU64 0) fl
+            | false =>
+                (match (u8eq b (toU8 61)) motive (λ _ → TeSt)
+                  | true => teSt (toU64 8) (toU64 0) fl
+                  | false => teSt (toU64 6) (toU64 0) (withBit fl (toU64 1))))
+
+-- Phase 7. BWS before '='.
+def teParamEq : run Π (+ fl : U64) → Π (+ b : U8) → TeSt :=
+  λ (+ fl : U64) → λ (+ b : U8) →
+    match (leadWS b) motive (λ _ → TeSt)
+      | true => teSt (toU64 7) (toU64 0) fl
+      | false =>
+          (match (u8eq b (toU8 61)) motive (λ _ → TeSt)
+            | true => teSt (toU64 8) (toU64 0) fl
+            | false => teSt (toU64 7) (toU64 0) (withBit fl (toU64 1)))
+
+-- Phase 8. BWS, then a token or a quoted-string. An empty token is bad.
+def teParamVal : run Π (+ fl : U64) → Π (+ b : U8) → TeSt :=
+  λ (+ fl : U64) → λ (+ b : U8) →
+    match (leadWS b) motive (λ _ → TeSt)
+      | true => teSt (toU64 8) (toU64 0) fl
+      | false =>
+          (match (u8eq b (toU8 34)) motive (λ _ → TeSt)
+            | true => teSt (toU64 4) (toU64 0) fl
+            | false =>
+                (match (isTchar b) motive (λ _ → TeSt)
+                  | true => teSt (toU64 9) (toU64 0) fl
+                  | false => teSt (toU64 8) (toU64 0) (withBit fl (toU64 1))))
+
+-- Phase 9. A token value. OWS, ';', or ',' ends it. The bytes are not stored.
+def teParamTok : run Π (+ fl : U64) → Π (+ b : U8) → TeSt :=
+  λ (+ fl : U64) → λ (+ b : U8) →
+    match (isTchar b) motive (λ _ → TeSt)
+      | true => teSt (toU64 9) (toU64 0) fl
+      | false =>
+          (match (leadWS b) motive (λ _ → TeSt)
+            | true => teSt (toU64 10) (toU64 0) fl
+            | false =>
+                (match (u8eq b (toU8 59)) motive (λ _ → TeSt)
+                  | true => teSt (toU64 3) (toU64 0) fl
+                  | false =>
+                      (match (u8eq b (toU8 44)) motive (λ _ → TeSt)
+                        | true => teSt (toU64 0) (toU64 0) (withBit fl (toU64 16))
+                        | false => teSt (toU64 9) (toU64 0) (withBit fl (toU64 1)))))
+
+-- Phase 4. Quoted-string body. '"' closes. '\' starts an escape.
+def teQuoted : run Π (+ fl : U64) → Π (+ b : U8) → TeSt :=
+  λ (+ fl : U64) → λ (+ b : U8) →
+    match (u8eq b (toU8 34)) motive (λ _ → TeSt)
+      | true => teSt (toU64 10) (toU64 0) fl
+      | false =>
+          (match (u8eq b (toU8 92)) motive (λ _ → TeSt)
+            | true => teSt (toU64 5) (toU64 0) fl
+            | false => teSt (toU64 4) (toU64 0) fl)
+
+-- Phase 5. One escaped octet, then back to the quoted body.
+def teEsc : run Π (+ fl : U64) → Π (+ _b : U8) → TeSt :=
+  λ (+ fl : U64) → λ (+ _b : U8) →
+    teSt (toU64 4) (toU64 0) fl
+
+-- Phase 10. OWS after a parameter. ';' starts another. ',' starts a coding.
+def teParamAfter : run Π (+ fl : U64) → Π (+ b : U8) → TeSt :=
+  λ (+ fl : U64) → λ (+ b : U8) →
+    match (leadWS b) motive (λ _ → TeSt)
+      | true => teSt (toU64 10) (toU64 0) fl
+      | false =>
+          (match (u8eq b (toU8 59)) motive (λ _ → TeSt)
+            | true => teSt (toU64 3) (toU64 0) fl
+            | false =>
+                (match (u8eq b (toU8 44)) motive (λ _ → TeSt)
+                  | true => teSt (toU64 0) (toU64 0) (withBit fl (toU64 16))
+                  | false => teSt (toU64 10) (toU64 0) (withBit fl (toU64 1))))
+
+def teRest : run Π (+ ph : U64) → Π (+ fl : U64) → Π (+ b : U8) → TeSt :=
+  λ (+ ph : U64) → λ (+ fl : U64) → λ (+ b : U8) →
+    match (u64eq ph (toU64 3)) motive (λ _ → TeSt)
+      | true => teParamBefore fl b
+      | false =>
+          (match (u64eq ph (toU64 6)) motive (λ _ → TeSt)
+            | true => teParamName fl b
+            | false =>
+                (match (u64eq ph (toU64 7)) motive (λ _ → TeSt)
+                  | true => teParamEq fl b
+                  | false =>
+                      (match (u64eq ph (toU64 8)) motive (λ _ → TeSt)
+                        | true => teParamVal fl b
+                        | false =>
+                            (match (u64eq ph (toU64 9)) motive (λ _ → TeSt)
+                              | true => teParamTok fl b
+                              | false =>
+                                  (match (u64eq ph (toU64 4)) motive (λ _ → TeSt)
+                                    | true => teQuoted fl b
+                                    | false =>
+                                        (match (u64eq ph (toU64 5)) motive (λ _ → TeSt)
+                                          | true => teEsc fl b
+                                          | false =>
+                                              (match (u64eq ph (toU64 10)) motive (λ _ → TeSt)
+                                                | true => teParamAfter fl b
+                                                | false => teSt ph (toU64 0) (withBit fl (toU64 1)))))))))
 
 def teByte : run Π (+ st : TeSt) → Π (+ b : U8) → TeSt :=
   λ (+ st : TeSt) → λ (+ b : U8) →
@@ -737,8 +885,13 @@ def teByte : run Π (+ st : TeSt) → Π (+ b : U8) → TeSt :=
                   | false =>
                       (match (u64eq ph (toU64 1)) motive (λ _ → TeSt)
                         | true => teInside idx fl b
-                        | false => teAfter fl b)))
+                        | false =>
+                            (match (u64eq ph (toU64 2)) motive (λ _ → TeSt)
+                              | true => teAfter fl b
+                              | false => teRest ph fl b))))
 
+-- Phases 2, 9, and 10 are complete. 0 still needs a token.
+-- 1 closes the coding. Any other phase is an open parameter.
 def teFinish : run Π (+ st : TeSt) → TeSt :=
   λ (+ st : TeSt) →
     match st motive (λ _ → TeSt)
@@ -748,7 +901,10 @@ def teFinish : run Π (+ st : TeSt) → TeSt :=
             | false =>
                 (match (u64eq ph (toU64 0)) motive (λ _ → TeSt)
                   | true => teSt ph idx (withBit fl (toU64 1))
-                  | false => st))
+                  | false =>
+                      (match (or (u64eq ph (toU64 2)) (or (u64eq ph (toU64 9)) (u64eq ph (toU64 10)))) motive (λ _ → TeSt)
+                        | true => st
+                        | false => teSt ph idx (withBit fl (toU64 1)))))
 
 def teFl : run Π (+ st : TeSt) → U64 :=
   λ (+ st : TeSt) →
@@ -1643,6 +1799,20 @@ def te-gzip-st : evidence {statusOf b"POST /p HTTP/1.1\r\nHost: t\r\nTransfer-En
 def te-gzip-final : evidence {statusOf b"POST /p HTTP/1.1\r\nHost: t\r\nTransfer-Encoding: gzip, chunked\r\n\r\n" ≡ status-unimplemented : Status} := refl
 
 def te-gzip-code : evidence {teCode b"POST /p HTTP/1.1\r\nHost: t\r\nTransfer-Encoding: gzip, chunked\r\n\r\n" ≡ toU64 2 : U64} := refl
+
+def te-chunk-param : evidence {teCode b"POST /p HTTP/1.1\r\nHost: t\r\nTransfer-Encoding: chunked;q=1\r\n\r\n" ≡ toU64 1 : U64} := refl
+
+def te-chunk-ows : evidence {teCode b"POST /p HTTP/1.1\r\nHost: t\r\nTransfer-Encoding: chunked ; q=1\r\n\r\n" ≡ toU64 1 : U64} := refl
+
+def te-gzip-param : evidence {teCode b"POST /p HTTP/1.1\r\nHost: t\r\nTransfer-Encoding: gzip;q=1\r\n\r\n" ≡ toU64 2 : U64} := refl
+
+def te-param-not-final : evidence {teCode b"POST /p HTTP/1.1\r\nHost: t\r\nTransfer-Encoding: chunked;q=1, gzip\r\n\r\n" ≡ toU64 3 : U64} := refl
+
+def te-param-ok : evidence {statusOf b"POST /p HTTP/1.1\r\nHost: t\r\nTransfer-Encoding: chunked;q=1\r\n\r\n0\r\n\r\n" ≡ status-ok : Status} := refl
+
+def te-param-gzip : evidence {statusOf b"POST /p HTTP/1.1\r\nHost: t\r\nTransfer-Encoding: gzip;q=1\r\n\r\n" ≡ status-unimplemented : Status} := refl
+
+def te-param-empty : evidence {statusOf b"POST /p HTTP/1.1\r\nHost: t\r\nTransfer-Encoding: chunked;\r\n\r\n" ≡ status-malformed : Status} := refl
 
 def keep-enclose : evidence {keepOf b"GET /health HTTP/1.1\r\nHost: t\r\nConnection: enclose\r\n\r\n" ≡ keep-yes : Keep} := refl
 

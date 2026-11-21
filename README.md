@@ -56,13 +56,23 @@ The host decodes a finished chunked message, or streams one that
 does not finish inside 16384 bytes. The receive buffer is 65536.
 
 `Transfer-Encoding: chunked` is the only coding the host reads.
-Extensions are skipped. A trailer line needs a colon; the host drops
-the trailers. `chunked` has to be the final coding (RFC 9112 6.1):
-`chunked, gzip` is `status-malformed`. `Transfer-Encoding` together
+Extensions on a chunk size are skipped. A trailer line needs a colon;
+the host drops the trailers. A transfer-coding may carry parameters
+(`chunked;q=1`, `chunked ; q=1`). RFC 9112 7.1 says chunked defines
+no parameters and their presence SHOULD be an error. The same SHOULD
+is in 7.2 for compression codings. This server accepts a well-formed
+`transfer-parameter` and ignores its value. That is a deliberate
+deviation from those SHOULDs. The grammar is the one RFC 9110 10.1.4
+gives for `transfer-coding`. A bare `chunked;` or `chunked;@@@`
+stays `status-malformed`. The quoted-string accepts any octet except
+an unescaped `"`, which is looser than qdtext, and the value is
+ignored. `chunked` has to be the final coding (RFC 9112 6.1):
+`chunked, gzip` and `chunked;q=1, gzip` are `status-malformed`.
+`Transfer-Encoding` together
 with `Content-Length` is `status-malformed` (RFC 9112 6.3). Chunked
 on HTTP/1.0 is `status-malformed`. A chunk size that does not fit in
 a `U64` is `status-malformed`. A coding other than `chunked`,
-including `gzip` and `gzip, chunked`, is `status-unimplemented`.
+including `gzip`, `gzip;q=1`, and `gzip, chunked`, is `status-unimplemented`.
 The image stores origin 2 and the host copies `httpNotImplemented`.
 `host_in_policy` does not return 501 for that coding. It returns
 501 only for method code 1. The book does not know the configured
@@ -631,16 +641,21 @@ The host calls `httpLastChunk`.
 `mix muro.gen` typechecks them and reduces each `refl` under the
 fuel bound. That reduction is the evidence term. It is not a
 separate program, and it is not the poll loop. ExUnit does not run
-this book. ExUnit also skips thirty `request.muro` equations and
+this book. ExUnit also skips thirty-four `request.muro` equations and
 three `conn.muro` equations because a result or an argument normal
 form is a machine term. The request names are `crlf-end`, `lf-end`,
 `hdr-prefers-crlf`, `meth-head`, `meth-put`, `meth-trace`,
 `meth-bad`, `meth-star`, `meth-get-star`, `te-chunk`, `te-gzip`,
 `exp-100`, `exp-two`, `ck-empty`, `ck-hi`, `header-count`,
-`header-name-0`, `te-not-final`, `te-gzip-code`, `post-framed`,
+`header-name-0`, `te-not-final`, `te-gzip-code`, `te-chunk-param`,
+`te-chunk-ows`, `te-gzip-param`, `te-param-not-final`, `post-framed`,
 `post-framed-short`, `post-take-short`, `ck-framed`,
 `ck-framed-hdr`, `ck-take-hdr`, `stream-take-hi`, `stream-end-hi`,
 `stream-take-edge`, `stream-end-edge`, and `stream-take-lf`.
+`te-param-quote`, `te-param-empty-q`, `te-param-junk`,
+`te-param-twice`, `te-gzip-param-final`, and `te-param-cut` are C
+checks in `c/test_classify`, not book equations. The quote cases
+need a `"` inside the header, and the book byte strings have none.
 `c/test_classify` checks each of those results, and the failure
 name is the equation name. `stream-take-hi` and `stream-take-edge`
 are the header-only buffers. `stream-cl` and `cap-cl` are C checks

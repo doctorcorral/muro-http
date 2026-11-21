@@ -11,12 +11,24 @@
 - Every response carries `Date` in IMF-fixdate. The host caches one
   rendering per second. A handler `Date` is dropped. The library still
   owns `Connection`, `Content-Length`, and `Transfer-Encoding`.
-- `Transfer-Encoding: chunked` is a request body. Extensions are
-  ignored. Trailers need a colon and are dropped. A chunk size that
+- `Transfer-Encoding: chunked` is a request body. Extensions on a
+  chunk size are ignored. Trailers need a colon and are dropped. A
+  transfer-coding may carry parameters (`chunked;q=1`). RFC 9112 7.1
+  says chunked defines no parameters and their presence SHOULD be an
+  error. RFC 9112 7.2 says the same SHOULD for compression codings.
+  This server accepts a well-formed `transfer-parameter` and ignores
+  its value. That is a deliberate deviation from those SHOULDs. The
+  grammar is `transfer-coding` from RFC 9110 10.1.4. A bare
+  `chunked;` or `chunked;@@@` is still 400. The quoted-string accepts
+  any octet except an unescaped `"`, which is looser than qdtext.
+  Those quote cases are C checks in `c/test_classify` and
+  `c/test_http11`. The book byte strings have no quotes.
+  A chunk size that
   does not fit in a `U64` is 400. `Transfer-Encoding`
   together with `Content-Length` is 400 (RFC 9112 6.3). `chunked`
-  has to be the final coding: `chunked, gzip` is 400 (RFC 9112 6.1).
-  Any other coding, including `gzip` and `gzip, chunked`, is
+  has to be the final coding: `chunked, gzip` and `chunked;q=1, gzip`
+  are 400 (RFC 9112 6.1).
+  Any other coding, including `gzip`, `gzip;q=1`, and `gzip, chunked`, is
   `status-unimplemented` in `classify`. The image stores origin 2
   and the host copies `httpNotImplemented`. `host_in_policy` does
   not return 501 for that coding. It returns 501 only for method
@@ -73,13 +85,17 @@
   an echo of the request body. `c/test_http11` drives it.
 - `mix test` reduces the new `Status` equations in `request.muro`:
   `OPTIONS *`, `GET *`, an empty chunked body, `Transfer-Encoding`
-  with `Content-Length`, and chunked on HTTP/1.0. ExUnit skips a
+  with `Content-Length`, chunked on HTTP/1.0, `chunked;q=1` with a
+  last-chunk (`te-param-ok`), `gzip;q=1` (`te-param-gzip`), and a
+  bare `chunked;` (`te-param-empty`). ExUnit skips a
   closed equation whose result or argument normal form is a machine
-  term. `test/request_test.exs` skips these 30: `crlf-end`,
+  term. `test/request_test.exs` skips these 34: `crlf-end`,
   `lf-end`, `hdr-prefers-crlf`, `meth-head`, `meth-put`,
   `meth-trace`, `meth-bad`, `meth-star`, `meth-get-star`,
   `te-chunk`, `te-gzip`, `exp-100`, `exp-two`, `ck-empty`, `ck-hi`,
   `header-count`, `header-name-0`, `te-not-final`, `te-gzip-code`,
+  `te-chunk-param`, `te-chunk-ows`, `te-gzip-param`,
+  `te-param-not-final`,
   `post-framed`, `post-framed-short`, `post-take-short`,
   `ck-framed`, `ck-framed-hdr`, `ck-take-hdr`, `stream-take-hi`,
   `stream-end-hi`, `stream-take-edge`, `stream-end-edge`, and

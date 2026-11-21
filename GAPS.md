@@ -462,11 +462,12 @@ flag that runs, and `c/test_conn` wants word 6 to be 2), and
 suite runs nullary wrappers (`sawAfterDo`, `sawAfterTick`,
 `sawAfterMode`) whose results are declared data. ExUnit runs
 `after-close-do`, `after-close-tick-do`, and `after-close-mode`.
-`after-close` and `after-close-tick` stay skipped. `test/request_test.exs` skips thirty,
+`after-close` and `after-close-tick` stay skipped. `test/request_test.exs` skips thirty-four,
 all named in `CHANGELOG.md`: the `U64` method, coding, and Expect
 codes, `crlf-end`, `lf-end`, `hdr-prefers-crlf`, `header-count`,
 `header-name-0`, `ck-empty`, `ck-hi`, `te-not-final`,
-`te-gzip-code`, and every `framedEnd` and `streamTake` refl
+`te-gzip-code`, `te-chunk-param`, `te-chunk-ows`, `te-gzip-param`,
+`te-param-not-final`, and every `framedEnd` and `streamTake` refl
 (`post-framed`, `post-framed-short`, `post-take-short`,
 `ck-framed`, `ck-framed-hdr`, `ck-take-hdr`, `stream-take-hi`,
 `stream-end-hi`, `stream-take-edge`, `stream-end-edge`,

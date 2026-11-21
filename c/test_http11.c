@@ -1488,6 +1488,18 @@ int main(int argc, char **argv) {
                  "POST /echo HTTP/1.1\r\nHost: h\r\nTransfer-Encoding: chunked\r\n\r\n"
                  "1\r\na\r\n1\r\nb\r\n0\r\n\r\n",
                  "ab");
+  expect_chunked(port, "te-param",
+                 "POST /echo HTTP/1.1\r\nHost: h\r\nTransfer-Encoding: chunked;q=1\r\n\r\n"
+                 "4\r\nwiki\r\n0\r\n\r\n",
+                 "wiki");
+  expect_chunked(port, "te-param-ows",
+                 "POST /echo HTTP/1.1\r\nHost: h\r\nTransfer-Encoding: chunked ; q=1\r\n\r\n"
+                 "4\r\nwiki\r\n0\r\n\r\n",
+                 "wiki");
+  expect_chunked(port, "te-param-quote",
+                 "POST /echo HTTP/1.1\r\nHost: h\r\nTransfer-Encoding: chunked;q=\"a,b\"\r\n\r\n"
+                 "4\r\nwiki\r\n0\r\n\r\n",
+                 "wiki");
   expect_cl(port, "chunk-bad",
             "POST /echo HTTP/1.1\r\nHost: h\r\nTransfer-Encoding: chunked\r\n\r\nzz\r\n", 400,
             "malformed", 1);
@@ -1512,6 +1524,18 @@ int main(int argc, char **argv) {
             400, "malformed", 1);
   expect_cl(port, "te-gzip", "POST /echo HTTP/1.1\r\nHost: h\r\nTransfer-Encoding: gzip\r\n\r\n", 501,
             "unimplemented", 1);
+  expect_cl(port, "te-param-empty",
+            "POST /echo HTTP/1.1\r\nHost: h\r\nTransfer-Encoding: chunked;\r\n\r\n", 400,
+            "malformed", 1);
+  expect_cl(port, "te-param-junk",
+            "POST /echo HTTP/1.1\r\nHost: h\r\nTransfer-Encoding: chunked;@@@\r\n\r\n", 400,
+            "malformed", 1);
+  expect_cl(port, "te-param-gzip",
+            "POST /echo HTTP/1.1\r\nHost: h\r\nTransfer-Encoding: gzip;q=1\r\n\r\n", 501,
+            "unimplemented", 1);
+  expect_cl(port, "te-param-not-final",
+            "POST /echo HTTP/1.1\r\nHost: h\r\nTransfer-Encoding: chunked;q=1, gzip\r\n\r\n", 400,
+            "malformed", 1);
   expect_cl(port, "te-list",
             "POST /echo HTTP/1.1\r\nHost: h\r\nTransfer-Encoding: chunked, gzip\r\n\r\n", 400,
             "malformed", 1);
