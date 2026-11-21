@@ -53,7 +53,7 @@ A header block longer than 16384 is `status-malformed`. A
 arrived is `status-ok`: the host streams it. `bodyView` stays the
 bytes already in the buffer, and it is empty for a chunked body.
 The host decodes a finished chunked message, or streams one that
-does not finish inside the window.
+does not finish inside 16384 bytes. The receive buffer is 65536.
 
 `Transfer-Encoding: chunked` is the only coding the host reads.
 Extensions are skipped. A trailer line needs a colon; the host drops
@@ -117,8 +117,9 @@ for a short `Content-Length`, an empty chunk, and the 16384 / 16385
 boundary with no body bytes (`stream-take-hi`, `stream-end-hi`,
 `stream-take-edge`, `stream-end-edge`). Those terms are the header
 block alone. `c/test_classify` checks the same header-only buffers.
-`stream-cl` and `cap-cl` are the classify status of those buffers,
-not a body of 16385 or 16384 bytes. A body past that window is
+`stream-cl` and `cap-cl` are C checks in that file, not book
+equations. They name the classify status of those buffers, not a
+body of 16385 or 16384 bytes. A body past 16384 bytes is
 `c/test_http11` (a response of 1 MiB + 1, and a 20000-byte echo)
 and `c/test_hello` (a 20000-byte echo). The hello echo sends the
 headers, waits until `muro_http_body_read` is entered, then sends
@@ -287,13 +288,22 @@ next request. `MuroHttpResponse.pull` is the response side. With
 bytes. Without a length, HTTP/1.1 is chunked and HTTP/1.0 is the
 raw bytes followed by close. `HEAD` does not call `pull`. The
 default max body is 8388608. `0` rejects every positive length.
-`--max-body` and `MURO_HTTP_MAX_BODY` set it. Once the headers are
+A length equal to the max is accepted, including 0. `--max-body`
+and `MURO_HTTP_MAX_BODY` set it. Once the headers are
 done and a `Content-Length` is known, `host_in_policy` returns 413
 when that length is over the max. The host copies `httpTooLarge`
 and closes. It does not read the body to the end first. That holds
-for a length of at most 16384 and for a longer one. A length of at
+for a length of at most 16384 and for a longer one, including
+`4294967295`. `c/test_http11` sends a prefix of that body and still
+gets 413. A length of at
 most 16384 that is within the max stays buffered: the image waits
-until those bytes have arrived.
+until those bytes have arrived. A chunk whose size is already in
+the buffer at that point, and whose decoded length would pass the
+max, is 413 before the handler. A later chunk, read only after the
+200 has been written, cannot become a 413. The host stops before
+that chunk's data is copied out and closes the connection. The
+chunked response has no last-chunk. `c/test_http11` checks that
+close.
 
 `Expect: 100-continue` on an otherwise acceptable HTTP/1.1 request
 writes `HTTP/1.1 100 Continue` and `Date` before the body is read,
@@ -372,7 +382,9 @@ arena resets after each copy, including each chunk. Header walks do
 not reset it, so a handler may still hold slices. A buffered
 response has to fit the 69632-byte write buffer. A larger body is a
 pull. A decoded chunked payload near 64 KiB can fail that copy and
-the host closes. The stream example uses a pull for a body that
+the host closes. That limit is the 69632-byte write buffer. It is
+not the stream threshold. Streaming starts above 16384. The receive
+buffer is 65536. The stream example uses a pull for a body that
 size.
 
 ### Reply order per key
@@ -405,14 +417,17 @@ reply, then reply, and key `b` is accept. These lines hold:
 3721 and 10521 are a regression pin of that script. 10521 is the
 successor table, not a breadth-first parent map. A different count
 means the script, the meeting, the hold rule, or the checker
-explored a different graph. CI does not run `mix muro.check`. The
-jobs `check`, `asan`, and `macos` do not print these counts. The
-walk is not a proof for every key
-count, and it is not a bound on live sockets. The pin proves the
-hold rule for any number of keys and any number of instances
-(`agda/Muro/Family.agda` in muro 0.22.14). This repository does not
-contain that proof. The program that writes the dispatcher is not
-proved. `test/family_test.exs` replays two keys on the emitted
+explored a different graph. `test/family_test.exs` runs
+`Muro.CLI.Check.run` on `family.muro` and asserts the `drained`
+line and the three 3721 / 10521 lines. `mix test` runs that file.
+The `check` job runs `mix test`, so those counts are a CI result.
+The jobs do not print the counts as their own log line. The walk
+is not a proof for every key count, and it is not a bound on live
+sockets. The pin proves the hold rule for any number of keys and
+any number of instances (`agda/Muro/Family.agda` in muro 0.22.14).
+This repository does not contain that proof. The program that
+writes the dispatcher is not proved. `test/family_test.exs` also
+replays two keys on the emitted
 dispatcher, in host order: accept, then reply. An accept on one key
 opens while the other key has a live reply. A later reply stays held
 until the earlier reply of that key resolves. A session step on a
@@ -473,7 +488,7 @@ both back, and sets `sqlite3_busy_timeout` to 5000 ms. `NORMAL` is 1.
 The challenge names that mode as the durability floor for WAL. With
 WAL and `synchronous=NORMAL`, a commit survives a process crash and
 may be lost on power loss. The commit finishes before create returns
-0 or like returns 1 or 2. The reopen tests prove a clean close and
+0 or like returns 1 or 2. The reopen tests check a clean close and
 reopen, not crash or power-loss durability.
 A file database whose journal mode is not `wal`, or whose synchronous
 value is below `NORMAL`, is not opened. `:memory:` cannot be WAL.
@@ -628,7 +643,8 @@ form is a machine term. The request names are `crlf-end`, `lf-end`,
 `stream-take-edge`, `stream-end-edge`, and `stream-take-lf`.
 `c/test_classify` checks each of those results, and the failure
 name is the equation name. `stream-take-hi` and `stream-take-edge`
-are the header-only buffers. `stream-cl` and `cap-cl` name the
+are the header-only buffers. `stream-cl` and `cap-cl` are C checks
+in `c/test_classify`, not book equations. They name the
 classify status of those same buffers, not a body of that size.
 The connection names are `unimpl-code` (ExUnit runs `unimpl-origin` instead, and
 `c/test_conn` wants origin 2), `after-close`, and
@@ -754,7 +770,7 @@ book linked beside it must not import that book. `decide.muro` and
   `synchronous=NORMAL` is the value read back on every open store,
   including `:memory:`. With WAL and `synchronous=NORMAL`, a commit
   survives a process crash and may be lost on power loss. The reopen
-  tests prove a clean close and reopen, not crash or power-loss
+  tests check a clean close and reopen, not crash or power-loss
   durability.
 - An authorization value longer than 16384 bytes is `auth-bad-token`.
 

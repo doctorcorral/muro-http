@@ -338,8 +338,9 @@ int main(void) {
     if (framedEnd(of(pipe)) >= strlen(pipe)) bad("frame", "pipe");
     muro_http_reset();
     if (framedEnd(of(post)) != strlen(post)) bad("frame", "post");
-    /* Header only. stream-cl and cap-cl are classify. The skipped
-       refls are stream-take-hi and stream-take-edge. */
+    /* Header only. stream-cl and cap-cl are C checks in this file,
+       not book equations. The skipped refls are stream-take-hi and
+       stream-take-edge. */
     snprintf(big, sizeof big, "POST /p HTTP/1.1\r\nHost: t\r\nContent-Length: 16385\r\n\r\n");
     classify_of("stream-cl", big, ST_OK, 1, K_YES);
     muro_http_reset();

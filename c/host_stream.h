@@ -3,8 +3,9 @@
 
 /* Request-body side of one connection. The image decides when the
    request is complete enough to handle. This file decodes a finished
-   chunked body, reads a body the 64 KiB window will not hold, and
+   chunked body, reads a body declared longer than 16384 bytes, and
    remembers bytes that arrived after a streamed chunked message.
+   The receive buffer is 65536. Streaming starts above 16384.
    A socket read waits in the server poll, so other connections
    still run. host_in_policy names 413 and 417, and 501 for method
    code 1. An unknown transfer coding is the image's origin 2.

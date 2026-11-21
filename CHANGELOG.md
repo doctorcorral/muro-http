@@ -39,13 +39,18 @@
   either order with `keep-alive` (RFC 9110). `enclose` and
   `closeable` are not `close`.
 - A `Content-Length` above 16384 that has not all arrived, and a
-  chunked body that does not finish inside the window, is streamed.
+  chunked body that does not finish inside 16384 bytes, is streamed.
   `MuroHttpResponse.pull` writes a response the same way.
   `muro_http_body_read` is the request side. The default max body is
-  8 MiB (`--max-body`, `MURO_HTTP_MAX_BODY`). Above that is 413. The
-  receive buffer stays 65536. A header block past 16384 is still 400.
+  8 MiB (`--max-body`, `MURO_HTTP_MAX_BODY`). Above that is 413 at
+  the headers, including `Content-Length: 4294967295`, and the host
+  does not read that body to the end. `0` rejects every positive
+  length. A length equal to the max is accepted. The receive buffer
+  stays 65536. A header block past 16384 is still 400.
   A buffer that fills while the image still needs bytes closes with
-  no status.
+  no status. A chunk size that shows up only after the 200 has been
+  written cannot be a 413. The host closes, and the chunked response
+  has no last-chunk.
 - `Expect: 100-continue` on HTTP/1.1 writes `100 Continue` before the
   body is read, when the request is otherwise acceptable and the body
   is not already in the buffer. A short write or `EAGAIN` leaves the
@@ -81,8 +86,9 @@
   `stream-take-lf`. `c/test_classify` checks each of those results,
   and the failure name is the equation name. `stream-take-hi` and
   `stream-take-edge` are header-only buffers. `stream-cl` and
-  `cap-cl` are the classify status of those buffers, not a body of
-  that size. A body past the window is `c/test_http11` and
+  `cap-cl` are C checks in `c/test_classify`, not book equations.
+  They name the classify status of those buffers, not a body of
+  that size. A body past 16384 bytes is `c/test_http11` and
   `c/test_hello`. The checks also include `streamTake` of a short
   `Content-Length`, a chunked header with no chunk bytes, and a
   bare LF. `test/conn_eq_test.exs` skips `unimpl-code`,
@@ -91,12 +97,14 @@
   be 2. ExUnit runs the wrappers `sawAfterDo` (`after-close-do`),
   `sawAfterTick` (`after-close-tick-do`), and `sawAfterMode`
   (`after-close-mode`).
-  `render.muro` is emitted as C only, same as before. Its new
-  `refl`s typecheck under `mix muro.gen`, which reduces each `refl`
-  under the fuel bound: `Date`, `HEAD` of an empty body, the
+  `render.muro` is emitted as C only, same as before. Its `refl`s
+  typecheck under `mix muro.gen`, which reduces each `refl`
+  under the fuel bound: `HEAD` of an empty body, the
   100/400/413/417/500/501 literals, the chunked and close-delimited
   header blocks, a declared length of 0, and the last-chunk bytes
   `0\r\n\r\n` from `httpChunk` of an empty body (`chunk-last`).
+  The fixed date `Sun, 06 Nov 1994 08:49:37 GMT` is an argument of
+  those refls. There is no separate Date equation.
   `last-chunk` reduces `httpLastChunk` to that `httpChunk`. The host
   calls `httpLastChunk`. The reduction is the evidence term. It is not a
   separate program, and it is not the poll loop. ExUnit does not run
@@ -126,10 +134,13 @@
   states and 3 transitions, and `reply-order`, `accept-free`, and
   `reply-opens` each in 3721 states and 10521 transitions. Those
   three share one graph. The counts are a regression pin of the
-  script. CI does not run `mix muro.check`, so those counts are not
-  a CI result. The pin proves the hold rule for any number of keys and
-  instances. This repository does not contain that proof.
-  `test/family_test.exs` checks the emitted dispatcher on two keys,
+  script. `test/family_test.exs` runs `Muro.CLI.Check.run` on
+  `family.muro` and asserts those four lines. `mix test` runs that
+  file, and the `check` job runs `mix test`, so the counts are a CI
+  result. The jobs do not print the counts as their own step. The
+  pin proves the hold rule for any number of keys and instances.
+  This repository does not contain that proof.
+  `test/family_test.exs` also checks the emitted dispatcher on two keys,
   accepting before it replies. Not proved: `nconn` at most
   `max_conn`, an accepted connection eventually closing, and a closed
   connection never arriving another reply. An older reply that

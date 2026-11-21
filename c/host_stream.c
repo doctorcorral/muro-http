@@ -155,6 +155,9 @@ static int feed_ck(struct HostIn *in, uint8_t b, uint8_t *emit, int *did) {
   *did = 0;
   if (prev == 8 || prev == 9) return 0;
   if (prev == 2 && b == '\n' && rem > 0) {
+    /* The size line just finished. Reject before any of this chunk
+       is copied out. If the 200 is already on the wire, the caller
+       closes. That close is not a second status. */
     if (rem > in->max_body || total > in->max_body || rem > in->max_body - total) {
       in->err = 413;
       return -1;

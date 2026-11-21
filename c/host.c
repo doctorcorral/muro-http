@@ -939,6 +939,10 @@ static int pump(Server *sv, Slot *s) {
         continue;
       }
       if (s->resp_mode != 0) {
+        /* Headers for this response are already written. A pull
+           error, including a chunk past max_body, cannot be a 413.
+           close_slot drops the fd. A chunked body then has no
+           last-chunk. */
         if (fill_pull(s) < 0) {
           close_slot(sv, s);
           return 0;

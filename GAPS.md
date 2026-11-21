@@ -219,9 +219,12 @@ the fd. It is not `evError`.
 That event holds in the read phase. A full receive buffer that the
 image did not consume is a host limit. Closing it is not a status.
 A body declared longer than 16384 is streamed, so it does not sit
-in that buffer until the window fills. A header block longer than
-16384 is malformed in the book. An unfinished header that fills a
-smaller test window still closes with no status.
+in that buffer until the 65536-byte buffer fills. A header block
+longer than 16384 is malformed in the book. An unfinished header
+that fills a smaller test cap still closes with no status. A chunk
+size discovered after the 200 has been written closes the
+connection. That close is not a 413. The chunked response has no
+last-chunk. `c/test_http11` checks that close.
 
 SQLite, the JWT check, and `decide` live in the challenge handler.
 The first `decide` passes `db-unknown` and `like-unknown`, with auth,
@@ -334,11 +337,14 @@ writes the dispatcher is not proved.
 The three family lines share one graph. 3721 states and 10521
 successor-table entries are a regression pin of the script (key `a`
 is accept, then reply, then reply; key `b` is accept). A different
-count means that graph changed. CI does not run `mix muro.check`.
-The jobs `check`, `asan`, and `macos` do not print these counts.
-It is not the proof above, and it
-is not a bound on live sockets. `test/family_test.exs` is a second
-check: two keys on the emitted dispatcher, in host order (accept
+count means that graph changed. `test/family_test.exs` runs
+`Muro.CLI.Check.run` on this file and asserts the four lines above,
+including 3, 3721, and 10521. `mix test` runs that file, and the
+`check` job runs `mix test`, so the counts are a CI result. The
+jobs `check`, `asan`, and `macos` do not print these counts as
+their own step. The walk is not the proof above, and it is not a
+bound on live sockets. The same test also checks the emitted
+dispatcher: two keys, in host order (accept
 before reply), a refused step on a held reply, a withdraw that does
 not open the reply, a finished reply reported until `resolved`, and
 one send on the reply turn.
@@ -467,7 +473,8 @@ codes, `crlf-end`, `lf-end`, `hdr-prefers-crlf`, `header-count`,
 `stream-take-lf`). `c/test_classify` checks each of those results,
 and the failure name is the equation name. `stream-take-hi` and
 `stream-take-edge` are header-only buffers. `stream-cl` and
-`cap-cl` are the classify status of those buffers, not a body of
-that size. A body past the window is `c/test_http11` and
+`cap-cl` are C checks in `c/test_classify`, not book equations.
+They name the classify status of those buffers, not a body of
+that size. A body past 16384 bytes is `c/test_http11` and
 `c/test_hello`. The hello echo waits until `muro_http_body_read`
 is entered before it sends the rest of the body.

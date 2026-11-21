@@ -1,6 +1,6 @@
 /* HTTP/1.1 completeness against c/muro-stream. Sockets, same shape as
    test_hello. Covers methods, Date, HEAD, chunked bodies, chunked and
-   close-delimited responses, bodies past 64 KiB, 413, 100-continue,
+   close-delimited responses, bodies past 16384 bytes, 413, 100-continue,
    and a SIGTERM drain with one request still in flight. */
 
 #include <arpa/inet.h>
@@ -1347,11 +1347,117 @@ static void check_stream_chunk(int port) {
   close_conn(&c);
 }
 
+/* Headers plus 1024 body bytes, then stop. The declared length is
+   larger. 413 has to arrive without the rest of the body. A host
+   that read to the end would still be waiting when this returns. */
+static void check_cl_stops(int port, const char *name, const char *cl) {
+  Conn c;
+  Head h;
+  char head[180];
+  char prefix[1024];
+  char body[64];
+  size_t body_n = 0;
+  unsigned long long declared = 0;
+  int hn;
+  hn = snprintf(head, sizeof head, "POST /echo HTTP/1.1\r\nHost: h\r\nContent-Length: %s\r\n\r\n",
+                cl);
+  if (hn < 0 || (size_t)hn >= sizeof head) {
+    fail(name, "head");
+    return;
+  }
+  declared = strtoull(cl, NULL, 10);
+  if (declared <= sizeof prefix) {
+    fail(name, "declared");
+    return;
+  }
+  memset(prefix, 'B', sizeof prefix);
+  if (open_conn(port, &c) < 0) {
+    fail(name, "connect");
+    return;
+  }
+  recv_limit(&c, 2);
+  if (send_all(c.fd, head, (size_t)hn) < 0 || send_all(c.fd, prefix, sizeof prefix) < 0 ||
+      next_head(&c, &h) < 0) {
+    fail(name, "exchange");
+    close_conn(&c);
+    return;
+  }
+  if (h.status != 413) {
+    fprintf(stderr, "FAIL %s: status %d\n", name, h.status);
+    failures += 1;
+  }
+  if (!h.close) fail(name, "wanted close");
+  if (!h.date_ok) fail(name, "date");
+  if (!h.has_cl || take_cl(&c, &h, body, sizeof body, &body_n) < 0 || body_n != 9 ||
+      memcmp(body, "too large", 9) != 0)
+    fail(name, "body");
+  close_conn(&c);
+}
+
+/* max_body is 20000. The first chunk is 16385 bytes, so the tail is
+   past 16384 and the 200 starts. The next chunk size is past the max.
+   The connection closes with no last-chunk and no 413. */
+static void check_late_chunk(void) {
+  pid_t pid;
+  int port = -1;
+  Conn c;
+  Head h;
+  char *payload = NULL;
+  char *got = NULL;
+  char head[200];
+  size_t got_n = 0;
+  int hn;
+  const size_t chunk = 16385;
+  pid = start_stream(&port, "20000", NULL);
+  if (pid < 0) return;
+  hn = snprintf(head, sizeof head,
+                "POST /echo HTTP/1.1\r\nHost: h\r\nTransfer-Encoding: chunked\r\n\r\n4001\r\n");
+  payload = malloc(chunk);
+  got = malloc(65536);
+  if (!payload || !got || hn < 0 || open_conn(port, &c) < 0) {
+    free(payload);
+    free(got);
+    fail("late-chunk", "setup");
+    stop_server(pid);
+    return;
+  }
+  memset(payload, 'a', chunk);
+  memset(&h, 0, sizeof h);
+  recv_limit(&c, 3);
+  if (send_all(c.fd, head, (size_t)hn) < 0 || send_all(c.fd, payload, chunk) < 0 ||
+      send_str(c.fd, "\r\n") < 0 || next_head(&c, &h) < 0 || h.status != 200 || !h.chunked) {
+    fprintf(stderr, "FAIL late-chunk: status %d chunked %d\n", h.status, h.chunked);
+    failures += 1;
+    free(payload);
+    free(got);
+    close_conn(&c);
+    stop_server(pid);
+    return;
+  }
+  free(payload);
+  if (send_str(c.fd, "100000\r\n") < 0 || take_eof(&c, got, 65536, &got_n) < 0) {
+    fail("late-chunk", "close");
+    free(got);
+    close_conn(&c);
+    stop_server(pid);
+    return;
+  }
+  if (memmem(got, got_n, "\r\n0\r\n", 5) != NULL) fail("late-chunk", "last-chunk");
+  if (memmem(got, got_n, "413", 3) != NULL) fail("late-chunk", "413");
+  free(got);
+  close_conn(&c);
+  stop_server(pid);
+}
+
 int main(int argc, char **argv) {
   pid_t pid;
   int port = -1;
   pid_t pid_small;
   int port_small = -1;
+  pid_t pid_zero;
+  int port_zero = -1;
+  pid_t pid_eq;
+  int port_eq = -1;
   if (argc > 1) bin_path = argv[1];
   signal(SIGPIPE, SIG_IGN);
   alarm(120);
@@ -1440,8 +1546,8 @@ int main(int argc, char **argv) {
             "POST /echo HTTP/1.0\r\nHost: h\r\nTransfer-Encoding: chunked\r\n\r\n0\r\n\r\n", 400,
             "malformed", 1);
   expect_chunked(port, "live", "GET /live HTTP/1.1\r\nHost: h\r\n\r\n", "abc");
-  expect_cl(port, "too-big", "POST /echo HTTP/1.1\r\nHost: h\r\nContent-Length: 20000000\r\n\r\n",
-            413, "too large", 1);
+  check_cl_stops(port, "too-big", "20000000");
+  check_cl_stops(port, "cl-u32", "4294967295");
   expect_cl(port, "expect-other",
             "POST /echo HTTP/1.1\r\nHost: h\r\nContent-Length: 4\r\nExpect: nope\r\n\r\n", 417,
             "expectation", 1);
@@ -1468,6 +1574,24 @@ int main(int argc, char **argv) {
               413, "too large", 1);
     stop_server(pid_small);
   }
+
+  pid_zero = start_stream(&port_zero, "0", NULL);
+  if (pid_zero > 0) {
+    expect_cl(port_zero, "max0-empty",
+              "POST /echo HTTP/1.1\r\nHost: h\r\nContent-Length: 0\r\n\r\n", 200, "", 0);
+    expect_cl(port_zero, "max0-one",
+              "POST /echo HTTP/1.1\r\nHost: h\r\nContent-Length: 1\r\n\r\nx", 413, "too large", 1);
+    stop_server(pid_zero);
+  }
+  pid_eq = start_stream(&port_eq, "4", NULL);
+  if (pid_eq > 0) {
+    expect_cl(port_eq, "max-eq", "POST /echo HTTP/1.1\r\nHost: h\r\nContent-Length: 4\r\n\r\nping",
+              200, "ping", 0);
+    expect_cl(port_eq, "max-over", "POST /echo HTTP/1.1\r\nHost: h\r\nContent-Length: 5\r\n\r\n", 413,
+              "too large", 1);
+    stop_server(pid_eq);
+  }
+  check_late_chunk();
 
   check_drain_real();
   check_drain_cut();

@@ -388,7 +388,7 @@ static void check_stream_echo(const char *host, int port) {
   size_t n = 0;
   int status = 0;
   int conn_close = 0;
-  char body_probe[8];
+  int content_length = -1;
   size_t body_n = 0;
   size_t i;
   hn = snprintf(head, sizeof head, "POST /echo HTTP/1.1\r\nHost: t\r\nContent-Length: 20000\r\n\r\n");
@@ -459,6 +459,8 @@ static void check_stream_echo(const char *host, int port) {
     } else {
       unsigned char *body = (unsigned char *)eoh + 4;
       body_n = n - (size_t)(body - (unsigned char *)buf);
+      if (find_cl(buf, (int)(eoh - buf), &content_length) != 0 || content_length != 20000)
+        fail("stream-echo", "content-length");
       if (body_n != 20000) {
         fprintf(stderr, "FAIL stream-echo: body %zu\n", body_n);
         failures += 1;
@@ -472,7 +474,6 @@ static void check_stream_echo(const char *host, int port) {
       }
     }
   }
-  (void)body_probe;
   close(fd);
   free(payload);
   free(buf);
@@ -484,23 +485,50 @@ static void check_drain_before_status(void) {
   int fd;
   char head[128];
   char partial[64];
+  char ready[96];
   int hn;
   int i;
   int closed = 0;
   int status = 0;
   int saw = 0;
+  if (snprintf(ready, sizeof ready, "/tmp/muro-hello-drain-%ld", (long)getpid()) < 0) {
+    fail("drain-before", "path");
+    return;
+  }
+  unlink(ready);
+  setenv("MURO_TEST_STREAM_READY", ready, 1);
   pid = start_hello(NULL, "127.0.0.1", &port, "400");
-  if (pid < 0) return;
+  unsetenv("MURO_TEST_STREAM_READY");
+  if (pid < 0) {
+    unlink(ready);
+    return;
+  }
   fd = dial("127.0.0.1", port);
   hn = snprintf(head, sizeof head, "POST /echo HTTP/1.1\r\nHost: t\r\nContent-Length: 20000\r\n\r\n");
   memset(partial, 'q', sizeof partial);
-  if (fd < 0 || hn < 0 || send_n(fd, head, (size_t)hn) < 0 || send_n(fd, partial, sizeof partial) < 0) {
+  if (fd < 0 || hn < 0 || send_n(fd, head, (size_t)hn) < 0) {
     fail("drain-before", "send");
     if (fd >= 0) close(fd);
     stop_server(pid);
+    unlink(ready);
     return;
   }
-  usleep(100000);
+  /* Same gate as stream-echo: the signal is delivered only after
+     muro_http_body_read has been entered for this streamed body. */
+  if (wait_file(ready, 5000) < 0) {
+    fail("drain-before", "body-read");
+    close(fd);
+    stop_server(pid);
+    unlink(ready);
+    return;
+  }
+  if (send_n(fd, partial, sizeof partial) < 0) {
+    fail("drain-before", "partial");
+    close(fd);
+    stop_server(pid);
+    unlink(ready);
+    return;
+  }
   kill(pid, SIGTERM);
   for (i = 0; i < 25; i++) {
     int nfd = dial("127.0.0.1", port);
@@ -525,9 +553,11 @@ static void check_drain_before_status(void) {
     kill(pid, SIGKILL);
     waitpid(pid, NULL, 0);
     fail("drain-before", "did not exit");
+    unlink(ready);
     return;
   }
   if (!(WIFEXITED(status) && WEXITSTATUS(status) == 0)) fail("drain-before", "status");
+  unlink(ready);
 }
 
 int main(int argc, char **argv) {
