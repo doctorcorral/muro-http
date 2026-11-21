@@ -20,8 +20,10 @@
 -- httpExpect, and httpContinue are the protocol texts. The host
 -- copies them. It does not invent the words.
 -- httpChunk frames one chunk. The empty chunk is the last-chunk
--- literal. A positive chunk walks the hex length, so only the empty
--- chunk is an equation. c/test_render checks a chunk of two bytes.
+-- literal. httpLastChunk is that same literal. last-chunk reduces
+-- httpLastChunk to httpChunk of an empty body. A positive chunk
+-- walks the hex length, so only the empty chunk is an equation.
+-- c/test_render checks a chunk of two bytes.
 --
 -- This book does not import another book. A def is a global C
 -- symbol, and conn.muro already emits the request scan.
@@ -337,6 +339,8 @@ def render-continue : evidence
     : Bytes} := refl
 
 def chunk-last : evidence {httpChunk b"" ≡ b"0\r\n\r\n" : Bytes} := refl
+
+def last-chunk : evidence {httpLastChunk ≡ httpChunk b"" : Bytes} := refl
 
 def chunk-head : evidence
   {httpChunked (toU64 200) b"OK" b"Sun, 06 Nov 1994 08:49:37 GMT" b"" (toU64 0)

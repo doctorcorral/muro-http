@@ -277,8 +277,8 @@ dated literals (`httpMalformed`, `httpInternal`,
 `httpContinue`), the last-chunk bytes `0\r\n\r\n` from `httpChunk`
 of an empty body (`chunk-last`), the chunked
 header block, the close-delimited header block, and a declared
-length of 0. The host calls `httpLastChunk`, which is that same
-literal and is not `chunk-last`. The reduction is the evidence term. It is not a
+length of 0. `last-chunk` reduces `httpLastChunk` to `httpChunk` of
+an empty body. The host calls `httpLastChunk`. The reduction is the evidence term. It is not a
 separate program, and it is not the poll loop. `rdShow` of 0 is the literal
 `0`, so an empty body is an equation. A positive length does not
 finish, so a ten-byte body is not an equation, and neither is `HEAD`

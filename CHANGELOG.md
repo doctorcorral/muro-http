@@ -97,8 +97,8 @@
   100/400/413/417/500/501 literals, the chunked and close-delimited
   header blocks, a declared length of 0, and the last-chunk bytes
   `0\r\n\r\n` from `httpChunk` of an empty body (`chunk-last`).
-  The host calls `httpLastChunk`, which is that same literal and is
-  not `chunk-last`. The reduction is the evidence term. It is not a
+  `last-chunk` reduces `httpLastChunk` to that `httpChunk`. The host
+  calls `httpLastChunk`. The reduction is the evidence term. It is not a
   separate program, and it is not the poll loop. ExUnit does not run
   that book. A positive `Content-Length` or chunk size walks
   `rdShow` or `hxShow` and is not an equation. `c/test_render`

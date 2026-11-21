@@ -601,8 +601,8 @@ strings they name: an empty keep response, an empty close response,
 the last-chunk bytes `0\r\n\r\n` from `httpChunk` of an empty body
 (`chunk-last`), the chunked header block, the
 close-delimited header block, and a declared length of 0.
-The host calls `httpLastChunk`, which is that same literal. That
-call is not `chunk-last`.
+`last-chunk` reduces `httpLastChunk` to `httpChunk` of an empty body.
+The host calls `httpLastChunk`.
 `mix muro.gen` typechecks them and reduces each `refl` under the
 fuel bound. That reduction is the evidence term. It is not a
 separate program, and it is not the poll loop. ExUnit does not run
@@ -712,7 +712,7 @@ book linked beside it must not import that book. `decide.muro` and
   `httpRender`, `httpHead`, `httpChunked`, `httpDelim`, `httpChunk`,
   `httpLastChunk`, and the six literals. It checks a ten-byte body,
   `HEAD` omit of a non-empty body, one chunk of `hi`, the last-chunk
-  bytes `0\r\n\r\n`, and the fixed date
+  bytes `0\r\n\r\n` that `httpLastChunk` returns, and the fixed date
   `Sun, 06 Nov 1994 08:49:37 GMT` in the emitted C. The host clock
   (`gmtime_r`, English names) is not that equation.
 - The body book accepts any octet inside a JSON string, including a
