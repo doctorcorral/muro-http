@@ -1138,56 +1138,81 @@ static void check_continue_stall(void) {
   stop_server(pid);
 }
 
-/* Expect: 100-continue, a stalled interim, the body, then a second
-   request, all before the interim finishes. Both responses must
-   arrive. The stall sleeps inside the server, so these waits overlap
-   that window. A 3s receive timeout fails a held pipeline. */
+/* Expect: 100-continue. The server pauses before any interim byte
+   and creates the ready file only after it has taken the headers.
+   The body and the next request go out after that file exists, so
+   they are queued while the interim is still short. A fixed sleep
+   raced a slow accept and the first status was 200. */
+static int wait_file(const char *path, int ms) {
+  int left = ms;
+  while (left > 0) {
+    if (access(path, R_OK) == 0) return 0;
+    usleep(20000);
+    left -= 20;
+  }
+  return -1;
+}
+
 static void check_continue_pipe(void) {
   int port = -1;
   pid_t pid;
   Conn c;
   Head h;
   char body[8];
+  char ready[80];
   size_t body_n = 0;
-  struct timespec ts;
   struct timeval tv;
   const char *hdr = "POST /echo HTTP/1.1\r\nHost: h\r\nContent-Length: 4\r\n"
                     "Expect: 100-continue\r\n\r\n";
   const char *second = "GET / HTTP/1.1\r\nHost: h\r\nConnection: close\r\n\r\n";
+  snprintf(ready, sizeof ready, "/tmp/muro-100-ready-%ld", (long)getpid());
+  unlink(ready);
   setenv("MURO_TEST_WRITE_LIMIT", "8", 1);
-  setenv("MURO_TEST_100_STALL", "40", 1);
+  setenv("MURO_TEST_100_STALL", "250", 1);
+  setenv("MURO_TEST_100_READY", ready, 1);
   pid = start_stream(&port, NULL, NULL);
   unsetenv("MURO_TEST_WRITE_LIMIT");
   unsetenv("MURO_TEST_100_STALL");
-  if (pid < 0) return;
+  unsetenv("MURO_TEST_100_READY");
+  if (pid < 0) {
+    unlink(ready);
+    return;
+  }
   if (open_conn(port, &c) < 0) {
     fail("continue-pipe", "connect");
     stop_server(pid);
+    unlink(ready);
     return;
   }
   tv.tv_sec = 3;
   tv.tv_usec = 0;
   setsockopt(c.fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv);
-  ts.tv_sec = 0;
-  ts.tv_nsec = 200000000L;
   if (send_str(c.fd, hdr) < 0) {
     fail("continue-pipe", "headers");
     close_conn(&c);
     stop_server(pid);
+    unlink(ready);
     return;
   }
-  nanosleep(&ts, NULL);
+  if (wait_file(ready, 5000) < 0) {
+    fail("continue-pipe", "ready");
+    close_conn(&c);
+    stop_server(pid);
+    unlink(ready);
+    return;
+  }
   if (send_str(c.fd, "ping") < 0) {
     fail("continue-pipe", "body");
     close_conn(&c);
     stop_server(pid);
+    unlink(ready);
     return;
   }
-  nanosleep(&ts, NULL);
   if (send_str(c.fd, second) < 0) {
     fail("continue-pipe", "pipeline");
     close_conn(&c);
     stop_server(pid);
+    unlink(ready);
     return;
   }
   if (next_head(&c, &h) < 0 || h.status != 100 || !h.date_ok) {
@@ -1195,6 +1220,7 @@ static void check_continue_pipe(void) {
     failures += 1;
     close_conn(&c);
     stop_server(pid);
+    unlink(ready);
     return;
   }
   if (next_head(&c, &h) < 0 || take_cl(&c, &h, body, sizeof body, &body_n) < 0 || h.status != 200 ||
@@ -1202,6 +1228,7 @@ static void check_continue_pipe(void) {
     fail("continue-pipe", "echo");
     close_conn(&c);
     stop_server(pid);
+    unlink(ready);
     return;
   }
   body_n = 0;
@@ -1210,6 +1237,7 @@ static void check_continue_pipe(void) {
     fail("continue-pipe", "next");
   close_conn(&c);
   stop_server(pid);
+  unlink(ready);
 }
 
 static void recv_limit(Conn *c, int sec) {

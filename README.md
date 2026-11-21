@@ -285,7 +285,9 @@ unless the body is already in the buffer or the method is `HEAD`.
 A short write leaves the interim outstanding. Until the last byte
 is written the socket is not watched for read, so bytes that arrive
 during that write, including a pipelined request, stay in the kernel
-and are classified together after the interim. The host does not
+and are classified together after the interim. The driver waits
+until those headers have been taken, then sends the body and the
+next request before the interim finishes. The host does not
 send 100 on HTTP/1.0, and it does not turn that Expect into 417. Any
 other Expect value on HTTP/1.1 is 417 and the body is not read.
 

@@ -39,6 +39,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/ioctl.h>
 #include <sys/socket.h>
 #include <time.h>
 #include <unistd.h>
@@ -283,8 +284,12 @@ static size_t env_write_limit(void) {
   return (size_t)cap;
 }
 
-/* MURO_TEST_100_STALL is how many interim writes report backpressure
-   before any byte is sent. The slot keeps the same rendered bytes. */
+/* MURO_TEST_100_STALL is how many 20ms pauses happen before the
+   first interim byte, and only while the socket has no further
+   bytes queued. MURO_TEST_100_READY is a path created on the first
+   pause, so a client can send the body after the headers were taken
+   and before any interim byte. The slot keeps the same rendered
+   bytes. Production leaves the counter at 0. */
 static int env_stall_100(void) {
   const char *e = getenv("MURO_TEST_100_STALL");
   char *end = NULL;
@@ -434,6 +439,34 @@ static int fill_bound(Slot *s, size_t *n) {
   return 0;
 }
 
+/* One create. The test process waits on this path before it sends
+   the body, so the body cannot land in the same read as the headers. */
+static void note_100_ready(void) {
+  const char *path;
+  int fd;
+  static int done = 0;
+  if (done) return;
+  path = getenv("MURO_TEST_100_READY");
+  if (!path || !path[0]) {
+    done = 1;
+    return;
+  }
+  fd = open(path, O_CREAT | O_WRONLY | O_TRUNC, 0644);
+  if (fd < 0) return;
+  if (write(fd, "1\n", 2) < 0) {
+    close(fd);
+    return;
+  }
+  close(fd);
+  done = 1;
+}
+
+static int sock_pending(int fd) {
+  int pending = 0;
+  if (ioctl(fd, FIONREAD, &pending) < 0 || pending <= 0) return 0;
+  return 1;
+}
+
 /* 1 when HTTP/1.1 100 Continue has been fully written. 0 when some
    bytes remain and the slot wants a write. -1 on a hard write error
    or a literal that does not fit. One successful write per call, so
@@ -457,18 +490,23 @@ static int write_100(Server *sv, Slot *s) {
     s->cont_off = 0;
     return 1;
   }
-  if (sv->stall_100 > 0) {
+  if (sv->stall_100 > 0 && s->cont_off == 0) {
     struct timespec ts;
-    sv->stall_100 -= 1;
-    s->want_write = 1;
-    /* Test hook only. The sleep lets a client push the body and a
-       pipelined request while this interim is still outstanding.
-       Production leaves the counter at 0. */
-    ts.tv_sec = 0;
-    ts.tv_nsec = 20000000L;
-    while (nanosleep(&ts, &ts) < 0 && errno == EINTR)
-      continue;
-    return 0;
+    note_100_ready();
+    /* No interim byte yet. Wait until the peer has queued more
+       bytes, so a body and a pipelined request are in the kernel
+       during the short write. A pause that ignores the socket loses
+       the race on a slow accept and the first response is 200. */
+    if (!sock_pending(s->fd)) {
+      sv->stall_100 -= 1;
+      s->want_write = 1;
+      ts.tv_sec = 0;
+      ts.tv_nsec = 20000000L;
+      while (nanosleep(&ts, &ts) < 0 && errno == EINTR)
+        continue;
+      return 0;
+    }
+    sv->stall_100 = 0;
   }
   while (spins < 8) {
     size_t chunk = s->cont_len - s->cont_off;
