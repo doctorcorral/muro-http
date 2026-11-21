@@ -89,6 +89,8 @@ static pid_t start_server(int idle_ms, int max_conn, int *port, const char *writ
     snprintf(idle, sizeof idle, "%d", idle_ms);
     snprintf(maxc, sizeof maxc, "%d", max_conn);
     unsetenv("MURO_HTTP_BIND");
+    unsetenv("MURO_HTTP_MAX_BODY");
+    unsetenv("MURO_HTTP_DRAIN_MS");
     if (bind_env && bind_env[0]) setenv("MURO_HTTP_BIND", bind_env, 1);
     unsetenv("MURO_HTTP_DB");
     unsetenv("MURO_HTTP_JWT_KEY");
@@ -677,7 +679,8 @@ static void check_max_conn(void) {
 }
 
 static const char health_keep[] =
-    "HTTP/1.1 200 OK\r\nConnection: keep-alive\r\nContent-Length: 2\r\n"
+    "HTTP/1.1 200 OK\r\nDate: Sun, 06 Nov 1994 08:49:37 GMT\r\n"
+    "Connection: keep-alive\r\nContent-Length: 2\r\n"
     "Content-Type: text/plain; charset=utf-8\r\n\r\nok";
 
 static void check_partial_send(void) {
@@ -1176,6 +1179,8 @@ static void check_exit2(const char *name, char **av, const char *sqlite_env, con
     unsetenv("MURO_HTTP_PORT");
     unsetenv("MURO_HTTP_IDLE_MS");
     unsetenv("MURO_HTTP_MAX_CONNECTIONS");
+    unsetenv("MURO_HTTP_MAX_BODY");
+    unsetenv("MURO_HTTP_DRAIN_MS");
     unsetenv("SQLITE_PATH");
     unsetenv("MURO_TEST_FAIL_DB_ADMIT");
     unsetenv("MURO_TEST_WRITE_LIMIT");

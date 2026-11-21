@@ -2,17 +2,28 @@
 --
 -- The handler supplies the status, the reason, extra header lines,
 -- and the body. This book frames them. It writes the status line,
--- Connection, and Content-Length. Extra headers are copied as given
--- and must already end in CRLF. The handler does not supply
--- Connection or Content-Length.
+-- Date, Connection, and Content-Length. Extra headers are copied as
+-- given and must already end in CRLF. The handler does not supply
+-- Date, Connection, Content-Length, or Transfer-Encoding.
 --
 -- keep 1 sends Connection: close. Any other value sends keep-alive.
--- A positive Content-Length walks rdShow. That walk does not finish
--- under the evidence fuel, so the equations use an empty body.
--- c/test_render checks a non-empty body.
+-- omit 1 is a HEAD response: Content-Length is the body length and
+-- the body bytes are not written. A positive Content-Length walks
+-- rdShow. That walk does not finish under the evidence fuel, so the
+-- equations use an empty body. c/test_render checks a non-empty body
+-- and a HEAD response that keeps the length and drops the bytes.
 --
--- httpMalformed and httpInternal are the protocol texts. The host
+-- The date is the host's IMF-fixdate. This book places those bytes.
+-- It does not read the clock.
+--
+-- httpMalformed, httpInternal, httpNotImplemented, httpTooLarge,
+-- httpExpect, and httpContinue are the protocol texts. The host
 -- copies them. It does not invent the words.
+-- httpChunk frames one chunk. The empty chunk is the last-chunk
+-- literal. httpLastChunk is that same literal. last-chunk reduces
+-- httpLastChunk to httpChunk of an empty body. A positive chunk
+-- walks the hex length, so only the empty chunk is an equation.
+-- c/test_render checks a chunk of two bytes.
 --
 -- This book does not import another book. A def is a global C
 -- symbol, and conn.muro already emits the request scan.
@@ -129,41 +140,219 @@ def httpCL : run Π (+ body : Bytes) → Bytes :=
   λ (+ body : Bytes) →
     bytesCat (bytesCat b"Content-Length: " (rdShow (bytesLen body))) b"\r\n"
 
-def httpJoin : run Π (+ line : Bytes) → Π (+ conn : Bytes) → Π (+ cl : Bytes) → Π (+ extra : Bytes) → Π (+ body : Bytes) → Bytes :=
-  λ (+ line : Bytes) → λ (+ conn : Bytes) → λ (+ cl : Bytes) → λ (+ extra : Bytes) → λ (+ body : Bytes) →
-    bytesCat (bytesCat (bytesCat (bytesCat line conn) cl) extra) (bytesCat b"\r\n" body)
+def httpDeclared : run Π (+ n : U64) → Bytes :=
+  λ (+ n : U64) →
+    bytesCat (bytesCat b"Content-Length: " (rdShow n)) b"\r\n"
 
-def httpRender : run Π (+ status : U64) → Π (+ reason : Bytes) → Π (+ extra : Bytes) → Π (+ body : Bytes) → Π (+ keep : U64) → Bytes :=
-  λ (+ status : U64) → λ (+ reason : Bytes) → λ (+ extra : Bytes) → λ (+ body : Bytes) → λ (+ keep : U64) →
-    httpJoin (httpLine status reason) (httpConn keep) (httpCL body) extra body
+def httpDate : run Π (+ date : Bytes) → Bytes :=
+  λ (+ date : Bytes) →
+    bytesCat (bytesCat b"Date: " date) b"\r\n"
 
-def httpMalformed : run Bytes :=
-  b"HTTP/1.1 400 Bad Request\r\nConnection: close\r\nContent-Length: 9\r\nContent-Type: text/plain; charset=utf-8\r\n\r\nmalformed"
+def httpJoin : run Π (+ line : Bytes) → Π (+ date : Bytes) → Π (+ conn : Bytes) → Π (+ cl : Bytes) → Π (+ extra : Bytes) → Π (+ body : Bytes) → Bytes :=
+  λ (+ line : Bytes) → λ (+ date : Bytes) → λ (+ conn : Bytes) → λ (+ cl : Bytes) → λ (+ extra : Bytes) → λ (+ body : Bytes) →
+    bytesCat (bytesCat (bytesCat (bytesCat (bytesCat line date) conn) cl) extra) (bytesCat b"\r\n" body)
 
-def httpInternal : run Bytes :=
-  b"HTTP/1.1 500 Internal Server Error\r\nConnection: close\r\nContent-Length: 8\r\nContent-Type: text/plain; charset=utf-8\r\n\r\ninternal"
+def httpBody : run Π (+ body : Bytes) → Π (+ omit : U64) → Bytes :=
+  λ (+ body : Bytes) → λ (+ omit : U64) →
+    match (eqi omit (toU64 1)) motive (λ _ → Bytes)
+      | wtrue => b""
+      | wfalse => body
+
+def httpRender : run Π (+ status : U64) → Π (+ reason : Bytes) → Π (+ date : Bytes) → Π (+ extra : Bytes) → Π (+ body : Bytes) → Π (+ keep : U64) → Π (+ omit : U64) → Bytes :=
+  λ (+ status : U64) → λ (+ reason : Bytes) → λ (+ date : Bytes) → λ (+ extra : Bytes) → λ (+ body : Bytes) → λ (+ keep : U64) → λ (+ omit : U64) →
+    httpJoin (httpLine status reason) (httpDate date) (httpConn keep) (httpCL body) extra (httpBody body omit)
+
+-- Headers for a body whose length is known and whose bytes are not
+-- in this call. HEAD uses the same headers and then writes nothing.
+def httpHead : run Π (+ status : U64) → Π (+ reason : Bytes) → Π (+ date : Bytes) → Π (+ extra : Bytes) → Π (+ n : U64) → Π (+ keep : U64) → Bytes :=
+  λ (+ status : U64) → λ (+ reason : Bytes) → λ (+ date : Bytes) → λ (+ extra : Bytes) → λ (+ n : U64) → λ (+ keep : U64) →
+    httpJoin (httpLine status reason) (httpDate date) (httpConn keep) (httpDeclared n) extra b""
+
+def httpChunked : run Π (+ status : U64) → Π (+ reason : Bytes) → Π (+ date : Bytes) → Π (+ extra : Bytes) → Π (+ keep : U64) → Bytes :=
+  λ (+ status : U64) → λ (+ reason : Bytes) → λ (+ date : Bytes) → λ (+ extra : Bytes) → λ (+ keep : U64) →
+    httpJoin (httpLine status reason) (httpDate date) (httpConn keep) b"Transfer-Encoding: chunked\r\n" extra b""
+
+-- HTTP/1.0 cannot take chunked. The host closes after the raw bytes.
+def httpDelim : run Π (+ status : U64) → Π (+ reason : Bytes) → Π (+ date : Bytes) → Π (+ extra : Bytes) → Bytes :=
+  λ (+ status : U64) → λ (+ reason : Bytes) → λ (+ date : Bytes) → λ (+ extra : Bytes) →
+    httpJoin (httpLine status reason) (httpDate date) (httpConn (toU64 1)) b"" extra b""
+
+def hxDigit : run internal Π (+ d : U64) → Bytes :=
+  λ (+ d : U64) →
+    match (eqi d (toU64 0)) motive (λ _ → Bytes)
+      | wtrue => b"0"
+      | wfalse =>
+          (match (eqi d (toU64 1)) motive (λ _ → Bytes)
+            | wtrue => b"1"
+            | wfalse =>
+                (match (eqi d (toU64 2)) motive (λ _ → Bytes)
+                  | wtrue => b"2"
+                  | wfalse =>
+                      (match (eqi d (toU64 3)) motive (λ _ → Bytes)
+                        | wtrue => b"3"
+                        | wfalse =>
+                            (match (eqi d (toU64 4)) motive (λ _ → Bytes)
+                              | wtrue => b"4"
+                              | wfalse =>
+                                  (match (eqi d (toU64 5)) motive (λ _ → Bytes)
+                                    | wtrue => b"5"
+                                    | wfalse =>
+                                        (match (eqi d (toU64 6)) motive (λ _ → Bytes)
+                                          | wtrue => b"6"
+                                          | wfalse =>
+                                              (match (eqi d (toU64 7)) motive (λ _ → Bytes)
+                                                | wtrue => b"7"
+                                                | wfalse =>
+                                                    (match (eqi d (toU64 8)) motive (λ _ → Bytes)
+                                                      | wtrue => b"8"
+                                                      | wfalse =>
+                                                          (match (eqi d (toU64 9)) motive (λ _ → Bytes)
+                                                            | wtrue => b"9"
+                                                            | wfalse =>
+                                                                (match (eqi d (toU64 10)) motive (λ _ → Bytes)
+                                                                  | wtrue => b"a"
+                                                                  | wfalse =>
+                                                                      (match (eqi d (toU64 11)) motive (λ _ → Bytes)
+                                                                        | wtrue => b"b"
+                                                                        | wfalse =>
+                                                                            (match (eqi d (toU64 12)) motive (λ _ → Bytes)
+                                                                              | wtrue => b"c"
+                                                                              | wfalse =>
+                                                                                  (match (eqi d (toU64 13)) motive (λ _ → Bytes)
+                                                                                    | wtrue => b"d"
+                                                                                    | wfalse =>
+                                                                                        (match (eqi d (toU64 14)) motive (λ _ → Bytes)
+                                                                                          | wtrue => b"e"
+                                                                                          | wfalse => b"f"))))))))))))))
+
+data Hx : Type where
+  hx : Π (+ n : U64) → Π (+ out : Bytes) → Hx
+
+def hxStep : run internal Π (+ st : Hx) → Hx :=
+  λ (+ st : Hx) →
+    match st motive (λ _ → Hx)
+      | hx n out =>
+          (match (eqi n (toU64 0)) motive (λ _ → Hx)
+            | wtrue =>
+                (match (eqi (bytesLen out) (toU64 0)) motive (λ _ → Hx)
+                  | wtrue => hx (toU64 0) b"0"
+                  | wfalse => st)
+            | wfalse =>
+                (match (divi n (toU64 16)) motive (λ _ → Hx)
+                  | wsome q =>
+                      (match (remi n (toU64 16)) motive (λ _ → Hx)
+                        | wsome d => hx q (bytesCat (hxDigit d) out)
+                        | wnone => hx (toU64 0) b"0")
+                  | wnone => hx (toU64 0) b"0"))
+
+def hxShow : run internal Π (+ n : U64) → Bytes :=
+  λ (+ n : U64) →
+    match (eqi n (toU64 0)) motive (λ _ → Bytes)
+      | wtrue => b"0"
+      | wfalse =>
+          (match (sliceFold Hx (hx n b"")
+                  (λ (_b : U8) → λ (_r : Slice) → λ (st : Hx) → hxStep st)
+                  b"................") motive (λ _ → Bytes)
+            | hx _m out => out)
+
+def httpChunk : run Π (+ body : Bytes) → Bytes :=
+  λ (+ body : Bytes) →
+    match (eqi (bytesLen body) (toU64 0)) motive (λ _ → Bytes)
+      | wtrue => b"0\r\n\r\n"
+      | wfalse => bytesCat (bytesCat (bytesCat (hxShow (bytesLen body)) b"\r\n") body) b"\r\n"
+
+def httpLastChunk : run Bytes :=
+  b"0\r\n\r\n"
+
+def httpMalformed : run Π (+ date : Bytes) → Bytes :=
+  λ (+ date : Bytes) →
+    bytesCat (bytesCat b"HTTP/1.1 400 Bad Request\r\nDate: " date) b"\r\nConnection: close\r\nContent-Length: 9\r\nContent-Type: text/plain; charset=utf-8\r\n\r\nmalformed"
+
+def httpInternal : run Π (+ date : Bytes) → Bytes :=
+  λ (+ date : Bytes) →
+    bytesCat (bytesCat b"HTTP/1.1 500 Internal Server Error\r\nDate: " date) b"\r\nConnection: close\r\nContent-Length: 8\r\nContent-Type: text/plain; charset=utf-8\r\n\r\ninternal"
+
+def httpNotImplemented : run Π (+ date : Bytes) → Bytes :=
+  λ (+ date : Bytes) →
+    bytesCat (bytesCat b"HTTP/1.1 501 Not Implemented\r\nDate: " date) b"\r\nConnection: close\r\nContent-Length: 13\r\nContent-Type: text/plain; charset=utf-8\r\n\r\nunimplemented"
+
+def httpTooLarge : run Π (+ date : Bytes) → Bytes :=
+  λ (+ date : Bytes) →
+    bytesCat (bytesCat b"HTTP/1.1 413 Content Too Large\r\nDate: " date) b"\r\nConnection: close\r\nContent-Length: 9\r\nContent-Type: text/plain; charset=utf-8\r\n\r\ntoo large"
+
+def httpExpect : run Π (+ date : Bytes) → Bytes :=
+  λ (+ date : Bytes) →
+    bytesCat (bytesCat b"HTTP/1.1 417 Expectation Failed\r\nDate: " date) b"\r\nConnection: close\r\nContent-Length: 11\r\nContent-Type: text/plain; charset=utf-8\r\n\r\nexpectation"
+
+def httpContinue : run Π (+ date : Bytes) → Bytes :=
+  λ (+ date : Bytes) →
+    bytesCat (bytesCat b"HTTP/1.1 100 Continue\r\nDate: " date) b"\r\n\r\n"
 
 def render-empty-keep : evidence
-  {httpRender (toU64 200) b"OK" b"Content-Type: text/plain; charset=utf-8\r\n" b"" (toU64 0)
-    ≡ b"HTTP/1.1 200 OK\r\nConnection: keep-alive\r\nContent-Length: 0\r\nContent-Type: text/plain; charset=utf-8\r\n\r\n"
+  {httpRender (toU64 200) b"OK" b"Sun, 06 Nov 1994 08:49:37 GMT" b"Content-Type: text/plain; charset=utf-8\r\n" b"" (toU64 0) (toU64 0)
+    ≡ b"HTTP/1.1 200 OK\r\nDate: Sun, 06 Nov 1994 08:49:37 GMT\r\nConnection: keep-alive\r\nContent-Length: 0\r\nContent-Type: text/plain; charset=utf-8\r\n\r\n"
     : Bytes} := refl
 
 def render-empty-close : evidence
-  {httpRender (toU64 200) b"OK" b"" b"" (toU64 1)
-    ≡ b"HTTP/1.1 200 OK\r\nConnection: close\r\nContent-Length: 0\r\n\r\n"
+  {httpRender (toU64 200) b"OK" b"Sun, 06 Nov 1994 08:49:37 GMT" b"" b"" (toU64 1) (toU64 0)
+    ≡ b"HTTP/1.1 200 OK\r\nDate: Sun, 06 Nov 1994 08:49:37 GMT\r\nConnection: close\r\nContent-Length: 0\r\n\r\n"
     : Bytes} := refl
 
 def render-204 : evidence
-  {httpRender (toU64 204) b"No Content" b"" b"" (toU64 0)
-    ≡ b"HTTP/1.1 204 No Content\r\nConnection: keep-alive\r\nContent-Length: 0\r\n\r\n"
+  {httpRender (toU64 204) b"No Content" b"Sun, 06 Nov 1994 08:49:37 GMT" b"" b"" (toU64 0) (toU64 0)
+    ≡ b"HTTP/1.1 204 No Content\r\nDate: Sun, 06 Nov 1994 08:49:37 GMT\r\nConnection: keep-alive\r\nContent-Length: 0\r\n\r\n"
+    : Bytes} := refl
+
+def render-head-empty : evidence
+  {httpRender (toU64 200) b"OK" b"Sun, 06 Nov 1994 08:49:37 GMT" b"" b"" (toU64 0) (toU64 1)
+    ≡ httpRender (toU64 200) b"OK" b"Sun, 06 Nov 1994 08:49:37 GMT" b"" b"" (toU64 0) (toU64 0)
     : Bytes} := refl
 
 def render-malformed : evidence
-  {httpMalformed
-    ≡ b"HTTP/1.1 400 Bad Request\r\nConnection: close\r\nContent-Length: 9\r\nContent-Type: text/plain; charset=utf-8\r\n\r\nmalformed"
+  {httpMalformed b"Sun, 06 Nov 1994 08:49:37 GMT"
+    ≡ b"HTTP/1.1 400 Bad Request\r\nDate: Sun, 06 Nov 1994 08:49:37 GMT\r\nConnection: close\r\nContent-Length: 9\r\nContent-Type: text/plain; charset=utf-8\r\n\r\nmalformed"
     : Bytes} := refl
 
 def render-internal : evidence
-  {httpInternal
-    ≡ b"HTTP/1.1 500 Internal Server Error\r\nConnection: close\r\nContent-Length: 8\r\nContent-Type: text/plain; charset=utf-8\r\n\r\ninternal"
+  {httpInternal b"Sun, 06 Nov 1994 08:49:37 GMT"
+    ≡ b"HTTP/1.1 500 Internal Server Error\r\nDate: Sun, 06 Nov 1994 08:49:37 GMT\r\nConnection: close\r\nContent-Length: 8\r\nContent-Type: text/plain; charset=utf-8\r\n\r\ninternal"
+    : Bytes} := refl
+
+def render-unimplemented : evidence
+  {httpNotImplemented b"Sun, 06 Nov 1994 08:49:37 GMT"
+    ≡ b"HTTP/1.1 501 Not Implemented\r\nDate: Sun, 06 Nov 1994 08:49:37 GMT\r\nConnection: close\r\nContent-Length: 13\r\nContent-Type: text/plain; charset=utf-8\r\n\r\nunimplemented"
+    : Bytes} := refl
+
+def render-too-large : evidence
+  {httpTooLarge b"Sun, 06 Nov 1994 08:49:37 GMT"
+    ≡ b"HTTP/1.1 413 Content Too Large\r\nDate: Sun, 06 Nov 1994 08:49:37 GMT\r\nConnection: close\r\nContent-Length: 9\r\nContent-Type: text/plain; charset=utf-8\r\n\r\ntoo large"
+    : Bytes} := refl
+
+def render-expect : evidence
+  {httpExpect b"Sun, 06 Nov 1994 08:49:37 GMT"
+    ≡ b"HTTP/1.1 417 Expectation Failed\r\nDate: Sun, 06 Nov 1994 08:49:37 GMT\r\nConnection: close\r\nContent-Length: 11\r\nContent-Type: text/plain; charset=utf-8\r\n\r\nexpectation"
+    : Bytes} := refl
+
+def render-continue : evidence
+  {httpContinue b"Sun, 06 Nov 1994 08:49:37 GMT"
+    ≡ b"HTTP/1.1 100 Continue\r\nDate: Sun, 06 Nov 1994 08:49:37 GMT\r\n\r\n"
+    : Bytes} := refl
+
+def chunk-last : evidence {httpChunk b"" ≡ b"0\r\n\r\n" : Bytes} := refl
+
+def last-chunk : evidence {httpLastChunk ≡ httpChunk b"" : Bytes} := refl
+
+def chunk-head : evidence
+  {httpChunked (toU64 200) b"OK" b"Sun, 06 Nov 1994 08:49:37 GMT" b"" (toU64 0)
+    ≡ b"HTTP/1.1 200 OK\r\nDate: Sun, 06 Nov 1994 08:49:37 GMT\r\nConnection: keep-alive\r\nTransfer-Encoding: chunked\r\n\r\n"
+    : Bytes} := refl
+
+def delim-head : evidence
+  {httpDelim (toU64 200) b"OK" b"Sun, 06 Nov 1994 08:49:37 GMT" b""
+    ≡ b"HTTP/1.1 200 OK\r\nDate: Sun, 06 Nov 1994 08:49:37 GMT\r\nConnection: close\r\n\r\n"
+    : Bytes} := refl
+
+def declared-zero : evidence
+  {httpHead (toU64 200) b"OK" b"Sun, 06 Nov 1994 08:49:37 GMT" b"" (toU64 0) (toU64 0)
+    ≡ b"HTTP/1.1 200 OK\r\nDate: Sun, 06 Nov 1994 08:49:37 GMT\r\nConnection: keep-alive\r\nContent-Length: 0\r\n\r\n"
     : Bytes} := refl
