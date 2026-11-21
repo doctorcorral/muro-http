@@ -397,9 +397,14 @@ def healthWritten : run Conn :=
 def sawProgress : run Mode :=
   mode (step healthWritten (evProgress (toU64 8)))
 
+-- flag-yes only when that progress stored offset 8. Any other
+-- offset, including a non-zero value that is not 8, is flag-no.
 def sawProgressFlag : run Flag :=
-  flagOf (match (step healthWritten (evProgress (toU64 8))) motive (λ _ → U64)
-    | conn _phase _half _keep _idc _action _timer _code _err _act off _len _endOff _more => off)
+  match (step healthWritten (evProgress (toU64 8))) motive (λ _ → Flag)
+    | conn _phase _half _keep _idc _action _timer _code _err _act off _len _endOff _more =>
+        (match (u64eq off (toU64 8)) motive (λ _ → Flag)
+          | true => flag-yes
+          | false => flag-no)
 
 def sawIdle : run Mode :=
   mode (step healthWritten evDone)
@@ -428,6 +433,13 @@ def sawUnimpl : run Mode :=
 def sawUnimplCode : run U64 :=
   match (step begin (evBytes gzipReq)) motive (λ _ → U64)
     | conn _phase _half _keep _idc _action _timer code _err _act _off _len _endOff _more => code
+
+-- flag-yes only when the origin word is 2. unimpl-code is a U64,
+-- so ExUnit skips it. This wrapper is the check that runs.
+def sawUnimplOrigin : run Flag :=
+  match (u64eq (sawUnimplCode) (toU64 2)) motive (λ _ → Flag)
+    | true => flag-yes
+    | false => flag-no
 
 def sawBadDone : run Mode :=
   mode (step (step begin (evBytes badReq)) evDone)
@@ -506,6 +518,8 @@ def malformed : evidence {sawBad ≡ mode-write : Mode} := refl
 def unimpl-write : evidence {sawUnimpl ≡ mode-write : Mode} := refl
 
 def unimpl-code : evidence {sawUnimplCode ≡ toU64 2 : U64} := refl
+
+def unimpl-origin : evidence {sawUnimplOrigin ≡ flag-yes : Flag} := refl
 
 def malformed-done : evidence {sawBadDone ≡ mode-closed : Mode} := refl
 

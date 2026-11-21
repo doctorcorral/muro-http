@@ -17,7 +17,10 @@
   together with `Content-Length` is 400 (RFC 9112 6.3). `chunked`
   has to be the final coding: `chunked, gzip` is 400 (RFC 9112 6.1).
   Any other coding, including `gzip` and `gzip, chunked`, is
-  `status-unimplemented` in `classify`. The host copies that 501.
+  `status-unimplemented` in `classify`. The image stores origin 2
+  and the host copies `httpNotImplemented`. `host_in_policy` does
+  not return 501 for that coding. It returns 501 only for method
+  code 1.
   Chunked on HTTP/1.0 is 400. A handler that does not
   know the length sends chunked to an HTTP/1.1 client and
   close-delimited bytes to an HTTP/1.0 client. `HEAD` of an unknown
@@ -25,12 +28,16 @@
   `Transfer-Encoding`.
 - A request line or header line that ends in a bare LF is 400
   (RFC 9112 2.2), including a buffer that has not reached a blank
-  line. An empty request-target is 400. `OPTIONS *` stays a target.
+  line. `headerEnd` is the CRLF block end only, so `streamTake`
+  stays 0 and the host does not copy a prefix of that buffer.
+  An empty request-target is 400. `OPTIONS *` stays a target.
   `Content-Length` is `1*DIGIT` and must be below 4294967296.
   `4294967295` is legal. A leading `+`, `4294967296`, `8589934592`,
   and a trimmed digit string of 32 bytes or more are 400.
   `Connection` matches whole comma-separated tokens, without regard
-  to ASCII case. `enclose` and `closeable` are not `close`.
+  to ASCII case. `close` in any field closes the connection, in
+  either order with `keep-alive` (RFC 9110). `enclose` and
+  `closeable` are not `close`.
 - A `Content-Length` above 16384 that has not all arrived, and a
   chunked body that does not finish inside the window, is streamed.
   `MuroHttpResponse.pull` writes a response the same way.
@@ -42,15 +49,18 @@
 - `Expect: 100-continue` on HTTP/1.1 writes `100 Continue` before the
   body is read, when the request is otherwise acceptable and the body
   is not already in the buffer. A short write or `EAGAIN` leaves the
-  interim unsent. `poll` retries it. `sent_100` is set only after
-  the last byte. Any other Expect value is 417.
+  interim unsent. `poll` retries it and does not watch that socket
+  for read until the last byte is written, so a pipelined request
+  stays in the kernel instead of being held in `HANDLE`. `sent_100`
+  is set only after the last byte. Any other Expect value is 417.
   HTTP/1.0 does not send 100 and does not send 417.
 - SIGINT and SIGTERM stop accepting, finish the request that is
   already in the handler, close idle keep-alive connections, and exit
   0 when the table is empty or `--drain-ms` has passed (default 1000,
   `MURO_HTTP_DRAIN_MS`). The same flag arms that drain inside
-  `muro_http_body_read`: the listen socket closes immediately, and
-  the body read continues until the body ends or the deadline passes.
+  `muro_http_body_read`: the listen socket closes immediately, idle
+  connections close on that same turn, and the body read continues
+  until the body ends or the deadline passes.
   While that read waits, the server poll accepts and serves other
   connections. A nested read does not watch a socket already inside
   a read. Past eight nested reads, the wait is that socket alone.
@@ -58,24 +68,38 @@
   an echo of the request body. `c/test_http11` drives it.
 - `mix test` reduces the new `Status` equations in `request.muro`:
   `OPTIONS *`, `GET *`, an empty chunked body, `Transfer-Encoding`
-  with `Content-Length`, and chunked on HTTP/1.0. Method, coding,
-  and Expect codes are `U64`, so ExUnit skips them. `c/test_classify`
-  checks those codes and the chunk scanner. `render.muro` is emitted
-  as C only, same as before. Its new `refl`s typecheck under
-  `mix muro.gen`, which reduces each `refl` under the fuel bound:
-  `Date`, `HEAD` of an empty body, the
+  with `Content-Length`, and chunked on HTTP/1.0. ExUnit skips a
+  closed equation whose result or argument normal form is a machine
+  term. `test/request_test.exs` skips these 30: `crlf-end`,
+  `lf-end`, `hdr-prefers-crlf`, `meth-head`, `meth-put`,
+  `meth-trace`, `meth-bad`, `meth-star`, `meth-get-star`,
+  `te-chunk`, `te-gzip`, `exp-100`, `exp-two`, `ck-empty`, `ck-hi`,
+  `header-count`, `header-name-0`, `te-not-final`, `te-gzip-code`,
+  `post-framed`, `post-framed-short`, `post-take-short`,
+  `ck-framed`, `ck-framed-hdr`, `ck-take-hdr`, `stream-take-hi`,
+  `stream-end-hi`, `stream-take-edge`, `stream-end-edge`, and
+  `stream-take-lf`. `c/test_classify` checks each of those results,
+  including `streamTake` of a short `Content-Length`, a chunked
+  header with no chunk bytes, and a bare LF. `test/conn_eq_test.exs`
+  skips `unimpl-code`, `after-close`, and `after-close-tick`.
+  `unimpl-origin` is the flag ExUnit runs for origin 2.
+  `c/test_conn` wants that field to be 2. `sawAfterDo` and
+  `sawAfterMode` cover the two after-close wrappers.
+  `render.muro` is emitted as C only, same as before. Its new
+  `refl`s typecheck under `mix muro.gen`, which reduces each `refl`
+  under the fuel bound: `Date`, `HEAD` of an empty body, the
   100/400/413/417/500/501 literals, the chunked and close-delimited
   header blocks, a declared length of 0, and the last-chunk bytes
   `0\r\n\r\n`. That reduction is the evidence term. It is not a
   separate program, and it is not the poll loop. ExUnit does not run
-  that book. `framedEnd` and `streamTake` have `refl`s for a short
-  body, an empty chunk, and the 16384 / 16385 boundary. A body that
-  large stays a C test. A positive
-  `Content-Length` or chunk size walks `rdShow` or `hxShow` and is
-  not an equation. `c/test_render` checks those bytes, including
-  `HEAD` of `ok` and one chunk of `hi`. The clock, the poll loop,
-  the drain, and a body past the window are hand-written.
-  `c/test_http11` and `make c-sanitize` check those.
+  that book. A positive `Content-Length` or chunk size walks
+  `rdShow` or `hxShow` and is not an equation. `c/test_render`
+  calls `httpRender`, `httpHead`, `httpChunked`, `httpDelim`,
+  `httpChunk`, `httpLastChunk`, and the six literals. It checks
+  those bytes, including `HEAD` of `ok` and one chunk of `hi`.
+  The clock, the poll loop, the drain, and a body past the window
+  are hand-written. `c/test_http11` and `make c-sanitize` check
+  those.
 
 - Pin muro 0.22.14. The library version stays `0.1.0-dev`.
   `mix muro.gen` rewrites the committed C and Elixir. The C prelude
@@ -137,8 +161,8 @@
   the same header: GET answers `hello\n`, POST echoes the buffered
   or streamed body, and a body read that fails is 400 `bad\n`.
   There is no SQLite. `c/test_hello`, `c/test_route`, and `c/test_tags`
-  run from `make c-check` and `make c-sanitize`. The pin stays
-  0.21.14. The library version stays `0.1.0-dev`.
+  run from `make c-check` and `make c-sanitize`. The pin is
+  0.22.14. The library version stays `0.1.0-dev`.
 - A write-only `POLLHUP` without `POLLOUT` closes that slot instead
   of spinning the poll loop (the macOS case when a peer aborts
   mid-response). A peer FIN while the host is still reading is still
@@ -158,8 +182,8 @@
   keeps the earlier cases and adds the interleaved clients (`/health`,
   authenticated `/feed`, `/posts`, `/posts/:id/like`, a malformed
   request) plus SIGINT and SIGTERM while a partial header is open.
-  The macOS CI job runs the same `make c-check`. The pin stays
-  0.21.14. The library version stays `0.1.0-dev`.
+  The macOS CI job runs the same `make c-check`. The pin is
+  0.22.14. The library version stays `0.1.0-dev`.
 - A 500 sent because a connection closes after a committed create or
   like, before any status byte, says `Connection: close`.
 - `priv/muro/http/body.muro` is `bodyClass`, `textOff`, and
@@ -176,13 +200,16 @@
   the book's 100, 400, 413, 417, and 501 literals. The current
   `refl`s are listed at the top of this unreleased section. A positive
   length walks the decimal printer, and that reduction does not
-  finish. `c/test_render` checks the emitted strings, `[]`, a ten-byte
-  row, the emitted `*From` tag helpers, and `Content-Length` for 1664
-  tag combinations. That sweep is a test. The `_Static_assert`s in
-  that driver only pin `c/decision_tags.h` to itself. The book does
-  not import `decide.muro` (see `GAPS.md`, gap 6). Health render
-  allocates 2. An empty row allocates 5. A two-byte row allocates 8.
-  A ten-byte row allocates 10.
+  finish. `c/test_render` calls `httpRender`, `httpHead`,
+  `httpChunked`, `httpDelim`, `httpChunk`, `httpLastChunk`, and the
+  six literals. It checks a ten-byte body, `HEAD` omit of a non-empty
+  body, one chunk of `hi`, the last-chunk bytes `0\r\n\r\n`, and the
+  fixed date `Sun, 06 Nov 1994 08:49:37 GMT`. It does not sweep tag
+  combinations and it does not call the decide `*From` helpers.
+  `c/test_tags` checks those helpers against `decision_tags.h`.
+  Classify allocation counts are in `c/test_classify`: one for
+  `GET /health` and one for a two-byte POST. The book does not
+  import `decide.muro` (see `GAPS.md`, gap 6).
 - `c/muro-httpd` is a hand-written loop. It binds `127.0.0.1`, waits
   with kqueue or epoll, and feeds bytes, peer eof, write progress,
   write done, write error, an idle tick, and db facts through
@@ -199,7 +226,7 @@
   and `c/test_store` check the hand-written pieces. Those are tests.
   A failed connection watch closes that socket. A failed listen watch
   stops the process. muro 0.21.15 and 0.21.16 are not useful here.
-  The pin stays 0.21.14. The library version stays `0.1.0-dev`.
+  The pin is 0.22.14. The library version stays `0.1.0-dev`.
 - `priv/muro/http/admit.muro` is the event-to-move map. `--backend c`
   emits it as `admitChoice`. `c/proto.c` applies that offer and calls
   the stepper. It does not choose the moves. `c/admit_glue.c` unpacks
@@ -207,7 +234,7 @@
   an offer is a legal prefix of `conn` from `st.at`.
   `test/sess_agree_test.exs` does that check by conformance: frozen
   scenario traces and `Conn.check_trace`.
-- Pin muro 0.21.14. `--backend c` emits `priv/muro/http/session.muro`
+- Pin muro 0.22.14. `--backend c` emits `priv/muro/http/session.muro`
   as a stepper. Each move is one `muro__sess_conn_step` call. The HTTP image in
   `conn.muro` stays:
   classify, decide, write ranges, keep-alive, the idle timer, the

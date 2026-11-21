@@ -179,6 +179,15 @@ int main(void) {
   row = httpChunk(of("hi"));
   expect_eq("chunk-hi", row, "2\r\nhi\r\n");
   expect_eq("chunk-last", httpLastChunk(), "0\r\n\r\n");
+  expect_eq("chunked-head", httpChunked(200, of("OK"), of(DATE), of(""), 0),
+            "HTTP/1.1 200 OK\r\nDate: Sun, 06 Nov 1994 08:49:37 GMT\r\n"
+            "Connection: keep-alive\r\nTransfer-Encoding: chunked\r\n\r\n");
+  expect_eq("delim-head", httpDelim(200, of("OK"), of(DATE), of("")),
+            "HTTP/1.1 200 OK\r\nDate: Sun, 06 Nov 1994 08:49:37 GMT\r\n"
+            "Connection: close\r\n\r\n");
+  expect_eq("head-zero", httpHead(200, of("OK"), of(DATE), of(""), 0, 0),
+            "HTTP/1.1 200 OK\r\nDate: Sun, 06 Nov 1994 08:49:37 GMT\r\n"
+            "Connection: keep-alive\r\nContent-Length: 0\r\n\r\n");
   if (host_date_format(784111777, stamped) != 0 || strcmp(stamped, DATE) != 0) bad("imf-date");
   row = httpRender(201, of("Created"), of(DATE), of(json), of("1234567890"), 0, 0);
   if (!content_length(row, &cl, &body) || cl != 10 || body != 10 || !contains(row, "1234567890"))

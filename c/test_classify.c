@@ -157,6 +157,12 @@ int main(void) {
               ST_OK, 1, K_YES);
   classify_of("keep-alive-10", "GET /health HTTP/1.0\r\nConnection: Keep-Alive\r\n\r\n", ST_OK, 1,
               K_YES);
+  classify_of("close-then-alive",
+              "GET /health HTTP/1.1\r\nHost: t\r\nConnection: close\r\nConnection: keep-alive\r\n\r\n",
+              ST_OK, 1, K_NO);
+  classify_of("alive-then-close",
+              "GET /health HTTP/1.1\r\nHost: t\r\nConnection: keep-alive\r\nConnection: close\r\n\r\n",
+              ST_OK, 1, K_NO);
   classify_of("close-ws", "GET /health HTTP/1.1\r\nHost: t\r\nConnection:  close \r\n\r\n", ST_OK, 1,
               K_NO);
   classify_of("empty-target", "GET  HTTP/1.1\r\nHost: t\r\n\r\n", ST_BAD, 0, 0);
@@ -280,6 +286,9 @@ int main(void) {
                 "POST /p HTTP/1.1\r\nHost: t\r\nTransfer-Encoding: chunked\r\nTransfer-Encoding: "
                 "chunked\r\n\r\n",
                 ST_BAD, 0, 0);
+    /* Keep here is the Connection bit. No close token, so HTTP/1.1
+       stays keep-yes. The image forces close for origin 2. That
+       wire close is not this tag. */
     classify_of("te-gzip", "POST /p HTTP/1.1\r\nHost: t\r\nTransfer-Encoding: gzip\r\n\r\n",
                 ST_UNIMPL, 1, K_YES);
     classify_of("te-list", "POST /p HTTP/1.1\r\nHost: t\r\nTransfer-Encoding: chunked, gzip\r\n\r\n",
@@ -305,6 +314,9 @@ int main(void) {
       bad("exp", "two");
     muro_http_reset();
     if (expectCode(of("POST /p HTTP/1.1\r\nHost: t\r\nExpect:\r\n\r\n")) != 2) bad("exp", "empty");
+    expect_chunk("ck-empty",
+                 "POST /p HTTP/1.1\r\nHost: t\r\nTransfer-Encoding: chunked\r\n\r\n0\r\n\r\n", 1, 0,
+                 0);
     expect_chunk("ck-hi", hi, 1, 0, 2);
     expect_chunk("ck-ext", ext, 1, 0, 5);
     expect_chunk("ck-trail", trail, 1, 0, 2);
@@ -336,6 +348,53 @@ int main(void) {
     classify_of("cap-cl", cap, ST_NEED, 0, 0);
     muro_http_reset();
     if (streamTake(of(cap)) != 0) bad("cap-cl", "take");
+    muro_http_reset();
+    if (streamTake(of("POST /posts HTTP/1.1\r\nHost: t\r\nContent-Length: 2\r\n\r\n")) != 0)
+      bad("post-take-short", "take");
+    muro_http_reset();
+    if (streamTake(of("POST /p HTTP/1.1\r\nHost: t\r\nTransfer-Encoding: chunked\r\n\r\n")) != 0)
+      bad("ck-take-hdr", "take");
+    muro_http_reset();
+    if (headerEnd(of("GET /health HTTP/1.1\nHost: t\n\n")) !=
+        strlen("GET /health HTTP/1.1\nHost: t\n\n") + 1)
+      bad("bare-lf", "header-end");
+    muro_http_reset();
+    if (is_true(headersDone(of("GET /health HTTP/1.1\nHost: t\n\n")))) bad("bare-lf", "headers-done");
+    muro_http_reset();
+    if (streamTake(of("POST /p HTTP/1.1\nHost: t\nContent-Length: 16385\n\n")) != 0)
+      bad("stream-take-lf", "take");
+    /* Same inputs as the ExUnit-skipped U64 refls. ExUnit drops them
+       because the normal form is a machine term. These compare the
+       numbers the refls name. */
+    muro_http_reset();
+    if (crlfEnd(of("\r\n\r\n")) != 4) bad("crlf-end", "off");
+    muro_http_reset();
+    if (lfEnd(of("\n\n")) != 2) bad("lf-end", "off");
+    muro_http_reset();
+    if (headerEnd(of("GET /health HTTP/1.1\r\n\r\n")) != 24) bad("hdr-prefers-crlf", "off");
+    muro_http_reset();
+    if (headerCount(of("GET /health HTTP/1.1\r\nHost: t\r\nConnection: close\r\n\r\n")) != 2)
+      bad("header-count", "n");
+    muro_http_reset();
+    if (!same(headerName(of("GET /health HTTP/1.1\r\nHost: t\r\n\r\n"), 0), "Host"))
+      bad("header-name-0", "name");
+    muro_http_reset();
+    if (framedEnd(of("POST /posts HTTP/1.1\r\nHost: t\r\nContent-Length: 2\r\n\r\nab")) != 54)
+      bad("post-framed", "end");
+    muro_http_reset();
+    if (framedEnd(of("POST /posts HTTP/1.1\r\nHost: t\r\nContent-Length: 2\r\n\r\n")) != 52)
+      bad("post-framed-short", "end");
+    muro_http_reset();
+    if (framedEnd(of("POST /p HTTP/1.1\r\nHost: t\r\nTransfer-Encoding: chunked\r\n\r\n0\r\n\r\n")) !=
+        62)
+      bad("ck-framed", "end");
+    muro_http_reset();
+    if (framedEnd(of("POST /p HTTP/1.1\r\nHost: t\r\nTransfer-Encoding: chunked\r\n\r\n")) != 57)
+      bad("ck-framed-hdr", "end");
+    muro_http_reset();
+    if (framedEnd(of(big)) != 52) bad("stream-end-hi", "end");
+    muro_http_reset();
+    if (framedEnd(of(cap)) != 52) bad("stream-end-edge", "end");
     classify_of("cl-overflow",
                 "POST /p HTTP/1.1\r\nHost: t\r\nContent-Length: 99999999999999999999\r\n\r\n",
                 ST_BAD, 0, 0);

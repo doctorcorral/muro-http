@@ -10,9 +10,11 @@
    headers, and the body for a request the book accepted. This
    process owns the sockets, the buffers, the connection table, the
    clock, and poll. It writes 100 Continue, 413, and 417, and it
-   writes 501 for a method the book marks with method code 1. It
-   copies the book's 400 and the book's unimplemented transfer
-   coding. It does not invent a status the book did not name. */
+   writes 501 for a method the book marks with method code 1.
+   host_in_policy does not answer an unknown transfer coding. The
+   host copies the book's 400 and the book's unimplemented transfer
+   coding, which is origin 2. It does not invent a status the book
+   did not name. */
 
 typedef struct MuroHttpSlice {
   const uint8_t *p;

@@ -63,7 +63,9 @@ with `Content-Length` is `status-malformed` (RFC 9112 6.3). Chunked
 on HTTP/1.0 is `status-malformed`. A chunk size that does not fit in
 a `U64` is `status-malformed`. A coding other than `chunked`,
 including `gzip` and `gzip, chunked`, is `status-unimplemented`.
-The host copies that 501. A well-formed length above the configured
+The image stores origin 2 and the host copies `httpNotImplemented`.
+`host_in_policy` does not return 501 for that coding. It returns
+501 only for method code 1. A well-formed length above the configured
 max body is `status-ok` in the book. The host answers 413.
 
 Known methods are `GET`, `HEAD`, `POST`, `PUT`, `DELETE`, `OPTIONS`,
@@ -84,7 +86,9 @@ so the digit fold does not walk an unbounded value. Space or tab
 after the colon is still legal. The request line and the header
 lines end in CRLF (RFC 9112 2.2). A bare LF there is
 `status-malformed` as soon as that byte is seen, including a buffer
-that has not reached a blank line. `OPTIONS *` is a request-target.
+that has not reached a blank line. `headerEnd` returns only the CRLF
+block end, so `headersDone` is false, `streamTake` is 0, and the
+host does not copy a prefix of that buffer. `OPTIONS *` is a request-target.
 `GET  HTTP/1.1` is not. HTTP/1.1 with the headers finished and not
 exactly one `Host` is `status-malformed` (RFC 9112). HTTP/1.0 may
 omit `Host`. A second `Host` is malformed for both. The previous
@@ -92,7 +96,10 @@ challenge server accepted an HTTP/1.1 request that omitted `Host`.
 That request is now 400. `Connection` is a comma-separated list of
 tokens, compared without regard to ASCII case. `enclose` and
 `closeable` do not match `close`. `close, foo` and ` close ` do.
-`Keep-Alive` on HTTP/1.0 keeps the connection. A buffer that has not
+`close` in any `Connection` field closes the connection. A later
+`keep-alive` does not override an earlier `close`, and `close` after
+`keep-alive` still closes (RFC 9110). `Keep-Alive` on HTTP/1.0 keeps
+the connection. A buffer that has not
 reached a CRLF header terminator, or that is shorter than a
 `Content-Length` of at most 16384, is `status-need-more`. The host
 check runs only after the headers are done, so a partial request
@@ -275,9 +282,12 @@ and then refused if it is over the max.
 `Expect: 100-continue` on an otherwise acceptable HTTP/1.1 request
 writes `HTTP/1.1 100 Continue` and `Date` before the body is read,
 unless the body is already in the buffer or the method is `HEAD`.
-The host does not send 100 on HTTP/1.0, and it does not turn that
-Expect into 417. Any other Expect value on HTTP/1.1 is 417 and the
-body is not read.
+A short write leaves the interim outstanding. Until the last byte
+is written the socket is not watched for read, so bytes that arrive
+during that write, including a pipelined request, stay in the kernel
+and are classified together after the interim. The host does not
+send 100 on HTTP/1.0, and it does not turn that Expect into 417. Any
+other Expect value on HTTP/1.1 is 417 and the body is not read.
 
 SIGINT and SIGTERM set a flag. The loop then stops accepting,
 closes idle connections (idle, or read with an empty buffer), and
@@ -286,20 +296,22 @@ process exits 0 when no connection remains or `drain_ms` has passed.
 The default is 1000. `--drain-ms` and `MURO_HTTP_DRAIN_MS` set it,
 from 0 through 86400000. A negative max body or drain time makes
 `muro_http_serve` return -1. The flag is noticed between polls and
-inside `muro_http_body_read`. That arms the drain at once: the
-listen socket closes, idle connections close, and the body read
-keeps going until the body ends or `drain_ms` passes. The process
-then exits 0.
+inside `muro_http_body_read`. That arms the drain at once, on that
+same turn: the listen socket closes, idle connections close, and
+the body read keeps going until the body ends or `drain_ms` passes.
+The process then exits 0.
 
 `c/host.c` owns the sockets, the buffers, the connection table, the
 clock, and `poll`. `make c-check` compiles it with
 `-Wall -Wextra -Werror -std=c11 -O2`, then runs the drivers. The loop
 does not choose a session move. It writes 100, 413, and 417, and
 it writes 501 for a method the book marks with method code 1. It
-copies the book's 400 and the book's unimplemented transfer coding.
-It formats `Date`. The image chooses malformed and unimplemented. A partial `100 Continue` stays
-unsent until `poll` can write the rest. `sent_100` is set only
-after the last byte.
+copies the book's 400 and the book's unimplemented transfer coding
+(origin 2). `host_in_policy` does not answer that coding.
+It formats `Date`. The image chooses malformed and unimplemented.
+A partial `100 Continue` stays unsent until `poll` can write the
+rest, and that socket is not watched for read while the interim is
+short. `sent_100` is set only after the last byte.
 
 `c/host_poll.c` waits with `poll(2)` on macOS and on Linux. The idle
 tick is the poll timeout, armed for the soonest connection deadline.
@@ -576,10 +588,27 @@ close-delimited header block, and a declared length of 0.
 `mix muro.gen` typechecks them and reduces each `refl` under the
 fuel bound. That reduction is the evidence term. It is not a
 separate program, and it is not the poll loop. ExUnit does not run
-this book. A positive `Content-Length` walks `rdShow`, and that
+this book. ExUnit also skips thirty `request.muro` equations and
+three `conn.muro` equations because a result or an argument normal
+form is a machine term. The request names are `crlf-end`, `lf-end`,
+`hdr-prefers-crlf`, `meth-head`, `meth-put`, `meth-trace`,
+`meth-bad`, `meth-star`, `meth-get-star`, `te-chunk`, `te-gzip`,
+`exp-100`, `exp-two`, `ck-empty`, `ck-hi`, `header-count`,
+`header-name-0`, `te-not-final`, `te-gzip-code`, `post-framed`,
+`post-framed-short`, `post-take-short`, `ck-framed`,
+`ck-framed-hdr`, `ck-take-hdr`, `stream-take-hi`, `stream-end-hi`,
+`stream-take-edge`, `stream-end-edge`, and `stream-take-lf`.
+`c/test_classify` checks each of those results. The connection
+names are `unimpl-code` (ExUnit runs `unimpl-origin` instead, and
+`c/test_conn` wants origin 2), `after-close`, and
+`after-close-tick`. A positive `Content-Length` walks `rdShow`, and that
 reduction does not finish, so it is not an equation. `c/test_render`
-checks the emitted bytes, plus the challenge health bytes, a JSON
-array, a 405, and a ten-byte body. That is a test.
+calls `httpRender`, `httpHead`, `httpChunked`, `httpDelim`,
+`httpChunk`, `httpLastChunk`, and the six literals. It checks the
+emitted bytes, plus the challenge health bytes, a JSON array, a 405,
+a ten-byte body, `HEAD` omit of a non-empty body, one chunk of `hi`,
+and the fixed date. That is a test. It does not sweep tag
+combinations. `c/test_tags` checks the decide `*From` helpers.
 
 muro 0.21.15 and 0.21.16 add a temporal check and a synthesis cover.
 They do not change response bytes or this loop. The pin is 0.22.14.
@@ -658,10 +687,13 @@ book linked beside it must not import that book. `decide.muro` and
   `c/test_body.c` checks the scanner.
 - `render-empty-keep` typechecks (`Content-Length: 0`). `render.muro`
   is emitted as C only, so ExUnit does not run it. A positive length
-  walks `rdShow` and is not an equation. `c/test_render` checks a
-  ten-byte body, `HEAD` omit of a non-empty body, one chunk, and the
-  fixed date `Sun, 06 Nov 1994 08:49:37 GMT` in the emitted C. The
-  host clock (`gmtime_r`, English names) is not that equation.
+  walks `rdShow` and is not an equation. `c/test_render` calls
+  `httpRender`, `httpHead`, `httpChunked`, `httpDelim`, `httpChunk`,
+  `httpLastChunk`, and the six literals. It checks a ten-byte body,
+  `HEAD` omit of a non-empty body, one chunk of `hi`, the last-chunk
+  bytes `0\r\n\r\n`, and the fixed date
+  `Sun, 06 Nov 1994 08:49:37 GMT` in the emitted C. The host clock
+  (`gmtime_r`, English names) is not that equation.
 - The body book accepts any octet inside a JSON string, including a
   byte that is not UTF-8. The host turns that `body-ok` into
   `body-malformed` before `decide`. A `\u` surrogate

@@ -15,6 +15,7 @@
 #include <sys/socket.h>
 #include <sys/time.h>
 #include <sys/wait.h>
+#include <time.h>
 #include <unistd.h>
 
 static int failures;
@@ -1134,6 +1135,187 @@ static void check_continue_stall(void) {
   stop_server(pid);
 }
 
+/* Expect: 100-continue, a stalled interim, the body, then a second
+   request, all before the interim finishes. Both responses must
+   arrive. The stall sleeps inside the server, so these waits overlap
+   that window. A 3s receive timeout fails a held pipeline. */
+static void check_continue_pipe(void) {
+  int port = -1;
+  pid_t pid;
+  Conn c;
+  Head h;
+  char body[8];
+  size_t body_n = 0;
+  struct timespec ts;
+  struct timeval tv;
+  const char *hdr = "POST /echo HTTP/1.1\r\nHost: h\r\nContent-Length: 4\r\n"
+                    "Expect: 100-continue\r\n\r\n";
+  const char *second = "GET / HTTP/1.1\r\nHost: h\r\nConnection: close\r\n\r\n";
+  setenv("MURO_TEST_WRITE_LIMIT", "8", 1);
+  setenv("MURO_TEST_100_STALL", "40", 1);
+  pid = start_stream(&port, NULL, NULL);
+  unsetenv("MURO_TEST_WRITE_LIMIT");
+  unsetenv("MURO_TEST_100_STALL");
+  if (pid < 0) return;
+  if (open_conn(port, &c) < 0) {
+    fail("continue-pipe", "connect");
+    stop_server(pid);
+    return;
+  }
+  tv.tv_sec = 3;
+  tv.tv_usec = 0;
+  setsockopt(c.fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv);
+  ts.tv_sec = 0;
+  ts.tv_nsec = 200000000L;
+  if (send_str(c.fd, hdr) < 0) {
+    fail("continue-pipe", "headers");
+    close_conn(&c);
+    stop_server(pid);
+    return;
+  }
+  nanosleep(&ts, NULL);
+  if (send_str(c.fd, "ping") < 0) {
+    fail("continue-pipe", "body");
+    close_conn(&c);
+    stop_server(pid);
+    return;
+  }
+  nanosleep(&ts, NULL);
+  if (send_str(c.fd, second) < 0) {
+    fail("continue-pipe", "pipeline");
+    close_conn(&c);
+    stop_server(pid);
+    return;
+  }
+  if (next_head(&c, &h) < 0 || h.status != 100 || !h.date_ok) {
+    fprintf(stderr, "FAIL continue-pipe: interim %d\n", h.status);
+    failures += 1;
+    close_conn(&c);
+    stop_server(pid);
+    return;
+  }
+  if (next_head(&c, &h) < 0 || take_cl(&c, &h, body, sizeof body, &body_n) < 0 || h.status != 200 ||
+      body_n != 4 || memcmp(body, "ping", 4) != 0) {
+    fail("continue-pipe", "echo");
+    close_conn(&c);
+    stop_server(pid);
+    return;
+  }
+  body_n = 0;
+  if (next_head(&c, &h) < 0 || take_cl(&c, &h, body, sizeof body, &body_n) < 0 || h.status != 200 ||
+      !h.close || body_n != 3 || memcmp(body, "ok\n", 3) != 0)
+    fail("continue-pipe", "next");
+  close_conn(&c);
+  stop_server(pid);
+}
+
+static void recv_limit(Conn *c, int sec) {
+  struct timeval tv;
+  tv.tv_sec = sec;
+  tv.tv_usec = 0;
+  setsockopt(c->fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv);
+}
+
+static void check_stream_cl(int port) {
+  Conn c;
+  Head h;
+  char *payload;
+  char head[160];
+  char small[8];
+  size_t small_n = 0;
+  int hn;
+  hn = snprintf(head, sizeof head, "POST /echo HTTP/1.1\r\nHost: h\r\nContent-Length: 20000\r\n\r\n");
+  payload = malloc(20000);
+  if (!payload || hn < 0 || open_conn(port, &c) < 0) {
+    free(payload);
+    fail("stream-next-cl", "connect");
+    return;
+  }
+  recv_limit(&c, 3);
+  memset(payload, 's', 20000);
+  if (send_all(c.fd, head, (size_t)hn) < 0 || next_head(&c, &h) < 0 || h.status != 200 || !h.has_cl ||
+      h.cl != 20000 || h.close) {
+    fail("stream-next-cl", "headers");
+    free(payload);
+    close_conn(&c);
+    return;
+  }
+  if (send_all(c.fd, payload, 20000) < 0 || check_fill(&c, 20000, 's') < 0) {
+    fail("stream-next-cl", "echo");
+    free(payload);
+    close_conn(&c);
+    return;
+  }
+  free(payload);
+  if (send_str(c.fd, "GET / HTTP/1.1\r\nHost: h\r\nConnection: close\r\n\r\n") < 0 ||
+      next_head(&c, &h) < 0 || take_cl(&c, &h, small, sizeof small, &small_n) < 0 || h.status != 200 ||
+      !h.close || small_n != 3 || memcmp(small, "ok\n", 3) != 0)
+    fail("stream-next-cl", "next");
+  close_conn(&c);
+}
+
+static void check_stream_chunk(int port) {
+  Conn c;
+  Head h;
+  char *partial;
+  char *rest;
+  char *echo;
+  char head[180];
+  char small[8];
+  size_t small_n = 0;
+  size_t echo_n = 0;
+  int hn;
+  hn = snprintf(head, sizeof head,
+                "POST /echo HTTP/1.1\r\nHost: h\r\nTransfer-Encoding: chunked\r\n\r\n4e20\r\n");
+  partial = malloc(17000);
+  rest = malloc(3000);
+  echo = malloc(20001);
+  if (!partial || !rest || !echo || hn < 0 || open_conn(port, &c) < 0) {
+    free(partial);
+    free(rest);
+    free(echo);
+    fail("stream-next-chunk", "connect");
+    return;
+  }
+  recv_limit(&c, 3);
+  memset(partial, 'k', 17000);
+  memset(rest, 'k', 3000);
+  if (send_all(c.fd, head, (size_t)hn) < 0 || send_all(c.fd, partial, 17000) < 0 ||
+      next_head(&c, &h) < 0 || h.status != 200 || !h.chunked || h.close) {
+    fail("stream-next-chunk", "headers");
+    free(partial);
+    free(rest);
+    free(echo);
+    close_conn(&c);
+    return;
+  }
+  free(partial);
+  if (send_all(c.fd, rest, 3000) < 0 || send_str(c.fd, "\r\n0\r\n\r\n") < 0 ||
+      take_chunked(&c, echo, 20001, &echo_n) < 0 || echo_n != 20000) {
+    fail("stream-next-chunk", "echo");
+    free(rest);
+    free(echo);
+    close_conn(&c);
+    return;
+  }
+  free(rest);
+  {
+    size_t i;
+    for (i = 0; i < echo_n; i++) {
+      if (echo[i] != 'k') {
+        fail("stream-next-chunk", "bytes");
+        break;
+      }
+    }
+  }
+  free(echo);
+  if (send_str(c.fd, "GET / HTTP/1.1\r\nHost: h\r\nConnection: close\r\n\r\n") < 0 ||
+      next_head(&c, &h) < 0 || take_cl(&c, &h, small, sizeof small, &small_n) < 0 || h.status != 200 ||
+      !h.close || small_n != 3 || memcmp(small, "ok\n", 3) != 0)
+    fail("stream-next-chunk", "next");
+  close_conn(&c);
+}
+
 int main(int argc, char **argv) {
   pid_t pid;
   int port = -1;
@@ -1205,6 +1387,12 @@ int main(int argc, char **argv) {
             "ok\n", 1);
   expect_cl(port, "close-ws", "GET / HTTP/1.1\r\nHost: h\r\nConnection:  close \r\n\r\n", 200, "ok\n",
             1);
+  expect_cl(port, "close-then-alive",
+            "GET / HTTP/1.1\r\nHost: h\r\nConnection: close\r\nConnection: keep-alive\r\n\r\n", 200,
+            "ok\n", 1);
+  expect_cl(port, "alive-then-close",
+            "GET / HTTP/1.1\r\nHost: h\r\nConnection: keep-alive\r\nConnection: close\r\n\r\n", 200,
+            "ok\n", 1);
   expect_cl(port, "http10-keep", "GET / HTTP/1.0\r\nConnection: Keep-Alive\r\n\r\n", 200, "ok\n", 0);
   expect_cl(port, "bare-lf", "GET / HTTP/1.1\nHost: h\n\n", 400, "malformed", 1);
   expect_cl(port, "empty-target", "GET  HTTP/1.1\r\nHost: h\r\n\r\n", 400, "malformed", 1);
@@ -1233,6 +1421,8 @@ int main(int argc, char **argv) {
   check_head_live(port);
   check_get_blob(port);
   check_post_mib(port);
+  check_stream_cl(port);
+  check_stream_chunk(port);
   stop_server(pid);
 
   pid_small = start_stream(&port_small, "1000", NULL);
@@ -1251,6 +1441,7 @@ int main(int argc, char **argv) {
   check_drain_real();
   check_drain_cut();
   check_continue_stall();
+  check_continue_pipe();
   if (failures != 0) {
     fprintf(stderr, "%d failures\n", failures);
     return 1;

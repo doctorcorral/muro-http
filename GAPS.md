@@ -206,8 +206,12 @@ descriptors, the buffers, the connection table, and the clock. It
 performs the action `step` returns. It writes `100 Continue`, 413,
 and 417, and it writes 501 for a method the book marks with method
 code 1. It copies the book's 400 and the book's unimplemented
-transfer coding. It does not invent a status the book did not name. A
-`muro_http_body_read` that has to wait uses the same poll. Other
+transfer coding (origin 2). `host_in_policy` does not return 501
+for that coding. It does not invent a status the book did not name. A
+partial `100 Continue` is not watched for read until the last byte
+is written. Arming the drain inside `muro_http_body_read` closes
+idle connections on that turn. A `muro_http_body_read` that has to
+wait uses the same poll. Other
 connections are accepted and served. A socket already inside a
 read is left out of that set, and past eight nested reads the wait
 is that socket alone. A read error closes
@@ -276,8 +280,10 @@ length of 0. That reduction is the evidence term. It is not a
 separate program, and it is not the poll loop. `rdShow` of 0 is the literal
 `0`, so an empty body is an equation. A positive length does not
 finish, so a ten-byte body is not an equation, and neither is `HEAD`
-omit of a non-empty body or a positive chunk. `c/test_render` checks
-those in the emitted C, including the fixed date
+omit of a non-empty body or a positive chunk. `c/test_render` calls
+`httpRender`, `httpHead`, `httpChunked`, `httpDelim`, `httpChunk`,
+`httpLastChunk`, and the six literals, and checks those bytes in
+the emitted C, including the fixed date
 `Sun, 06 Nov 1994 08:49:37 GMT`. The host
 formats the live clock in `c/host_date.c` with `gmtime_r` and
 English weekday and month names. That formatter is not a book.
@@ -424,6 +430,9 @@ An unboxed field has to be a machine word, a `WBool`, a `Slice`, an
 or a path. One unused id word stays 0. The image is thirteen words.
 Word 6 is the origin: 0 is a handler response, 1 is the book's
 malformed response, 2 is the book's unimplemented response.
+`c/test_conn` checks that a `gzip` request steps to write with
+origin 2 and keep 1. `health-progress-off` is flag-yes only when
+the write offset is exactly 8. `c/test_conn` wants that field to be 8.
 
 A session payload of `Bytes` or `Slice` is refused. `Piece` and
 `Reply` are fieldless data. The buffer stays on the `Ev` of the image.
@@ -434,10 +443,20 @@ classifies allocates 1. The image does not call `decide`, so a reply
 step allocates 0. The challenge handler's `decide` allocates 1, and
 the handler resets the arena before the next call.
 
-ExUnit skips a closed equation when an argument's normal form is a
-machine term (`argument 1 normal form is a machine term`). `step`
-takes the unboxed `Conn`, so `after-close` and `after-close-tick`
-are reduction evidence and skipped by `test/conn_eq_test.exs`.
-The host suite runs nullary wrappers (`sawAfterDo`, `sawAfterMode`)
-whose results are declared data. Those two `Conn` equations are the
-ones the wrapper does not cover.
+ExUnit skips a closed equation when a result or an argument normal
+form is a machine term. `test/conn_eq_test.exs` skips three:
+`unimpl-code` (the origin word is a `U64`; `unimpl-origin` is the
+flag that runs, and `c/test_conn` wants word 6 to be 2), and
+`after-close` and `after-close-tick` (`step` takes the unboxed
+`Conn`, so the argument normal form is a machine term). The host
+suite runs nullary wrappers (`sawAfterDo`, `sawAfterMode`) whose
+results are declared data. Those two `Conn` equations are the ones
+the wrapper does not cover. `test/request_test.exs` skips thirty,
+all named in `CHANGELOG.md`: the `U64` method, coding, and Expect
+codes, `crlf-end`, `lf-end`, `hdr-prefers-crlf`, `header-count`,
+`header-name-0`, `ck-empty`, `ck-hi`, `te-not-final`,
+`te-gzip-code`, and every `framedEnd` and `streamTake` refl
+(`post-framed`, `post-framed-short`, `post-take-short`,
+`ck-framed`, `ck-framed-hdr`, `ck-take-hdr`, `stream-take-hi`,
+`stream-end-hi`, `stream-take-edge`, `stream-end-edge`,
+`stream-take-lf`). `c/test_classify` checks each of those results.

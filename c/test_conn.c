@@ -304,6 +304,26 @@ static void check_malformed(void) {
   proto_free(proto);
 }
 
+static void check_unimpl(void) {
+  Proto *proto = open_proto("unimpl");
+  Conn st = begin();
+  unsigned long n;
+  const char *gzip = "POST /p HTTP/1.1\r\nHost: t\r\nTransfer-Encoding: gzip\r\n\r\n";
+  if (!proto) return;
+  n = take("unimpl-allocs", &st, proto, evBytes(of(gzip)));
+  if (n != 1) bad("unimpl", "allocs");
+  want("unimpl", st, 0, PH_WRITE);
+  want("unimpl", st, 2, 1);
+  want("unimpl", st, 4, ACT_WRITE);
+  want("unimpl", st, 6, 2);
+  if (!proto_done(proto)) bad("unimpl", "session open");
+  n = take("unimpl-done-allocs", &st, proto, evDone());
+  if (n != 0) bad("unimpl-done", "allocs");
+  want("unimpl-done", st, 0, PH_CLOSED);
+  if (!proto_done(proto)) bad("unimpl-done", "session open");
+  proto_free(proto);
+}
+
 static void check_half(void) {
   Proto *proto = open_proto("half-bytes");
   Conn st = begin();
@@ -535,6 +555,7 @@ int main(void) {
   check_close_header("close", close_req);
   check_close_header("http10", http10);
   check_malformed();
+  check_unimpl();
   check_half();
   check_pipe();
   check_closed();

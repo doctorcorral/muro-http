@@ -56,6 +56,8 @@ void host_in_capture(struct HostIn *in, const uint8_t *buf, size_t n) {
   if (!in || !buf) return;
   sl.p = buf;
   sl.n = n;
+  /* streamTake is 0 unless headerEnd found CRLF CRLF. A bare LF
+     stays unframed here. classify still rejects that buffer. */
   if (streamTake(sl) != 1) {
     muro_http_reset();
     return;
@@ -122,7 +124,7 @@ int host_in_policy(const uint8_t *buf, size_t n, uint64_t max_body, int *send_10
     muro_http_reset();
     return 0;
   }
-  if (meth == 1 || te == 2) {
+  if (meth == 1) {
     muro_http_reset();
     return 501;
   }

@@ -416,8 +416,12 @@ def pickEnd : run Π (+ s : Slice) → Π (+ c : U64) → Π (+ l : U64) → U64
             | true => l
             | false => addi (sliceLen s) (toU64 1))
 
+-- RFC 9112 2.2: the header block ends at CRLF CRLF. A bare LF is
+-- not a framing boundary, even though lfEnd can still see one.
+-- classify rejects that buffer. headerEnd does not consume it, so
+-- streamTake stays 0 and the host does not copy a prefix.
 def headerEnd : run Π (+ s : Slice) → U64 :=
-  λ (+ s : Slice) → pickEnd s (crlfEnd s) (lfEnd s)
+  λ (+ s : Slice) → pickEnd s (crlfEnd s) (addi (sliceLen s) (toU64 1))
 
 def headersDone : run Π (+ s : Slice) → Bool :=
   λ (+ s : Slice) → not (u64eq (headerEnd s) (addi (sliceLen s) (toU64 1)))
@@ -568,13 +572,24 @@ def clValue : run Π (fl : U64) → Π (cl : U64) → Π (+ raw : Slice) → U64
             | true => cl
             | false => parseCL raw)
 
-def finishConn : run Π (+ raw : Slice) → Π (fl : U64) → U64 :=
-  λ (+ raw : Slice) → λ (fl : U64) →
+-- RFC 9110: close in any Connection field closes the connection.
+-- Bit 64 means a Connection field chose close or keep-alive.
+-- Bit 16 means keep-alive. Close clears 16. A later keep-alive
+-- does not set 16 again once close has cleared it. Close in this
+-- field still clears a keep-alive from an earlier field.
+-- 80 is bits 16 and 64. Equal to 64 means close already won, so
+-- this keep-alive leaves the flags. fl is unrestricted, same as
+-- clFlags, because the test and the result both read it.
+def finishConn : run Π (+ raw : Slice) → Π (+ fl : U64) → U64 :=
+  λ (+ raw : Slice) → λ (+ fl : U64) →
     match (hasToken (trimmed raw) b"close") motive (λ _ → U64)
       | true => withBit (noBit (withBit fl (toU64 64)) (toU64 16)) (toU64 64)
       | false =>
           (match (hasToken (trimmed raw) b"keep-alive") motive (λ _ → U64)
-            | true => withBit (withBit fl (toU64 64)) (toU64 16)
+            | true =>
+                (match (u64eq (andi fl (toU64 80)) (toU64 64)) motive (λ _ → U64)
+                  | true => fl
+                  | false => withBit (withBit fl (toU64 64)) (toU64 16))
             | false => fl)
 
 -- One Host is 1. A second Host saturates at 2. The count lives in aS.
@@ -1508,6 +1523,8 @@ def lf-end : evidence {lfEnd b"\n\n" ≡ toU64 2 : U64} := refl
 
 def hdr-prefers-crlf : evidence {headerEnd b"GET /health HTTP/1.1\r\n\r\n" ≡ toU64 24 : U64} := refl
 
+def hdr-bare-lf : evidence {headersDone b"GET /health HTTP/1.1\nHost: t\n\n" ≡ false : Bool} := refl
+
 def query-view : evidence {queryView b"GET /feed?x=1 HTTP/1.1\r\n" ≡ b"x=1" : Slice} := refl
 
 def query-none : evidence {queryView b"GET /feed HTTP/1.1\r\n" ≡ b"" : Slice} := refl
@@ -1636,6 +1653,10 @@ def keep-ws : evidence {keepOf b"GET /health HTTP/1.1\r\nHost: t\r\nConnection: 
 
 def keep-closeable : evidence {keepOf b"GET /health HTTP/1.1\r\nHost: t\r\nConnection: closeable\r\n\r\n" ≡ keep-yes : Keep} := refl
 
+def keep-close-then-alive : evidence {keepOf b"GET /health HTTP/1.1\r\nHost: t\r\nConnection: close\r\nConnection: keep-alive\r\n\r\n" ≡ keep-no : Keep} := refl
+
+def keep-alive-then-close : evidence {keepOf b"GET /health HTTP/1.1\r\nHost: t\r\nConnection: keep-alive\r\nConnection: close\r\n\r\n" ≡ keep-no : Keep} := refl
+
 def post-framed : evidence {framedEnd b"POST /posts HTTP/1.1\r\nHost: t\r\nContent-Length: 2\r\n\r\nab" ≡ toU64 54 : U64} := refl
 
 def post-framed-short : evidence {framedEnd b"POST /posts HTTP/1.1\r\nHost: t\r\nContent-Length: 2\r\n\r\n" ≡ toU64 52 : U64} := refl
@@ -1655,3 +1676,5 @@ def stream-end-hi : evidence {framedEnd b"POST /p HTTP/1.1\r\nHost: t\r\nContent
 def stream-take-edge : evidence {streamTake b"POST /p HTTP/1.1\r\nHost: t\r\nContent-Length: 16384\r\n\r\n" ≡ toU64 0 : U64} := refl
 
 def stream-end-edge : evidence {framedEnd b"POST /p HTTP/1.1\r\nHost: t\r\nContent-Length: 16384\r\n\r\n" ≡ toU64 52 : U64} := refl
+
+def stream-take-lf : evidence {streamTake b"POST /p HTTP/1.1\nHost: t\nContent-Length: 16385\n\n" ≡ toU64 0 : U64} := refl

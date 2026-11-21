@@ -11,8 +11,9 @@
    Origin 2 is a transfer coding the book does not implement. The
    bytes are httpNotImplemented. A committed handler that fails
    before a status byte leaves is httpInternal. This file also writes
-   100 Continue, 413, and 417 when host_in_policy says so. The image
-   still chooses 400 and the unimplemented 501.
+   100 Continue, 413, and 417 when host_in_policy says so, and 501
+   for method code 1. host_in_policy does not answer an unknown
+   transfer coding. The image still chooses 400 and that 501.
 
    The response copy is c/host_render.c, which includes render.h.
    conn.h and render.h both put the prelude under MURO__PRELUDE, so
@@ -39,6 +40,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
+#include <time.h>
 #include <unistd.h>
 
 enum {
@@ -456,8 +458,16 @@ static int write_100(Server *sv, Slot *s) {
     return 1;
   }
   if (sv->stall_100 > 0) {
+    struct timespec ts;
     sv->stall_100 -= 1;
     s->want_write = 1;
+    /* Test hook only. The sleep lets a client push the body and a
+       pipelined request while this interim is still outstanding.
+       Production leaves the counter at 0. */
+    ts.tv_sec = 0;
+    ts.tv_nsec = 20000000L;
+    while (nanosleep(&ts, &ts) < 0 && errno == EINTR)
+      continue;
     return 0;
   }
   while (spins < 8) {
@@ -486,6 +496,27 @@ static int write_100(Server *sv, Slot *s) {
   s->cont_len = 0;
   s->cont_off = 0;
   return 1;
+}
+
+/* 1 when 100 Continue is fully written. 0 when bytes remain: watch
+   POLLOUT and not POLLIN. A read during a short interim steps leftover
+   bytes into HANDLE, and onHandle holds them until the client writes
+   again. -1 on a hard write error. A READ-phase timer still arms the
+   idle deadline, so a peer that never takes the interim still times
+   out. HANDLE has the timer off, so that deadline clears. */
+static int hold_100(Server *sv, Slot *s) {
+  int w100 = write_100(sv, s);
+  int timer;
+  if (w100 != 0) return w100;
+  s->want_read = 0;
+  s->want_write = 1;
+  timer = (int)field(s->st, 5);
+  if (timer) {
+    if (s->deadline == 0) s->deadline = host_poll_now_ms() + (uint64_t)sv->idle_ms;
+  } else {
+    s->deadline = 0;
+  }
+  return 0;
 }
 
 static int copy_fixed(Slot *s, int which) {
@@ -738,15 +769,12 @@ static int pump(Server *sv, Slot *s) {
     uint64_t more = field(s->st, 12);
     spins += 1;
     if (s->cont_len > 0 && !s->sent_100) {
-      int w100 = write_100(sv, s);
+      int w100 = hold_100(sv, s);
       if (w100 < 0) {
         close_slot(sv, s);
         return 0;
       }
-      if (w100 == 0) {
-        if (action == HOST_ACT_READ) s->want_read = 1;
-        return 0;
-      }
+      if (w100 == 0) return 0;
     }
     if (phase == PH_CLOSED || action == HOST_ACT_CLOSE) {
       close_slot(sv, s);
@@ -784,15 +812,12 @@ static int pump(Server *sv, Slot *s) {
         continue;
       }
       if (send100 && !s->sent_100) {
-        int w100 = write_100(sv, s);
+        int w100 = hold_100(sv, s);
         if (w100 < 0) {
           close_slot(sv, s);
           return 0;
         }
-        if (w100 == 0) {
-          s->want_read = 0;
-          return 0;
-        }
+        if (w100 == 0) return 0;
       }
       dec = host_in_bind(&s->hin, s->in, span, &req);
       if (dec) {
@@ -925,20 +950,12 @@ static int pump(Server *sv, Slot *s) {
           return 0;
         }
         if (send100 && !s->sent_100) {
-          int w100 = write_100(sv, s);
+          int w100 = hold_100(sv, s);
           if (w100 < 0) {
             close_slot(sv, s);
             return 0;
           }
-          if (w100 == 0) {
-            s->want_read = 1;
-            if (timer) {
-              if (s->deadline == 0) s->deadline = host_poll_now_ms() + (uint64_t)sv->idle_ms;
-            } else {
-              s->deadline = 0;
-            }
-            return 0;
-          }
+          if (w100 == 0) return 0;
         }
       }
       s->want_read = 1;
@@ -1361,6 +1378,14 @@ static void begin_drain(Server *sv) {
   }
 }
 
+/* begin_drain is idempotent. While draining, close idle slots on
+   every turn, including a turn that started inside a body read.
+   The connection inside the handler is HANDLE, not idle. */
+static void note_drain(Server *sv) {
+  if (stop_flag) begin_drain(sv);
+  if (sv->draining) close_idles(sv);
+}
+
 static int fd_skipped(int fd) {
   int i;
   for (i = 0; i < io_depth; i++) {
@@ -1398,11 +1423,11 @@ int host_io_once(int watch_fd) {
     if (host_io_should_stop()) return -1;
     return poll_one(watch_fd, 200);
   }
-  if (stop_flag) begin_drain(sv);
+  note_drain(sv);
   if (sv->draining && (sv->nconn == 0 || host_poll_now_ms() >= sv->drain_deadline)) return -1;
   if (io_depth >= 8) {
     int rc = poll_one(watch_fd, 200);
-    if (stop_flag) begin_drain(sv);
+    note_drain(sv);
     if (sv->draining && host_poll_now_ms() >= sv->drain_deadline) return -1;
     return rc;
   }
@@ -1430,7 +1455,7 @@ int host_io_once(int watch_fd) {
     io_depth -= 1;
     return -1;
   }
-  if (stop_flag) begin_drain(sv);
+  note_drain(sv);
   for (i = 0; i < n; i++) {
     Slot *s;
     if (evs[i].timer) {
