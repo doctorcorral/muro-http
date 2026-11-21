@@ -28,6 +28,7 @@ data Status : Type where
   status-ok : Status
   status-malformed : Status
   status-need-more : Status
+  status-unimplemented : Status
 
 data Keep : Type where
   keep-yes : Keep
@@ -189,27 +190,82 @@ def nameEq : run Π (+ s : Slice) → Π (+ w : Slice) → Bool :=
       | true => u64nil (nameFold s w)
       | false => false
 
-def prefAt : run Π (+ s : Slice) → Π (i : U64) → Π (+ w : Slice) → Bool :=
-  λ (+ s : Slice) → λ (i : U64) → λ (+ w : Slice) →
-    nameEq (slice s i (sliceLen w)) w
+-- Comma-separated list of tokens (RFC 9110). OWS and comma separate.
+-- A match is one whole token, compared without regard to ASCII case.
+-- A longer token does not match a shorter word: enclose is not close.
+-- ph 0 is between tokens, ph 1 is inside one. idx is how far the word
+-- matched, or one past its length once the token is longer. hit stays
+-- 1 after a separator or the end sees an exact match.
+unboxed data Tok : Type where
+  tok : Π (+ ph : U64) → Π (+ idx : U64) → Π (+ hit : U64) → Tok
 
-def tokStep : run Π (+ s : Slice) → Π (w : Slice) → Π (r : Slice) → Π (+ acc : U64) → U64 :=
-  λ (+ s : Slice) → λ (w : Slice) → λ (r : Slice) → λ (+ acc : U64) →
-    match (u64nil acc) motive (λ _ → U64)
-      | true =>
-          (match (prefAt s (byteIndex s r) w) motive (λ _ → U64)
+def tokPast : run Π (+ w : Slice) → U64 :=
+  λ (+ w : Slice) → addi (sliceLen w) (toU64 1)
+
+def tokSep : run Π (+ b : U8) → Bool :=
+  λ (+ b : U8) →
+    or (or (u8eq b (toU8 32)) (u8eq b (toU8 9))) (u8eq b (toU8 44))
+
+def tokAdvance : run Π (+ w : Slice) → Π (+ idx : U64) → Π (+ b : U8) → U64 :=
+  λ (+ w : Slice) → λ (+ idx : U64) → λ (+ b : U8) →
+    match (u64eq idx (tokPast w)) motive (λ _ → U64)
+      | true => idx
+      | false =>
+          (match (u64lt idx (sliceLen w)) motive (λ _ → U64)
+            | true =>
+                (match (u8eq (lower b) (lower (byteAt w idx))) motive (λ _ → U64)
+                  | true => addi idx (toU64 1)
+                  | false => tokPast w)
+            | false => tokPast w)
+
+def tokMark : run Π (+ w : Slice) → Π (+ idx : U64) → Π (+ hit : U64) → U64 :=
+  λ (+ w : Slice) → λ (+ idx : U64) → λ (+ hit : U64) →
+    match (u64eq hit (toU64 1)) motive (λ _ → U64)
+      | true => toU64 1
+      | false =>
+          (match (u64eq idx (sliceLen w)) motive (λ _ → U64)
             | true => toU64 1
             | false => toU64 0)
-      | false => acc
 
+def tokByte : run Π (+ w : Slice) → Π (+ st : Tok) → Π (+ b : U8) → Tok :=
+  λ (+ w : Slice) → λ (+ st : Tok) → λ (+ b : U8) →
+    match st motive (λ _ → Tok)
+      | tok ph idx hit =>
+          (match (u64eq hit (toU64 1)) motive (λ _ → Tok)
+            | true => st
+            | false =>
+                (match (tokSep b) motive (λ _ → Tok)
+                  | true =>
+                      (match (u64eq ph (toU64 1)) motive (λ _ → Tok)
+                        | true => tok (toU64 0) (toU64 0) (tokMark w idx hit)
+                        | false => tok (toU64 0) (toU64 0) hit)
+                  | false =>
+                      (match (u64eq ph (toU64 0)) motive (λ _ → Tok)
+                        | true => tok (toU64 1) (tokAdvance w (toU64 0) b) hit
+                        | false => tok (toU64 1) (tokAdvance w idx b) hit)))
+
+def tokFinish : run Π (+ w : Slice) → Π (+ st : Tok) → U64 :=
+  λ (+ w : Slice) → λ (+ st : Tok) →
+    match st motive (λ _ → U64)
+      | tok ph idx hit =>
+          (match (u64eq ph (toU64 1)) motive (λ _ → U64)
+            | true => tokMark w idx hit
+            | false => hit)
+
+-- A value that is exactly the word never enters the token fold.
+-- That fold is what makes a 10-byte hit too slow to reduce.
+-- Commas and extra words still take the fold.
 def hasToken : run Π (+ s : Slice) → Π (+ w : Slice) → Bool :=
   λ (+ s : Slice) → λ (+ w : Slice) →
     match (isEmpty w) motive (λ _ → Bool)
       | true => false
       | false =>
-          not (u64nil (sliceFold U64 (toU64 0)
-            (λ (_b : U8) → λ (r : Slice) → λ (acc : U64) → tokStep s w r acc)
-            s))
+          (match (nameEq s w) motive (λ _ → Bool)
+            | true => true
+            | false =>
+                not (u64nil (tokFinish w (sliceFold Tok (tok (toU64 0) (toU64 0) (toU64 0))
+                  (λ (b : U8) → λ (_r : Slice) → λ (st : Tok) → tokByte w st b)
+                  s))))
 
 def isDigit : run Π (+ b : U8) → Bool :=
   λ (+ b : U8) →
@@ -375,15 +431,17 @@ def withBit : run Π (f : U64) → Π (bit : U64) → U64 :=
 def noBit : run Π (f : U64) → Π (bit : U64) → U64 :=
   λ (f : U64) → λ (bit : U64) → andi f (noti bit)
 
--- 2^32 marks a rejected Content-Length. A well-formed length is
--- below that bit. Overflow, and any value that sets the bit, reject.
--- A declared body longer than 16384 is streamed by the host.
+-- 2^32 is not a Content-Length. A well-formed length is below it.
+-- The test is the value, not one bit: 2^33 is above the bound too.
+-- Overflow during the digit fold returns this same sentinel.
+-- A declared body longer than 16384, and still below the bound, is
+-- streamed by the host.
 -- A closed word, so the C emit is a literal and not a Nat walk.
 def clBad : run U64 :=
   toU64 4294967296
 
 def clRejected : run Π (v : U64) → Bool :=
-  λ (v : U64) → not (u64nil (andi v clBad))
+  λ (v : U64) → not (u64lt v clBad)
 
 -- Reject before the multiply when another digit cannot fit in U64.
 -- clLim * 10 + 5 is 2^64-1. A larger digit overflows.
@@ -425,13 +483,14 @@ def digitsOrLong : run Π (+ s : Slice) → U64 :=
       | true => clBad
       | false => digitsVal s
 
+-- Content-Length is 1*DIGIT (RFC 9110 8.6). A leading plus is not a digit.
 def parseCL : run Π (+ s : Slice) → U64 :=
   λ (+ s : Slice) →
     match (isEmpty s) motive (λ _ → U64)
       | true => clBad
       | false =>
           (match (u8eq (byteAt s (toU64 0)) (toU8 43)) motive (λ _ → U64)
-            | true => digitsOrLong (slice s (toU64 1) (subi (sliceLen s) (toU64 1)))
+            | true => clBad
             | false => digitsOrLong s)
 
 def missingSpace : run Π (+ s : Slice) → Bool :=
@@ -443,8 +502,11 @@ def versionOk : run Π (+ s : Slice) → Bool :=
   λ (+ s : Slice) →
     or (spanEq (versionTok s) b"HTTP/1.1") (spanEq (versionTok s) b"HTTP/1.0")
 
+-- The request-target is not optional. OPTIONS * is a target. A second
+-- space, as in `GET  HTTP/1.1`, leaves the target empty.
 def lineOk : run Π (+ s : Slice) → Bool :=
-  λ (+ s : Slice) → and (not (missingSpace s)) (versionOk s)
+  λ (+ s : Slice) →
+    and (not (isEmpty (targetView s))) (and (not (missingSpace s)) (versionOk s))
 
 def keepDefault : run Π (+ s : Slice) → Keep :=
   λ (+ s : Slice) →
@@ -551,7 +613,8 @@ def finishLine : run Π (+ buf : Slice) → Π (+ i : U64) → Π (+ ls : U64) �
                         | false => hst i ls (toU64 3) (withBit fl (toU64 32)) cl aS aL wh mark)))
 -- Transfer-Encoding token class. ph 0 before a token, 1 inside,
 -- 2 after it. fl: 1 bad, 2 a coding other than chunked, 4 one
--- chunked, 8 chunked twice, 16 a comma still needs a token.
+-- chunked, 8 chunked twice, 16 a comma still needs a token,
+-- 32 the last coding was chunked.
 unboxed data TeSt : Type where
   teSt : Π (+ ph : U64) → Π (+ idx : U64) → Π (+ fl : U64) → TeSt
 
@@ -601,12 +664,12 @@ def teClose : run Π (+ st : TeSt) → TeSt :=
                 (match (u64eq idx (toU64 7)) motive (λ _ → TeSt)
                   | true =>
                       (match (has fl (toU64 4)) motive (λ _ → TeSt)
-                        | true => teSt (toU64 2) idx (noBit (withBit fl (toU64 8)) (toU64 16))
-                        | false => teSt (toU64 2) idx (noBit (withBit fl (toU64 4)) (toU64 16)))
+                        | true => teSt (toU64 2) idx (noBit (withBit (withBit fl (toU64 8)) (toU64 32)) (toU64 16))
+                        | false => teSt (toU64 2) idx (noBit (withBit (withBit fl (toU64 4)) (toU64 32)) (toU64 16)))
                   | false =>
                       (match (u64eq idx (toU64 0)) motive (λ _ → TeSt)
                         | true => teSt (toU64 2) idx (withBit fl (toU64 1))
-                        | false => teSt (toU64 2) idx (noBit (withBit fl (toU64 2)) (toU64 16)))))
+                        | false => teSt (toU64 2) idx (noBit (noBit (withBit fl (toU64 2)) (toU64 16)) (toU64 32)))))
 
 def teComma : run Π (+ st : TeSt) → TeSt :=
   λ (+ st : TeSt) →
@@ -676,21 +739,27 @@ def teFl : run Π (+ st : TeSt) → U64 :=
     match st motive (λ _ → U64)
       | teSt _ph _idx fl => fl
 
--- 128 bad, 256 a coding other than a single chunked, 512 chunked.
+-- 128 bad. That includes chunked twice, and chunked that is not the
+-- final coding (RFC 9112 6.1). 256 is a coding other than chunked
+-- when chunked is absent or is the final coding. 512 is one chunked
+-- coding and it is final. Bit 32 means the last token was chunked.
 def teClass : run Π (+ fl : U64) → U64 :=
   λ (+ fl : U64) →
     match (has fl (toU64 1)) motive (λ _ → U64)
       | true => toU64 128
       | false =>
-          (match (has fl (toU64 2)) motive (λ _ → U64)
-            | true => toU64 256
+          (match (has fl (toU64 8)) motive (λ _ → U64)
+            | true => toU64 128
             | false =>
-                (match (has fl (toU64 8)) motive (λ _ → U64)
+                (match (and (has fl (toU64 2)) (and (has fl (toU64 4)) (not (has fl (toU64 32))))) motive (λ _ → U64)
                   | true => toU64 128
                   | false =>
-                      (match (has fl (toU64 4)) motive (λ _ → U64)
-                        | true => toU64 512
-                        | false => toU64 128)))
+                      (match (has fl (toU64 2)) motive (λ _ → U64)
+                        | true => toU64 256
+                        | false =>
+                            (match (has fl (toU64 4)) motive (λ _ → U64)
+                              | true => toU64 512
+                              | false => toU64 128))))
 
 def teBits : run Π (+ raw : Slice) → U64 :=
   λ (+ raw : Slice) →
@@ -756,15 +825,28 @@ def onColon : run Π (+ buf : Slice) → Π (+ i : U64) → Π (+ ls : U64) → 
       | true => hst (addi i (toU64 1)) ls (toU64 1) (withBit fl (toU64 1)) cl aS aL (whichOf (slice buf ls (subi i ls))) (addi i (toU64 1))
       | false => hst (addi i (toU64 1)) ls (toU64 1) (withBit (withBit fl (toU64 1)) (toU64 32)) cl aS aL (toU64 5) (addi i (toU64 1))
 
-def stepB : run Π (+ buf : Slice) → Π (+ b : U8) → Π (i : U64) → Π (+ st : HSt) → HSt :=
-  λ (+ buf : Slice) → λ (+ b : U8) → λ (i : U64) → λ (+ st : HSt) →
+-- A line feed that is not preceded by CR is a bare LF. Index 0 has
+-- no predecessor. RFC 9112 2.2 requires CRLF in the request line and
+-- the header section. Bit 8192 records that. The body is not scanned:
+-- phase 2 or 3 returns the same state before this test.
+def crBefore : run Π (+ buf : Slice) → Π (+ i : U64) → Bool :=
+  λ (+ buf : Slice) → λ (+ i : U64) →
+    match (u64nil i) motive (λ _ → Bool)
+      | true => false
+      | false => u8eq (byteAt buf (subi i (toU64 1))) (toU8 13)
+
+def stepB : run Π (+ buf : Slice) → Π (+ b : U8) → Π (+ i : U64) → Π (+ st : HSt) → HSt :=
+  λ (+ buf : Slice) → λ (+ b : U8) → λ (+ i : U64) → λ (+ st : HSt) →
     match st motive (λ _ → HSt)
       | hst _i ls ph fl cl aS aL wh mark =>
           (match (or (u64eq ph (toU64 2)) (u64eq ph (toU64 3))) motive (λ _ → HSt)
             | true => st
             | false =>
                 (match (u8eq b (toU8 10)) motive (λ _ → HSt)
-                  | true => finishLine buf i ls ph fl cl aS aL wh mark
+                  | true =>
+                      (match (crBefore buf i) motive (λ _ → HSt)
+                        | true => finishLine buf i ls ph fl cl aS aL wh mark
+                        | false => finishLine buf i ls ph (withBit fl (toU64 8192)) cl aS aL wh mark)
                   | false =>
                       (match (u64eq ph (toU64 4)) motive (λ _ → HSt)
                         | true => st
@@ -1200,35 +1282,45 @@ def chunkStatus : run Π (+ s : Slice) → Status :=
                         | true => status-ok
                         | false => status-need-more)))
 
+-- A bare LF is malformed even when the header block is unfinished.
+-- An unknown transfer coding is status-unimplemented here, so a
+-- caller that only reads classify cannot treat it as success.
+-- Chunked that is not final is teBad and stays malformed.
 def statusOfSt : run Π (+ st : HSt) → Π (+ s : Slice) → Status :=
   λ (+ st : HSt) → λ (+ s : Slice) →
-    match (headersDone s) motive (λ _ → Status)
-      | true =>
-          (match (gt16384 (headerEnd s)) motive (λ _ → Status)
-            | true => status-malformed
-            | false =>
-                (match (lineOk s) motive (λ _ → Status)
-                  | true =>
-                      (match (headersOkSt st) motive (λ _ → Status)
-                        | true =>
-                            (match (or (methodBad s) (or (teBadSt st) (hostBadSt st s))) motive (λ _ → Status)
-                              | true => status-malformed
-                              | false =>
-                                  (match (teChunkSt st) motive (λ _ → Status)
-                                    | true => chunkStatus s
-                                    | false =>
-                                        (match (streamLenSt st s) motive (λ _ → Status)
-                                          | true => status-ok
-                                          | false =>
-                                              (match (bodyShortSt st s) motive (λ _ → Status)
-                                                | true => status-need-more
-                                                | false => status-ok))))
-                        | false => status-malformed)
-                  | false => status-malformed))
+    match (has (scanFl st) (toU64 8192)) motive (λ _ → Status)
+      | true => status-malformed
       | false =>
-          (match (gt16384 (sliceLen s)) motive (λ _ → Status)
-            | true => status-malformed
-            | false => status-need-more)
+          (match (headersDone s) motive (λ _ → Status)
+            | true =>
+                (match (gt16384 (headerEnd s)) motive (λ _ → Status)
+                  | true => status-malformed
+                  | false =>
+                      (match (lineOk s) motive (λ _ → Status)
+                        | true =>
+                            (match (headersOkSt st) motive (λ _ → Status)
+                              | true =>
+                                  (match (or (methodBad s) (or (teBadSt st) (hostBadSt st s))) motive (λ _ → Status)
+                                    | true => status-malformed
+                                    | false =>
+                                        (match (teUnkSt st) motive (λ _ → Status)
+                                          | true => status-unimplemented
+                                          | false =>
+                                              (match (teChunkSt st) motive (λ _ → Status)
+                                                | true => chunkStatus s
+                                                | false =>
+                                                    (match (streamLenSt st s) motive (λ _ → Status)
+                                                      | true => status-ok
+                                                      | false =>
+                                                          (match (bodyShortSt st s) motive (λ _ → Status)
+                                                            | true => status-need-more
+                                                            | false => status-ok)))))
+                              | false => status-malformed)
+                        | false => status-malformed))
+            | false =>
+                (match (gt16384 (sliceLen s)) motive (λ _ → Status)
+                  | true => status-malformed
+                  | false => status-need-more))
 
 def statusOf : run Π (+ s : Slice) → Status :=
   λ (+ s : Slice) → statusOfSt (scan s) s
@@ -1504,6 +1596,62 @@ def http10-class : evidence {classify b"GET /health HTTP/1.0\r\n\r\n" ≡ classi
 
 def close-class : evidence {classify b"GET /health HTTP/1.1\r\nHost: t\r\nConnection: close\r\n\r\n" ≡ classified status-ok keep-no : Classified} := refl
 
-def gap-class : evidence {classify b"GET  HTTP/1.1\r\nHost: t\r\n\r\n" ≡ classified status-ok keep-yes : Classified} := refl
+def gap-class : evidence {classify b"GET  HTTP/1.1\r\nHost: t\r\n\r\n" ≡ classified status-malformed keep-yes : Classified} := refl
 
 def partial-need : evidence {statusOf b"GET /health HTTP/1.1\r\n" ≡ status-need-more : Status} := refl
+
+def lf-class : evidence {statusOf b"GET /health HTTP/1.1\nHost: t\n\n" ≡ status-malformed : Status} := refl
+
+def lf-blank : evidence {statusOf b"GET /health HTTP/1.1\r\nHost: t\r\n\n" ≡ status-malformed : Status} := refl
+
+def lf-one : evidence {statusOf b"GET /health HTTP/1.1\n" ≡ status-malformed : Status} := refl
+
+def cl-plus : evidence {statusOf b"POST /p HTTP/1.1\r\nHost: t\r\nContent-Length: +1\r\n\r\n" ≡ status-malformed : Status} := refl
+
+def cl-max : evidence {statusOf b"POST /p HTTP/1.1\r\nHost: t\r\nContent-Length: 4294967295\r\n\r\n" ≡ status-ok : Status} := refl
+
+def cl-bound : evidence {statusOf b"POST /p HTTP/1.1\r\nHost: t\r\nContent-Length: 4294967296\r\n\r\n" ≡ status-malformed : Status} := refl
+
+def cl-wide : evidence {statusOf b"POST /p HTTP/1.1\r\nHost: t\r\nContent-Length: 8589934592\r\n\r\n" ≡ status-malformed : Status} := refl
+
+def cl-long : evidence {statusOf b"POST /p HTTP/1.1\r\nHost: t\r\nContent-Length: 0000000000000000000000000000000000000000\r\n\r\n" ≡ status-malformed : Status} := refl
+
+def te-not-final : evidence {teCode b"POST /p HTTP/1.1\r\nHost: t\r\nTransfer-Encoding: chunked, gzip\r\n\r\n" ≡ toU64 3 : U64} := refl
+
+def te-not-final-st : evidence {statusOf b"POST /p HTTP/1.1\r\nHost: t\r\nTransfer-Encoding: chunked, gzip\r\n\r\n" ≡ status-malformed : Status} := refl
+
+def te-gzip-st : evidence {statusOf b"POST /p HTTP/1.1\r\nHost: t\r\nTransfer-Encoding: gzip\r\n\r\n" ≡ status-unimplemented : Status} := refl
+
+def te-gzip-final : evidence {statusOf b"POST /p HTTP/1.1\r\nHost: t\r\nTransfer-Encoding: gzip, chunked\r\n\r\n" ≡ status-unimplemented : Status} := refl
+
+def te-gzip-code : evidence {teCode b"POST /p HTTP/1.1\r\nHost: t\r\nTransfer-Encoding: gzip, chunked\r\n\r\n" ≡ toU64 2 : U64} := refl
+
+def keep-enclose : evidence {keepOf b"GET /health HTTP/1.1\r\nHost: t\r\nConnection: enclose\r\n\r\n" ≡ keep-yes : Keep} := refl
+
+def keep-close-foo : evidence {keepOf b"GET /health HTTP/1.1\r\nHost: t\r\nConnection: close, foo\r\n\r\n" ≡ keep-no : Keep} := refl
+
+def keep-alive-10 : evidence {keepOf b"GET /health HTTP/1.0\r\nConnection: Keep-Alive\r\n\r\n" ≡ keep-yes : Keep} := refl
+
+def keep-ws : evidence {keepOf b"GET /health HTTP/1.1\r\nHost: t\r\nConnection:  close \r\n\r\n" ≡ keep-no : Keep} := refl
+
+def keep-closeable : evidence {keepOf b"GET /health HTTP/1.1\r\nHost: t\r\nConnection: closeable\r\n\r\n" ≡ keep-yes : Keep} := refl
+
+def post-framed : evidence {framedEnd b"POST /posts HTTP/1.1\r\nHost: t\r\nContent-Length: 2\r\n\r\nab" ≡ toU64 54 : U64} := refl
+
+def post-framed-short : evidence {framedEnd b"POST /posts HTTP/1.1\r\nHost: t\r\nContent-Length: 2\r\n\r\n" ≡ toU64 52 : U64} := refl
+
+def post-take-short : evidence {streamTake b"POST /posts HTTP/1.1\r\nHost: t\r\nContent-Length: 2\r\n\r\n" ≡ toU64 0 : U64} := refl
+
+def ck-framed : evidence {framedEnd b"POST /p HTTP/1.1\r\nHost: t\r\nTransfer-Encoding: chunked\r\n\r\n0\r\n\r\n" ≡ toU64 62 : U64} := refl
+
+def ck-framed-hdr : evidence {framedEnd b"POST /p HTTP/1.1\r\nHost: t\r\nTransfer-Encoding: chunked\r\n\r\n" ≡ toU64 57 : U64} := refl
+
+def ck-take-hdr : evidence {streamTake b"POST /p HTTP/1.1\r\nHost: t\r\nTransfer-Encoding: chunked\r\n\r\n" ≡ toU64 0 : U64} := refl
+
+def stream-take-hi : evidence {streamTake b"POST /p HTTP/1.1\r\nHost: t\r\nContent-Length: 16385\r\n\r\n" ≡ toU64 1 : U64} := refl
+
+def stream-end-hi : evidence {framedEnd b"POST /p HTTP/1.1\r\nHost: t\r\nContent-Length: 16385\r\n\r\n" ≡ toU64 52 : U64} := refl
+
+def stream-take-edge : evidence {streamTake b"POST /p HTTP/1.1\r\nHost: t\r\nContent-Length: 16384\r\n\r\n" ≡ toU64 0 : U64} := refl
+
+def stream-end-edge : evidence {framedEnd b"POST /p HTTP/1.1\r\nHost: t\r\nContent-Length: 16384\r\n\r\n" ≡ toU64 52 : U64} := refl

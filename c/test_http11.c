@@ -213,13 +213,32 @@ static int week_ok(const char *w) {
   return 0;
 }
 
-static int mon_ok(const char *m) {
+static int mon_index(const char *m) {
   static const char *mons[] = {"Jan", "Feb", "Mar", "Apr", "May", "Jun",
                                "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"};
   int i;
   for (i = 0; i < 12; i++)
-    if (strcmp(m, mons[i]) == 0) return 1;
+    if (strcmp(m, mons[i]) == 0) return i + 1;
   return 0;
+}
+
+static int wday_index(const char *w) {
+  static const char *days[] = {"Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"};
+  int i;
+  for (i = 0; i < 7; i++)
+    if (strcmp(w, days[i]) == 0) return i;
+  return -1;
+}
+
+/* Sakamoto. 0 is Sunday. 1994-11-06 is Sunday. */
+static int civil_wday(int year, int month, int day) {
+  static const int t[] = {0, 3, 2, 5, 0, 3, 5, 1, 4, 6, 2, 4};
+  int y = year;
+  int w;
+  if (month < 3) y -= 1;
+  w = (y + y / 4 - y / 100 + y / 400 + t[month - 1] + day) % 7;
+  if (w < 0) w += 7;
+  return w;
 }
 
 /* IMF-fixdate is 29 characters: "Wdy, DD Mon YYYY HH:MM:SS GMT". */
@@ -238,8 +257,9 @@ static int imf_ok(const char *s) {
   if (sscanf(s, "%3s, %2d %3s %4d %2d:%2d:%2d %3s", wday, &day, mon, &year, &hh, &mm, &ss, gmt) !=
       8)
     return 0;
-  if (!week_ok(wday) || !mon_ok(mon) || strcmp(gmt, "GMT") != 0) return 0;
+  if (!week_ok(wday) || mon_index(mon) == 0 || strcmp(gmt, "GMT") != 0) return 0;
   if (day < 1 || day > 31 || year < 1970 || hh > 23 || mm > 59 || ss > 60) return 0;
+  if (wday_index(wday) != civil_wday(year, mon_index(mon), day)) return 0;
   return 1;
 }
 
@@ -883,6 +903,20 @@ static void check_drain_real(void) {
   }
   kill(pid, SIGTERM);
   {
+    int closed = 0;
+    int j;
+    for (j = 0; j < 25; j++) {
+      int fd = dial_tv(port, 1);
+      if (fd < 0) {
+        closed = 1;
+        break;
+      }
+      close(fd);
+      usleep(20000);
+    }
+    if (!closed) fail("drain", "listen stayed open");
+  }
+  {
     char rest[19900];
     memset(rest, 'q', sizeof rest);
     if (send_all(post.fd, rest, sizeof rest) < 0 || read_fill_n(&post, 20000, 'q') < 0)
@@ -949,6 +983,157 @@ static void check_drain_real(void) {
   if (!(WIFEXITED(status) && WEXITSTATUS(status) == 0)) fail("drain", "status");
 }
 
+static void check_drain_cut(void) {
+  int port = -1;
+  pid_t pid = start_stream(&port, NULL, "400");
+  Conn post;
+  Head h;
+  char head[160];
+  char partial[64];
+  int hn;
+  int status = 0;
+  int saw = 0;
+  int i;
+  int closed = 0;
+  memset(&post, 0, sizeof post);
+  post.fd = -1;
+  if (pid < 0) return;
+  hn = snprintf(head, sizeof head, "POST /echo HTTP/1.1\r\nHost: h\r\nContent-Length: 20000\r\n\r\n");
+  memset(partial, 'q', sizeof partial);
+  if (hn < 0 || open_conn(port, &post) < 0 || send_all(post.fd, head, (size_t)hn) < 0 ||
+      send_all(post.fd, partial, sizeof partial) < 0 || next_head(&post, &h) < 0 || h.status != 200) {
+    fail("drain-cut", "inflight");
+    close_conn(&post);
+    stop_server(pid);
+    return;
+  }
+  kill(pid, SIGTERM);
+  for (i = 0; i < 25; i++) {
+    int fd = dial_tv(port, 1);
+    if (fd < 0) {
+      closed = 1;
+      break;
+    }
+    close(fd);
+    usleep(20000);
+  }
+  if (!closed) fail("drain-cut", "listen stayed open");
+  close_conn(&post);
+  for (i = 0; i < 40; i++) {
+    pid_t got = waitpid(pid, &status, WNOHANG);
+    if (got == pid) {
+      saw = 1;
+      break;
+    }
+    usleep(50000);
+  }
+  if (!saw) {
+    kill(pid, SIGKILL);
+    waitpid(pid, NULL, 0);
+    fail("drain-cut", "did not exit");
+    return;
+  }
+  if (!(WIFEXITED(status) && WEXITSTATUS(status) == 0)) fail("drain-cut", "status");
+}
+
+static void check_two(int port) {
+  Conn a;
+  Conn b;
+  Head ha;
+  Head hb;
+  char small[8];
+  size_t small_n = 0;
+  char head[160];
+  char partial[32];
+  char rest[19968];
+  int hn;
+  memset(&a, 0, sizeof a);
+  memset(&b, 0, sizeof b);
+  a.fd = -1;
+  b.fd = -1;
+  hn = snprintf(head, sizeof head, "POST /echo HTTP/1.1\r\nHost: h\r\nContent-Length: 20000\r\n\r\n");
+  memset(partial, 'm', sizeof partial);
+  if (hn < 0 || open_conn(port, &a) < 0 || send_all(a.fd, head, (size_t)hn) < 0 ||
+      send_all(a.fd, partial, sizeof partial) < 0 || next_head(&a, &ha) < 0 || ha.status != 200 ||
+      !ha.has_cl || ha.cl != 20000) {
+    fail("two", "post");
+    close_conn(&a);
+    return;
+  }
+  if (open_conn(port, &b) < 0 || send_str(b.fd, "GET / HTTP/1.1\r\nHost: h\r\n\r\n") < 0 ||
+      next_head(&b, &hb) < 0 || take_cl(&b, &hb, small, sizeof small, &small_n) < 0 ||
+      hb.status != 200 || small_n != 3 || memcmp(small, "ok\n", 3) != 0) {
+    fail("two", "other");
+    close_conn(&a);
+    close_conn(&b);
+    return;
+  }
+  memset(rest, 'm', sizeof rest);
+  if (send_all(a.fd, rest, sizeof rest) < 0 || read_fill_n(&a, 20000, 'm') < 0) fail("two", "echo");
+  close_conn(&a);
+  close_conn(&b);
+}
+
+static void check_http10_expect(int port) {
+  Conn c;
+  Head h;
+  char body[8];
+  size_t body_n = 0;
+  const char *req = "POST /echo HTTP/1.0\r\nContent-Length: 4\r\nExpect: 100-continue\r\n\r\nping";
+  if (open_conn(port, &c) < 0) {
+    fail("http10-expect", "connect");
+    return;
+  }
+  if (send_str(c.fd, req) < 0 || next_head(&c, &h) < 0) {
+    fail("http10-expect", "headers");
+    close_conn(&c);
+    return;
+  }
+  if (h.status != 200 || !h.date_ok || !h.close || h.chunked) {
+    fprintf(stderr, "FAIL http10-expect: status %d close %d\n", h.status, h.close);
+    failures += 1;
+  }
+  if (!h.has_cl || take_cl(&c, &h, body, sizeof body, &body_n) < 0 || body_n != 4 ||
+      memcmp(body, "ping", 4) != 0)
+    fail("http10-expect", "body");
+  close_conn(&c);
+}
+
+static void check_continue_stall(void) {
+  int port = -1;
+  pid_t pid;
+  Conn c;
+  Head h;
+  char body[8];
+  size_t body_n = 0;
+  const char *req = "POST /echo HTTP/1.1\r\nHost: h\r\nContent-Length: 4\r\n"
+                    "Expect: 100-continue\r\n\r\n";
+  setenv("MURO_TEST_WRITE_LIMIT", "8", 1);
+  setenv("MURO_TEST_100_STALL", "1", 1);
+  pid = start_stream(&port, NULL, NULL);
+  unsetenv("MURO_TEST_WRITE_LIMIT");
+  unsetenv("MURO_TEST_100_STALL");
+  if (pid < 0) return;
+  if (open_conn(port, &c) < 0) {
+    fail("continue-stall", "connect");
+    stop_server(pid);
+    return;
+  }
+  if (send_str(c.fd, req) < 0 || next_head(&c, &h) < 0 || h.status != 100 || !h.date_ok) {
+    fprintf(stderr, "FAIL continue-stall: interim %d\n", h.status);
+    failures += 1;
+    close_conn(&c);
+    stop_server(pid);
+    return;
+  }
+  if (send_str(c.fd, "ping") < 0 || next_head(&c, &h) < 0 ||
+      take_cl(&c, &h, body, sizeof body, &body_n) < 0 || h.status != 200 || body_n != 4 ||
+      memcmp(body, "ping", 4) != 0)
+    fail("continue-stall", "echo");
+  close_conn(&c);
+  stop_server(pid);
+}
+
 int main(int argc, char **argv) {
   pid_t pid;
   int port = -1;
@@ -1009,8 +1194,25 @@ int main(int argc, char **argv) {
   expect_cl(port, "te-gzip", "POST /echo HTTP/1.1\r\nHost: h\r\nTransfer-Encoding: gzip\r\n\r\n", 501,
             "unimplemented", 1);
   expect_cl(port, "te-list",
-            "POST /echo HTTP/1.1\r\nHost: h\r\nTransfer-Encoding: chunked, gzip\r\n\r\n", 501,
+            "POST /echo HTTP/1.1\r\nHost: h\r\nTransfer-Encoding: chunked, gzip\r\n\r\n", 400,
+            "malformed", 1);
+  expect_cl(port, "te-gzip-final",
+            "POST /echo HTTP/1.1\r\nHost: h\r\nTransfer-Encoding: gzip, chunked\r\n\r\n", 501,
             "unimplemented", 1);
+  expect_cl(port, "enclose", "GET / HTTP/1.1\r\nHost: h\r\nConnection: enclose\r\n\r\n", 200, "ok\n",
+            0);
+  expect_cl(port, "close-foo", "GET / HTTP/1.1\r\nHost: h\r\nConnection: close, foo\r\n\r\n", 200,
+            "ok\n", 1);
+  expect_cl(port, "close-ws", "GET / HTTP/1.1\r\nHost: h\r\nConnection:  close \r\n\r\n", 200, "ok\n",
+            1);
+  expect_cl(port, "http10-keep", "GET / HTTP/1.0\r\nConnection: Keep-Alive\r\n\r\n", 200, "ok\n", 0);
+  expect_cl(port, "bare-lf", "GET / HTTP/1.1\nHost: h\n\n", 400, "malformed", 1);
+  expect_cl(port, "empty-target", "GET  HTTP/1.1\r\nHost: h\r\n\r\n", 400, "malformed", 1);
+  expect_cl(port, "cl-plus", "POST /echo HTTP/1.1\r\nHost: h\r\nContent-Length: +1\r\n\r\nx", 400,
+            "malformed", 1);
+  expect_cl(port, "cl-bound",
+            "POST /echo HTTP/1.1\r\nHost: h\r\nContent-Length: 4294967296\r\n\r\n", 400,
+            "malformed", 1);
   expect_cl(port, "te-twice",
             "POST /echo HTTP/1.1\r\nHost: h\r\nTransfer-Encoding: chunked\r\n"
             "Transfer-Encoding: chunked\r\n\r\n",
@@ -1025,6 +1227,8 @@ int main(int argc, char **argv) {
             "POST /echo HTTP/1.1\r\nHost: h\r\nContent-Length: 4\r\nExpect: nope\r\n\r\n", 417,
             "expectation", 1);
   check_continue(port);
+  check_http10_expect(port);
+  check_two(port);
   check_http10(port);
   check_head_live(port);
   check_get_blob(port);
@@ -1045,6 +1249,8 @@ int main(int argc, char **argv) {
   }
 
   check_drain_real();
+  check_drain_cut();
+  check_continue_stall();
   if (failures != 0) {
     fprintf(stderr, "%d failures\n", failures);
     return 1;

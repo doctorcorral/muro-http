@@ -5,7 +5,9 @@
    request is complete enough to handle. This file decodes a finished
    chunked body, reads a body the 64 KiB window will not hold, and
    remembers bytes that arrived after a streamed chunked message.
-   It does not choose a response. */
+   A socket read waits in the server poll, so other connections
+   still run. host_in_policy names 413, 417, and 501 for a method
+   code of 1. The read path does not invent the handler's status. */
 
 #include "muro_http.h"
 #include "conn.h"
@@ -68,5 +70,10 @@ int host_in_take_next(struct HostIn *in, uint8_t **p, size_t *n);
 
 /* 1 when a drain deadline has passed. The host loop defines it. */
 int host_io_should_stop(void);
+
+/* One turn of the server poll. 0 when the caller should try its
+   read again. -1 when the drain deadline has passed or poll failed.
+   Outside the server this waits on watch_fd alone. */
+int host_io_once(int watch_fd);
 
 #endif

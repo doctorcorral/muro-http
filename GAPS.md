@@ -203,8 +203,15 @@ step allocates 0.
 waits with `poll(2)`. `examples/challenge/httpd.c` and
 `examples/hello/hello.c` are each a `main`. The core owns the file
 descriptors, the buffers, the connection table, and the clock. It
-performs the action `step` returns. It does not choose a status, a
-header, or a body. A read error closes the fd. It is not `evError`.
+performs the action `step` returns. It writes `100 Continue`, 413,
+and 417, and it writes 501 for a method the book marks with method
+code 1. It copies the book's 400 and the book's unimplemented
+transfer coding. It does not invent a status the book did not name. A
+`muro_http_body_read` that has to wait uses the same poll. Other
+connections are accepted and served. A socket already inside a
+read is left out of that set, and past eight nested reads the wait
+is that socket alone. A read error closes
+the fd. It is not `evError`.
 That event holds in the read phase. A full receive buffer that the
 image did not consume is a host limit. Closing it is not a status.
 A body declared longer than 16384 is streamed, so it does not sit
@@ -259,12 +266,14 @@ no body bytes. `omit` 1 on `httpRender` drops the body and keeps
 `Content-Length`.
 
 `render.muro` is emitted as C only, so ExUnit does not run it.
-`mix muro.gen` typechecks the empty keep, empty close, 204, `HEAD`
-of an empty body, the six dated literals (`httpMalformed`,
-`httpInternal`, `httpNotImplemented`, `httpTooLarge`, `httpExpect`,
+`mix muro.gen` typechecks and reduces, under the fuel bound, the
+empty keep, empty close, 204, `HEAD` of an empty body, the six
+dated literals (`httpMalformed`, `httpInternal`,
+`httpNotImplemented`, `httpTooLarge`, `httpExpect`,
 `httpContinue`), the last-chunk bytes `0\r\n\r\n`, the chunked
 header block, the close-delimited header block, and a declared
-length of 0. Evidence is not a run. `rdShow` of 0 is the literal
+length of 0. That reduction is the evidence term. It is not a
+separate program, and it is not the poll loop. `rdShow` of 0 is the literal
 `0`, so an empty body is an equation. A positive length does not
 finish, so a ten-byte body is not an equation, and neither is `HEAD`
 omit of a non-empty body or a positive chunk. `c/test_render` checks
@@ -414,7 +423,7 @@ An unboxed field has to be a machine word, a `WBool`, a `Slice`, an
 `Opt` of those, or more unboxed data. `Conn` does not store a verb
 or a path. One unused id word stays 0. The image is thirteen words.
 Word 6 is the origin: 0 is a handler response, 1 is the book's
-malformed response.
+malformed response, 2 is the book's unimplemented response.
 
 A session payload of `Bytes` or `Slice` is refused. `Piece` and
 `Reply` are fieldless data. The buffer stays on the `Ev` of the image.

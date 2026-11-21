@@ -33,8 +33,9 @@ not name an application route. `classify` takes a `Slice` of the
 request line, the headers, and any body bytes already in that buffer.
 It returns a `Classified` value:
 
-- status: `status-ok`, `status-malformed`, or `status-need-more`
-- keepalive, from the HTTP version and an optional `Connection` token
+- status: `status-ok`, `status-malformed`, `status-need-more`, or
+  `status-unimplemented`
+- keepalive, from the HTTP version and `Connection` tokens
 
 `methodView`, `targetView`, `pathView`, `queryView`, `versionView`,
 and `bodyView` are zero-copy views. `pathView` strips the query at
@@ -54,14 +55,16 @@ bytes already in the buffer, and it is empty for a chunked body.
 The host decodes a finished chunked message, or streams one that
 does not finish inside the window.
 
-`Transfer-Encoding: chunked` is the only coding. Extensions are
-skipped. A trailer line needs a colon; the host drops the trailers.
-`Transfer-Encoding` together with `Content-Length` is
-`status-malformed` (RFC 9112 6.3). Chunked on HTTP/1.0 is
-`status-malformed`. A chunk size that does not fit in a `U64` is
-`status-malformed`. A coding other than `chunked` is not
-malformed. The host answers 501. A well-formed length above the
-configured max body is not malformed either. The host answers 413.
+`Transfer-Encoding: chunked` is the only coding the host reads.
+Extensions are skipped. A trailer line needs a colon; the host drops
+the trailers. `chunked` has to be the final coding (RFC 9112 6.1):
+`chunked, gzip` is `status-malformed`. `Transfer-Encoding` together
+with `Content-Length` is `status-malformed` (RFC 9112 6.3). Chunked
+on HTTP/1.0 is `status-malformed`. A chunk size that does not fit in
+a `U64` is `status-malformed`. A coding other than `chunked`,
+including `gzip` and `gzip, chunked`, is `status-unimplemented`.
+The host copies that 501. A well-formed length above the configured
+max body is `status-ok` in the book. The host answers 413.
 
 Known methods are `GET`, `HEAD`, `POST`, `PUT`, `DELETE`, `OPTIONS`,
 and `PATCH`, case-sensitive. `OPTIONS` with target `*` is known. Any
@@ -72,17 +75,34 @@ other Expect value is not malformed. On HTTP/1.1 the host answers
 417.
 
 A line without a colon, whitespace before the colon, a bad version,
-a missing space, a second `Content-Length`, a duplicate `Host`, or a
-`Content-Length` that does not fit in 32 bits is `status-malformed`.
-Space or tab after the colon is still legal. HTTP/1.1 with the
-headers finished and not exactly one `Host` is `status-malformed`
-(RFC 9112). HTTP/1.0 may omit `Host`. A second `Host` is malformed
-for both. The previous challenge server accepted an HTTP/1.1 request
-that omitted `Host`. That request is now 400. A buffer that has not
-reached the header terminator, or that is shorter than a
+a missing space, an empty request-target, a second `Content-Length`,
+a duplicate `Host`, or a `Content-Length` of 4294967296 or more is
+`status-malformed`. `4294967295` is a legal length. The host streams
+it when the body has not arrived. A leading `+` is malformed (RFC
+9110 8.6). A trimmed digit string of 32 bytes or more is malformed,
+so the digit fold does not walk an unbounded value. Space or tab
+after the colon is still legal. The request line and the header
+lines end in CRLF (RFC 9112 2.2). A bare LF there is
+`status-malformed` as soon as that byte is seen, including a buffer
+that has not reached a blank line. `OPTIONS *` is a request-target.
+`GET  HTTP/1.1` is not. HTTP/1.1 with the headers finished and not
+exactly one `Host` is `status-malformed` (RFC 9112). HTTP/1.0 may
+omit `Host`. A second `Host` is malformed for both. The previous
+challenge server accepted an HTTP/1.1 request that omitted `Host`.
+That request is now 400. `Connection` is a comma-separated list of
+tokens, compared without regard to ASCII case. `enclose` and
+`closeable` do not match `close`. `close, foo` and ` close ` do.
+`Keep-Alive` on HTTP/1.0 keeps the connection. A buffer that has not
+reached a CRLF header terminator, or that is shorter than a
 `Content-Length` of at most 16384, is `status-need-more`. The host
 check runs only after the headers are done, so a partial request
-stays need-more. The function is total.
+that still uses CRLF stays need-more. The function is total.
+`framedEnd` is the first byte after this message. `streamTake` is 1
+when the host must read the rest from the socket. Both have `refl`s
+for a short `Content-Length`, an empty chunk, and the 16384 / 16385
+boundary with no body bytes. A body of that size is a C test
+(`stream-cl`, `cap-cl`), because the evidence term would carry the
+body.
 
 Routing lives in the handler. The challenge routes are
 `priv/muro/challenge/route.muro` (`routeVerb`, `routePath`, `routeId`,
@@ -115,7 +135,9 @@ still `mode-decide`, so the admission map and the session traces
 keep their positions. A write carries a range of length 16. That
 range is not the message. The host owns the response bytes. The
 book chooses a malformed request: origin 1, keep close, action
-write, and the bytes are `httpMalformed`. `endOff` is the first byte
+write, and the bytes are `httpMalformed`. An unknown transfer
+coding is the same write with origin 2, and the bytes are
+`httpNotImplemented`. `endOff` is the first byte
 after the request. `more` is set when the buffer holds bytes past
 that, so the shim can re-step a pipelined tail. The step does not
 slice the buffer.
@@ -232,9 +254,12 @@ written.
 
 `req->body_in` reads the body. A buffered body is already in
 `req->body` as well. A streamed body has `req->body.n == 0` and
-`muro_http_body_read` pulls the rest, through `poll(2)` when the
-socket has nothing queued. One connection is in that read at a time.
-The other sockets wait. If the handler returns without reading a
+`muro_http_body_read` pulls the rest, through the server `poll(2)`
+when the socket has nothing queued. That wait accepts and serves
+other connections. A nested read does not watch a socket that is
+already inside a read, so those bytes stay in the kernel until the
+inner read returns. Past eight nested reads, the wait is this
+socket alone. If the handler returns without reading a
 streamed body, and the response pull will not read it either, the
 host closes. That keeps unread body bytes from being parsed as the
 next request. `MuroHttpResponse.pull` is the response side. With
@@ -260,17 +285,21 @@ lets a request that has already reached the handler finish. The
 process exits 0 when no connection remains or `drain_ms` has passed.
 The default is 1000. `--drain-ms` and `MURO_HTTP_DRAIN_MS` set it,
 from 0 through 86400000. A negative max body or drain time makes
-`muro_http_serve` return -1. The flag is noticed between polls. A
-handler blocked in `muro_http_body_read` runs to the end of that
-read, or until the drain deadline if the deadline was already
-armed. The listen socket stays open until the loop resumes.
+`muro_http_serve` return -1. The flag is noticed between polls and
+inside `muro_http_body_read`. That arms the drain at once: the
+listen socket closes, idle connections close, and the body read
+keeps going until the body ends or `drain_ms` passes. The process
+then exits 0.
 
 `c/host.c` owns the sockets, the buffers, the connection table, the
 clock, and `poll`. `make c-check` compiles it with
 `-Wall -Wextra -Werror -std=c11 -O2`, then runs the drivers. The loop
-does not choose a session move. It does choose 100, 413, 417, and
-501 from the classifier's method, coding, length, and Expect fields,
-and it formats `Date`. The image still chooses a malformed request.
+does not choose a session move. It writes 100, 413, and 417, and
+it writes 501 for a method the book marks with method code 1. It
+copies the book's 400 and the book's unimplemented transfer coding.
+It formats `Date`. The image chooses malformed and unimplemented. A partial `100 Continue` stays
+unsent until `poll` can write the rest. `sent_100` is set only
+after the last byte.
 
 `c/host_poll.c` waits with `poll(2)` on macOS and on Linux. The idle
 tick is the poll timeout, armed for the soonest connection deadline.
@@ -538,13 +567,19 @@ case, so a developer environment does not change the result. The
 bind case sets `MURO_HTTP_BIND=nope` and `--bind 127.0.0.1`, then
 checks `GET /health`. Those are tests.
 
-The reduction equations in `render.muro` are the reduction evidence
-(refl) for the strings they name. There are five: an empty keep
-response, an empty close response, 204, `httpMalformed`, and
-`httpInternal`. A positive `Content-Length` walks `rdShow`, and that
-reduction does not finish. `c/test_render` checks those five strings
-in the emitted C, plus the challenge health bytes, a JSON array, a
-405, and a ten-byte body. That is a test.
+The reduction equations in `render.muro` are the `refl`s for the
+strings they name: an empty keep response, an empty close response,
+204, `HEAD` of an empty body, `httpMalformed`, `httpInternal`,
+`httpNotImplemented`, `httpTooLarge`, `httpExpect`, `httpContinue`,
+the last-chunk bytes `0\r\n\r\n`, the chunked header block, the
+close-delimited header block, and a declared length of 0.
+`mix muro.gen` typechecks them and reduces each `refl` under the
+fuel bound. That reduction is the evidence term. It is not a
+separate program, and it is not the poll loop. ExUnit does not run
+this book. A positive `Content-Length` walks `rdShow`, and that
+reduction does not finish, so it is not an equation. `c/test_render`
+checks the emitted bytes, plus the challenge health bytes, a JSON
+array, a 405, and a ten-byte body. That is a test.
 
 muro 0.21.15 and 0.21.16 add a temporal check and a synthesis cover.
 They do not change response bytes or this loop. The pin is 0.22.14.
@@ -584,8 +619,11 @@ timeout, a bad request, half-close, bare FIN, and a chunk.
 
 `--backend c` emits the core books `request.muro` (classify, the
 views, `findHeader`), `conn.muro`, `session.muro`, `admit.muro`, and
-`render.muro` (`httpRender`, `httpMalformed`, `httpInternal`). It
-emits the challenge books `decide.muro`, `route.muro`, and
+`render.muro` (`httpRender`, `httpHead`, `httpChunked`, `httpDelim`,
+`httpChunk`, `httpLastChunk`, `httpMalformed`, `httpInternal`,
+`httpNotImplemented`, `httpTooLarge`, `httpExpect`, `httpContinue`).
+`request.muro` also emits `streamTake` and `framedEnd`. The same
+backend emits the challenge books `decide.muro`, `route.muro`, and
 `body.muro` (`bodyClass`, `textOff`, `textLen`). `--backend fsm`
 emits `family.muro` as `MuroHttp.FamilyFsm`. That backend is the one
 that emits a keyed family. The C backend omits it, and `c/host.c`

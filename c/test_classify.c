@@ -8,7 +8,7 @@
 #include <stdio.h>
 #include <string.h>
 
-enum { ST_OK = 0, ST_BAD = 1, ST_NEED = 2, K_YES = 0, K_NO = 1 };
+enum { ST_OK = 0, ST_BAD = 1, ST_NEED = 2, ST_UNIMPL = 3, K_YES = 0, K_NO = 1 };
 
 static int failures;
 
@@ -149,6 +149,20 @@ int main(void) {
   classify_of("http10-dup", "GET /health HTTP/1.0\r\nHost: a\r\nHost: b\r\n\r\n", ST_BAD, 0, 0);
   classify_of("close", "GET /health HTTP/1.1\r\nHost: t\r\nConnection: close\r\n\r\n", ST_OK, 1,
               K_NO);
+  classify_of("enclose", "GET /health HTTP/1.1\r\nHost: t\r\nConnection: enclose\r\n\r\n", ST_OK, 1,
+              K_YES);
+  classify_of("close-foo", "GET /health HTTP/1.1\r\nHost: t\r\nConnection: close, foo\r\n\r\n",
+              ST_OK, 1, K_NO);
+  classify_of("closeable", "GET /health HTTP/1.1\r\nHost: t\r\nConnection: closeable\r\n\r\n",
+              ST_OK, 1, K_YES);
+  classify_of("keep-alive-10", "GET /health HTTP/1.0\r\nConnection: Keep-Alive\r\n\r\n", ST_OK, 1,
+              K_YES);
+  classify_of("close-ws", "GET /health HTTP/1.1\r\nHost: t\r\nConnection:  close \r\n\r\n", ST_OK, 1,
+              K_NO);
+  classify_of("empty-target", "GET  HTTP/1.1\r\nHost: t\r\n\r\n", ST_BAD, 0, 0);
+  classify_of("bare-lf", "GET /health HTTP/1.1\nHost: t\n\n", ST_BAD, 0, 0);
+  classify_of("bare-lf-one", "GET /health HTTP/1.1\n", ST_BAD, 0, 0);
+  classify_of("cl-plus", "POST /p HTTP/1.1\r\nHost: t\r\nContent-Length: +1\r\n\r\n", ST_BAD, 0, 0);
   classify_of("te", "POST /p HTTP/1.1\r\nHost: t\r\nTransfer-Encoding: chunked\r\n\r\n", ST_NEED, 0,
               0);
   classify_of("glued-line", "GET/feed HTTP/1.1\r\n\r\n", ST_BAD, 0, 0);
@@ -244,8 +258,11 @@ int main(void) {
     if (teCode(of("POST /p HTTP/1.1\r\nHost: t\r\nTransfer-Encoding: gzip\r\n\r\n")) != 2)
       bad("te", "gzip");
     muro_http_reset();
-    if (teCode(of("POST /p HTTP/1.1\r\nHost: t\r\nTransfer-Encoding: chunked, gzip\r\n\r\n")) != 2)
+    if (teCode(of("POST /p HTTP/1.1\r\nHost: t\r\nTransfer-Encoding: chunked, gzip\r\n\r\n")) != 3)
       bad("te", "list");
+    muro_http_reset();
+    if (teCode(of("POST /p HTTP/1.1\r\nHost: t\r\nTransfer-Encoding: gzip, chunked\r\n\r\n")) != 2)
+      bad("te", "gzip-final");
     muro_http_reset();
     if (teCode(of("POST /p HTTP/1.1\r\nHost: t\r\nTransfer-Encoding: chunked, chunked\r\n\r\n")) != 3)
       bad("te", "twice");
@@ -263,8 +280,13 @@ int main(void) {
                 "POST /p HTTP/1.1\r\nHost: t\r\nTransfer-Encoding: chunked\r\nTransfer-Encoding: "
                 "chunked\r\n\r\n",
                 ST_BAD, 0, 0);
-    classify_of("te-gzip", "POST /p HTTP/1.1\r\nHost: t\r\nTransfer-Encoding: gzip\r\n\r\n", ST_OK, 1,
-                K_YES);
+    classify_of("te-gzip", "POST /p HTTP/1.1\r\nHost: t\r\nTransfer-Encoding: gzip\r\n\r\n",
+                ST_UNIMPL, 1, K_YES);
+    classify_of("te-list", "POST /p HTTP/1.1\r\nHost: t\r\nTransfer-Encoding: chunked, gzip\r\n\r\n",
+                ST_BAD, 0, 0);
+    classify_of("te-gzip-final",
+                "POST /p HTTP/1.1\r\nHost: t\r\nTransfer-Encoding: gzip, chunked\r\n\r\n", ST_UNIMPL,
+                1, K_YES);
     classify_of("te-hi", hi, ST_OK, 1, K_YES);
     muro_http_reset();
     if (bodyView(of(hi)).n != 0) bad("te-hi", "body view");
@@ -316,6 +338,20 @@ int main(void) {
     if (streamTake(of(cap)) != 0) bad("cap-cl", "take");
     classify_of("cl-overflow",
                 "POST /p HTTP/1.1\r\nHost: t\r\nContent-Length: 99999999999999999999\r\n\r\n",
+                ST_BAD, 0, 0);
+    classify_of("cl-max", "POST /p HTTP/1.1\r\nHost: t\r\nContent-Length: 4294967295\r\n\r\n",
+                ST_OK, 1, K_YES);
+    muro_http_reset();
+    if (contentLength(of("POST /p HTTP/1.1\r\nHost: t\r\nContent-Length: 4294967295\r\n\r\n")) !=
+        4294967295ull)
+      bad("cl-max", "value");
+    classify_of("cl-bound", "POST /p HTTP/1.1\r\nHost: t\r\nContent-Length: 4294967296\r\n\r\n",
+                ST_BAD, 0, 0);
+    classify_of("cl-wide", "POST /p HTTP/1.1\r\nHost: t\r\nContent-Length: 8589934592\r\n\r\n",
+                ST_BAD, 0, 0);
+    classify_of("cl-long",
+                "POST /p HTTP/1.1\r\nHost: t\r\nContent-Length: "
+                "0000000000000000000000000000000000000000\r\n\r\n",
                 ST_BAD, 0, 0);
   }
 

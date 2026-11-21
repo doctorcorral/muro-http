@@ -329,24 +329,15 @@ int host_in_take_next(struct HostIn *in, uint8_t **p, size_t *n) {
 }
 
 static int wait_read(struct HostIn *in) {
-  struct pollfd pfd;
-  pfd.fd = in->fd;
-  pfd.events = POLLIN;
-  for (;;) {
-    int pr;
-    if (host_io_should_stop()) {
-      in->err = 400;
-      return -1;
-    }
-    pr = poll(&pfd, 1, 200);
-    if (pr < 0 && errno == EINTR) continue;
-    if (pr < 0) {
-      in->err = 400;
-      return -1;
-    }
-    if (pr == 0) continue;
-    return 0;
+  if (host_io_should_stop()) {
+    in->err = 400;
+    return -1;
   }
+  if (host_io_once(in->fd) < 0) {
+    in->err = 400;
+    return -1;
+  }
+  return 0;
 }
 
 static void save_rest(struct HostIn *in) {
@@ -377,6 +368,7 @@ static void save_rest(struct HostIn *in) {
 
 static int take_byte(struct HostIn *in, uint8_t *b) {
   ssize_t r;
+  for (;;) {
   if (in->hold_off < in->hold_len) {
     *b = in->hold[in->hold_off++];
     return 1;
@@ -387,7 +379,7 @@ static int take_byte(struct HostIn *in, uint8_t *b) {
   }
   if (wait_read(in) < 0) return -1;
   r = read(in->fd, in->scratch, sizeof in->scratch);
-  if (r < 0 && (errno == EINTR || errno == EAGAIN || errno == EWOULDBLOCK)) return take_byte(in, b);
+  if (r < 0 && (errno == EINTR || errno == EAGAIN || errno == EWOULDBLOCK)) continue;
   if (r < 0) {
     in->err = 400;
     return -1;
@@ -397,6 +389,7 @@ static int take_byte(struct HostIn *in, uint8_t *b) {
   in->scratch_off = 0;
   *b = in->scratch[in->scratch_off++];
   return 1;
+  }
 }
 
 static int read_mem(struct HostIn *in, uint8_t *dst, size_t cap) {
@@ -429,19 +422,21 @@ static int read_cl(struct HostIn *in, uint8_t *dst, size_t cap) {
     if (in->got >= in->need) in->open = 0;
     return (int)h;
   }
-  if (wait_read(in) < 0) return -1;
-  r = read(in->fd, dst, left);
-  if (r < 0 && (errno == EINTR || errno == EAGAIN || errno == EWOULDBLOCK)) return read_cl(in, dst, cap);
-  if (r < 0 || r == 0) {
-    in->err = 400;
-    in->open = 1;
-    return -1;
+  for (;;) {
+    if (wait_read(in) < 0) return -1;
+    r = read(in->fd, dst, left);
+    if (r < 0 && (errno == EINTR || errno == EAGAIN || errno == EWOULDBLOCK)) continue;
+    if (r < 0 || r == 0) {
+      in->err = 400;
+      in->open = 1;
+      return -1;
+    }
+    n = (size_t)r;
+    if (n > left) n = left;
+    in->got += n;
+    if (in->got >= in->need) in->open = 0;
+    return (int)n;
   }
-  n = (size_t)r;
-  if (n > left) n = left;
-  in->got += n;
-  if (in->got >= in->need) in->open = 0;
-  return (int)n;
 }
 
 static int read_chunk(struct HostIn *in, uint8_t *dst, size_t cap) {

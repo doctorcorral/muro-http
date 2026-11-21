@@ -19,7 +19,8 @@
 -- progress stores the delta in n0.
 -- writeLen is 16 for every response. The shim owns the bytes; the
 -- range is writeOff and writeLen. Field 6 is the origin: 0 handler,
--- 1 protocol malformed. The book chooses the 400. The shim does not.
+-- 1 protocol malformed, 2 transfer coding the book does not implement.
+-- The book chooses the 400 and that 501. The shim copies the literal.
 -- endOff is the first byte after the request. more is 1 when the
 -- buffer holds bytes past that, so the shim can re-step the tail.
 --
@@ -78,6 +79,10 @@ def badWrite : run Π (+ fin : U64) → Conn :=
   λ (+ fin : U64) →
     conn (toU64 2) fin (toU64 1) (toU64 0) (toU64 2) (toU64 0) (toU64 1) (toU64 0) (toU64 0) (toU64 0) respLen (toU64 0) (toU64 0)
 
+def unimplWrite : run Π (+ fin : U64) → Conn :=
+  λ (+ fin : U64) →
+    conn (toU64 2) fin (toU64 1) (toU64 0) (toU64 2) (toU64 0) (toU64 2) (toU64 0) (toU64 0) (toU64 0) respLen (toU64 0) (toU64 0)
+
 def keepTag : run Π (k : Keep) → U64 :=
   λ (k : Keep) →
     match k motive (λ _ → U64)
@@ -113,7 +118,8 @@ def onClass : run Π (+ fin : U64) → Π (+ buf : Slice) → Π (c : Classified
             | status-need-more =>
                 (match (u64eq fin (toU64 1)) motive (λ _ → Conn)
                   | true => badWrite fin
-                  | false => waitRead))
+                  | false => waitRead)
+            | status-unimplemented => unimplWrite fin)
 
 def onBytes : run Π (+ fin : U64) → Π (+ buf : Slice) → Conn :=
   λ (+ fin : U64) → λ (+ buf : Slice) →
@@ -346,6 +352,9 @@ def http10Req : run Slice :=
 def badReq : run Slice :=
   b"GET/feed HTTP/1.1\r\n\r\n"
 
+def gzipReq : run Slice :=
+  b"POST /p HTTP/1.1\r\nHost: t\r\nTransfer-Encoding: gzip\r\n\r\n"
+
 def pipeReq : run Slice :=
   b"GET /health HTTP/1.1\r\nHost: t\r\n\r\nGET /feed HTTP/1.1\r\nHost: t\r\n\r\n"
 
@@ -412,6 +421,13 @@ def sawHttp10 : run Mode :=
 
 def sawBad : run Mode :=
   mode (step begin (evBytes badReq))
+
+def sawUnimpl : run Mode :=
+  mode (step begin (evBytes gzipReq))
+
+def sawUnimplCode : run U64 :=
+  match (step begin (evBytes gzipReq)) motive (λ _ → U64)
+    | conn _phase _half _keep _idc _action _timer code _err _act _off _len _endOff _more => code
 
 def sawBadDone : run Mode :=
   mode (step (step begin (evBytes badReq)) evDone)
@@ -486,6 +502,10 @@ def close-req : evidence {sawClose ≡ mode-closed : Mode} := refl
 def http10-req : evidence {sawHttp10 ≡ mode-closed : Mode} := refl
 
 def malformed : evidence {sawBad ≡ mode-write : Mode} := refl
+
+def unimpl-write : evidence {sawUnimpl ≡ mode-write : Mode} := refl
+
+def unimpl-code : evidence {sawUnimplCode ≡ toU64 2 : U64} := refl
 
 def malformed-done : evidence {sawBadDone ≡ mode-closed : Mode} := refl
 

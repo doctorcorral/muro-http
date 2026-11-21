@@ -36,7 +36,8 @@ static int parse_port(const char *line, const char *host) {
   return port;
 }
 
-static pid_t start_hello(const char *env_bind, const char *bind_host, int *port) {
+static pid_t start_hello(const char *env_bind, const char *bind_host, int *port,
+                        const char *drain_ms) {
   int sp[2];
   pid_t pid;
   char buf[128];
@@ -75,6 +76,10 @@ static pid_t start_hello(const char *env_bind, const char *bind_host, int *port)
     }
     av[argc++] = "--idle-ms";
     av[argc++] = "5000";
+    if (drain_ms) {
+      av[argc++] = "--drain-ms";
+      av[argc++] = (char *)drain_ms;
+    }
     av[argc] = NULL;
     execv(bin_path, av);
     perror("exec");
@@ -351,6 +356,150 @@ static void check_help(void) {
   if (strstr(buf, "--bind") == NULL) fail("help", "usage");
 }
 
+static int send_n(int fd, const void *p, size_t n) {
+  const char *s = p;
+  size_t off = 0;
+  while (off < n) {
+    ssize_t w = send(fd, s + off, n - off, 0);
+    if (w < 0 && errno == EINTR) continue;
+    if (w <= 0) return -1;
+    off += (size_t)w;
+  }
+  return 0;
+}
+
+static void check_stream_echo(const char *host, int port) {
+  int fd = dial(host, port);
+  char head[128];
+  char *payload = NULL;
+  char *buf = NULL;
+  int hn;
+  size_t n = 0;
+  int status = 0;
+  int conn_close = 0;
+  char body_probe[8];
+  size_t body_n = 0;
+  size_t i;
+  hn = snprintf(head, sizeof head, "POST /echo HTTP/1.1\r\nHost: t\r\nContent-Length: 20000\r\n\r\n");
+  payload = malloc(20000);
+  buf = malloc(22000);
+  if (fd < 0 || hn < 0 || !payload || !buf) {
+    fail("stream-echo", "setup");
+    if (fd >= 0) close(fd);
+    free(payload);
+    free(buf);
+    return;
+  }
+  memset(payload, 'z', 20000);
+  if (send_n(fd, head, (size_t)hn) < 0 || send_n(fd, payload, 20000) < 0) {
+    fail("stream-echo", "send");
+    close(fd);
+    free(payload);
+    free(buf);
+    return;
+  }
+  while (n < 22000) {
+    ssize_t r = read(fd, buf + n, 22000 - n);
+    if (r < 0 && errno == EINTR) continue;
+    if (r <= 0) break;
+    n += (size_t)r;
+    if (n > 200) {
+      int hend = -1;
+      size_t k;
+      for (k = 0; k + 3 < n; k++) {
+        if (buf[k] == '\r' && buf[k + 1] == '\n' && buf[k + 2] == '\r' && buf[k + 3] == '\n') {
+          hend = (int)k;
+          break;
+        }
+      }
+      if (hend >= 0 && n >= (size_t)hend + 4 + 20000) break;
+    }
+  }
+  buf[n < 22000 ? n : 21999] = 0;
+  if (sscanf(buf, "HTTP/1.1 %d", &status) != 1 || status != 200) {
+    fprintf(stderr, "FAIL stream-echo: status %d\n", status);
+    failures += 1;
+  }
+  conn_close = memmem(buf, n, "Connection: close", 17) != NULL;
+  if (conn_close) fail("stream-echo", "closed");
+  {
+    char *eoh = memmem(buf, n, "\r\n\r\n", 4);
+    if (!eoh) {
+      fail("stream-echo", "headers");
+    } else {
+      unsigned char *body = (unsigned char *)eoh + 4;
+      body_n = n - (size_t)(body - (unsigned char *)buf);
+      if (body_n != 20000) {
+        fprintf(stderr, "FAIL stream-echo: body %zu\n", body_n);
+        failures += 1;
+      } else {
+        for (i = 0; i < body_n; i++) {
+          if (body[i] != 'z') {
+            fail("stream-echo", "byte");
+            break;
+          }
+        }
+      }
+    }
+  }
+  (void)body_probe;
+  close(fd);
+  free(payload);
+  free(buf);
+}
+
+static void check_drain_before_status(void) {
+  pid_t pid;
+  int port = -1;
+  int fd;
+  char head[128];
+  char partial[64];
+  int hn;
+  int i;
+  int closed = 0;
+  int status = 0;
+  int saw = 0;
+  pid = start_hello(NULL, "127.0.0.1", &port, "400");
+  if (pid < 0) return;
+  fd = dial("127.0.0.1", port);
+  hn = snprintf(head, sizeof head, "POST /echo HTTP/1.1\r\nHost: t\r\nContent-Length: 20000\r\n\r\n");
+  memset(partial, 'q', sizeof partial);
+  if (fd < 0 || hn < 0 || send_n(fd, head, (size_t)hn) < 0 || send_n(fd, partial, sizeof partial) < 0) {
+    fail("drain-before", "send");
+    if (fd >= 0) close(fd);
+    stop_server(pid);
+    return;
+  }
+  usleep(100000);
+  kill(pid, SIGTERM);
+  for (i = 0; i < 25; i++) {
+    int nfd = dial("127.0.0.1", port);
+    if (nfd < 0) {
+      closed = 1;
+      break;
+    }
+    close(nfd);
+    usleep(20000);
+  }
+  if (!closed) fail("drain-before", "listen stayed open");
+  close(fd);
+  for (i = 0; i < 40; i++) {
+    pid_t got = waitpid(pid, &status, WNOHANG);
+    if (got == pid) {
+      saw = 1;
+      break;
+    }
+    usleep(50000);
+  }
+  if (!saw) {
+    kill(pid, SIGKILL);
+    waitpid(pid, NULL, 0);
+    fail("drain-before", "did not exit");
+    return;
+  }
+  if (!(WIFEXITED(status) && WEXITSTATUS(status) == 0)) fail("drain-before", "status");
+}
+
 int main(int argc, char **argv) {
   const char *host = "127.0.0.1";
   pid_t pid;
@@ -365,7 +514,7 @@ int main(int argc, char **argv) {
   alarm(60);
   check_help();
   check_bad_bind();
-  pid = start_hello("nope", host, &port);
+  pid = start_hello("nope", host, &port, NULL);
   if (pid < 0) return 1;
   expect_one(host, port, "hello", "GET / HTTP/1.1\r\nHost: t\r\n\r\n", 200, "hello\n", 0);
   expect_one(host, port, "health-is-hello", "GET /health HTTP/1.1\r\nHost: t\r\n\r\n", 200, "hello\n",
@@ -390,7 +539,9 @@ int main(int argc, char **argv) {
   } else {
     close(fd);
   }
+  check_stream_echo(host, port);
   stop_server(pid);
+  check_drain_before_status();
   if (failures != 0) {
     fprintf(stderr, "%d failures\n", failures);
     return 1;

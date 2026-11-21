@@ -14,12 +14,23 @@
 - `Transfer-Encoding: chunked` is a request body. Extensions are
   ignored. Trailers need a colon and are dropped. A chunk size that
   does not fit in a `U64` is 400. `Transfer-Encoding`
-  together with `Content-Length` is 400 (RFC 9112 6.3). Any other
-  coding is 501. Chunked on HTTP/1.0 is 400. A handler that does not
+  together with `Content-Length` is 400 (RFC 9112 6.3). `chunked`
+  has to be the final coding: `chunked, gzip` is 400 (RFC 9112 6.1).
+  Any other coding, including `gzip` and `gzip, chunked`, is
+  `status-unimplemented` in `classify`. The host copies that 501.
+  Chunked on HTTP/1.0 is 400. A handler that does not
   know the length sends chunked to an HTTP/1.1 client and
   close-delimited bytes to an HTTP/1.0 client. `HEAD` of an unknown
   length does not call the pull and does not send
   `Transfer-Encoding`.
+- A request line or header line that ends in a bare LF is 400
+  (RFC 9112 2.2), including a buffer that has not reached a blank
+  line. An empty request-target is 400. `OPTIONS *` stays a target.
+  `Content-Length` is `1*DIGIT` and must be below 4294967296.
+  `4294967295` is legal. A leading `+`, `4294967296`, `8589934592`,
+  and a trimmed digit string of 32 bytes or more are 400.
+  `Connection` matches whole comma-separated tokens, without regard
+  to ASCII case. `enclose` and `closeable` are not `close`.
 - A `Content-Length` above 16384 that has not all arrived, and a
   chunked body that does not finish inside the window, is streamed.
   `MuroHttpResponse.pull` writes a response the same way.
@@ -30,13 +41,19 @@
   no status.
 - `Expect: 100-continue` on HTTP/1.1 writes `100 Continue` before the
   body is read, when the request is otherwise acceptable and the body
-  is not already in the buffer. Any other Expect value is 417.
+  is not already in the buffer. A short write or `EAGAIN` leaves the
+  interim unsent. `poll` retries it. `sent_100` is set only after
+  the last byte. Any other Expect value is 417.
   HTTP/1.0 does not send 100 and does not send 417.
 - SIGINT and SIGTERM stop accepting, finish the request that is
   already in the handler, close idle keep-alive connections, and exit
   0 when the table is empty or `--drain-ms` has passed (default 1000,
-  `MURO_HTTP_DRAIN_MS`). The drain does not start while the handler
-  is blocked inside `muro_http_body_read`.
+  `MURO_HTTP_DRAIN_MS`). The same flag arms that drain inside
+  `muro_http_body_read`: the listen socket closes immediately, and
+  the body read continues until the body ends or the deadline passes.
+  While that read waits, the server poll accepts and serves other
+  connections. A nested read does not watch a socket already inside
+  a read. Past eight nested reads, the wait is that socket alone.
 - `examples/stream` serves a known-length pull, a chunked pull, and
   an echo of the request body. `c/test_http11` drives it.
 - `mix test` reduces the new `Status` equations in `request.muro`:
@@ -45,10 +62,15 @@
   and Expect codes are `U64`, so ExUnit skips them. `c/test_classify`
   checks those codes and the chunk scanner. `render.muro` is emitted
   as C only, same as before. Its new `refl`s typecheck under
-  `mix muro.gen`: `Date`, `HEAD` of an empty body, the
+  `mix muro.gen`, which reduces each `refl` under the fuel bound:
+  `Date`, `HEAD` of an empty body, the
   100/400/413/417/500/501 literals, the chunked and close-delimited
   header blocks, a declared length of 0, and the last-chunk bytes
-  `0\r\n\r\n`. ExUnit does not run that book. A positive
+  `0\r\n\r\n`. That reduction is the evidence term. It is not a
+  separate program, and it is not the poll loop. ExUnit does not run
+  that book. `framedEnd` and `streamTake` have `refl`s for a short
+  body, an empty chunk, and the 16384 / 16385 boundary. A body that
+  large stays a C test. A positive
   `Content-Length` or chunk size walks `rdShow` or `hxShow` and is
   not an equation. `c/test_render` checks those bytes, including
   `HEAD` of `ok` and one chunk of `hi`. The clock, the poll loop,
@@ -102,16 +124,19 @@
   are zero-copy slices. HTTP/1.1 with the headers finished requires
   exactly one `Host`. The image calls a handler (`Request -> Response`)
   instead of `decide`. The host owns sockets, buffers, the connection
-  table, the clock, and `poll`. It does not choose a status, a header,
-  or a body. `httpRender` takes a status, a reason, extra headers, a
-  body, and keep. `--bind` and `MURO_HTTP_BIND` select the IPv4 listen
-  address. The default remains `127.0.0.1`.
+  table, the clock, and `poll`. It writes `100 Continue`, 413, and
+  417, and it copies the book's 400 and unimplemented 501. It does
+  not invent a status the book did not name. `httpRender` takes a
+  status, a reason, extra headers, a body, and keep. `--bind` and
+  `MURO_HTTP_BIND` select the IPv4 listen address. The default
+  remains `127.0.0.1`.
 - The challenge server is `examples/challenge/` (`decide.muro`,
   `route.muro`, `body.muro`, SQLite, JWT, JSON). `c/muro-httpd` is
   still that binary and still serves `/health`, `/feed`, `/posts`, and
   `/posts/:id/like`. `examples/hello/hello.c` is a second server on
-  the same header: GET answers `hello\n`, POST echoes the body, and
-  there is no SQLite. `c/test_hello`, `c/test_route`, and `c/test_tags`
+  the same header: GET answers `hello\n`, POST echoes the buffered
+  or streamed body, and a body read that fails is 400 `bad\n`.
+  There is no SQLite. `c/test_hello`, `c/test_route`, and `c/test_tags`
   run from `make c-check` and `make c-sanitize`. The pin stays
   0.21.14. The library version stays `0.1.0-dev`.
 - A write-only `POLLHUP` without `POLLOUT` closes that slot instead
@@ -146,11 +171,12 @@
   ill-formed UTF-8 before `decide`.
 - `priv/muro/http/render.muro` is the HTTP/1.1 response bytes.
   `--backend c` emits `httpRender`, now with the row bytes. The host
-  copies that slice and writes it. It does not choose the status or
-  the body. Eight equations are reduction evidence (`refl`), including
-  an empty row (`application/json`, `Content-Length: 0`). A positive
+  copies that slice and writes it. The handler supplies the status
+  and the body for a request the book accepted. The host also writes
+  the book's 100, 400, 413, 417, and 501 literals. The current
+  `refl`s are listed at the top of this unreleased section. A positive
   length walks the decimal printer, and that reduction does not
-  finish. `c/test_render` checks the eight strings, `[]`, a ten-byte
+  finish. `c/test_render` checks the emitted strings, `[]`, a ten-byte
   row, the emitted `*From` tag helpers, and `Content-Length` for 1664
   tag combinations. That sweep is a test. The `_Static_assert`s in
   that driver only pin `c/decision_tags.h` to itself. The book does
