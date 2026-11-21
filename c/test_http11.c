@@ -369,8 +369,14 @@ static int hex_val(int ch) {
   return -1;
 }
 
-static int need_at(Conn *c, size_t idx) {
-  while (c->n <= idx) {
+/* Byte at off+extra must be in the window. The cursor is c->off, so
+   a full window can drop the consumed prefix without a second index. */
+static int need_off(Conn *c, size_t extra) {
+  while (c->n <= c->off + extra) {
+    if (c->n >= sizeof c->buf) {
+      if (c->off == 0) return -1;
+      compact(c);
+    }
     if (read_more(c) < 0) return -1;
   }
   return 0;
@@ -382,40 +388,37 @@ static int take_chunked(Conn *c, char *dst, size_t cap, size_t *nout) {
   for (;;) {
     unsigned long sz = 0;
     int digits = 0;
-    size_t i = c->off;
     int hv;
-    if (need_at(c, i) < 0) return -1;
-    while ((hv = hex_val((unsigned char)c->buf[i])) >= 0) {
+    if (need_off(c, 0) < 0) return -1;
+    while ((hv = hex_val((unsigned char)c->buf[c->off])) >= 0) {
       if (digits > 6) return -1;
       sz = (sz << 4) + (unsigned)hv;
       digits += 1;
-      i += 1;
-      if (need_at(c, i) < 0) return -1;
+      c->off += 1;
+      if (need_off(c, 0) < 0) return -1;
     }
     if (digits == 0) return -1;
     for (;;) {
-      if (need_at(c, i + 1) < 0) return -1;
-      if (c->buf[i] == '\r' && c->buf[i + 1] == '\n') {
-        i += 2;
+      if (need_off(c, 1) < 0) return -1;
+      if (c->buf[c->off] == '\r' && c->buf[c->off + 1] == '\n') {
+        c->off += 2;
         break;
       }
-      if (c->buf[i] == '\n' || c->buf[i] == '\r') return -1;
-      i += 1;
+      if (c->buf[c->off] == '\n' || c->buf[c->off] == '\r') return -1;
+      c->off += 1;
     }
-    c->off = i;
     if (sz == 0) {
       for (;;) {
-        size_t line = c->off;
-        if (need_at(c, line + 1) < 0) return -1;
-        if (c->buf[line] == '\r' && c->buf[line + 1] == '\n') {
-          c->off = line + 2;
+        if (need_off(c, 1) < 0) return -1;
+        if (c->buf[c->off] == '\r' && c->buf[c->off + 1] == '\n') {
+          c->off += 2;
           *nout = out;
           if (out < cap) dst[out] = 0;
           return 0;
         }
-        while (!(c->buf[c->off] == '\r')) {
+        while (c->buf[c->off] != '\r') {
           c->off += 1;
-          if (need_at(c, c->off + 1) < 0) return -1;
+          if (need_off(c, 1) < 0) return -1;
         }
         if (c->buf[c->off + 1] != '\n') return -1;
         c->off += 2;
@@ -424,7 +427,7 @@ static int take_chunked(Conn *c, char *dst, size_t cap, size_t *nout) {
     if (out + sz >= cap) return -1;
     if (take_bytes(c, dst + out, sz) < 0) return -1;
     out += sz;
-    if (need_at(c, c->off + 1) < 0) return -1;
+    if (need_off(c, 1) < 0) return -1;
     if (c->buf[c->off] != '\r' || c->buf[c->off + 1] != '\n') return -1;
     c->off += 2;
   }
