@@ -228,9 +228,9 @@ int main(void) {
     char big[160];
     char cap[160];
     muro_http_reset();
-    if (methodCode(of("HEAD /x HTTP/1.1\r\nHost: t\r\n\r\n")) != 0) bad("meth", "head");
+    if (methodCode(of("HEAD /x HTTP/1.1\r\nHost: t\r\n\r\n")) != 0) bad("meth-head", "code");
     muro_http_reset();
-    if (methodCode(of("PUT /x HTTP/1.1\r\nHost: t\r\n\r\n")) != 0) bad("meth", "put");
+    if (methodCode(of("PUT /x HTTP/1.1\r\nHost: t\r\n\r\n")) != 0) bad("meth-put", "code");
     muro_http_reset();
     if (methodCode(of("DELETE /x HTTP/1.1\r\nHost: t\r\n\r\n")) != 0) bad("meth", "delete");
     muro_http_reset();
@@ -238,17 +238,17 @@ int main(void) {
     muro_http_reset();
     if (methodCode(of("PATCH /x HTTP/1.1\r\nHost: t\r\n\r\n")) != 0) bad("meth", "patch");
     muro_http_reset();
-    if (methodCode(of("TRACE /x HTTP/1.1\r\nHost: t\r\n\r\n")) != 1) bad("meth", "trace");
+    if (methodCode(of("TRACE /x HTTP/1.1\r\nHost: t\r\n\r\n")) != 1) bad("meth-trace", "code");
     muro_http_reset();
     if (methodCode(of("CONNECT x HTTP/1.1\r\nHost: t\r\n\r\n")) != 1) bad("meth", "connect");
     muro_http_reset();
     if (methodCode(of("get /x HTTP/1.1\r\nHost: t\r\n\r\n")) != 1) bad("meth", "lower");
     muro_http_reset();
-    if (methodCode(of("G(ET /x HTTP/1.1\r\nHost: t\r\n\r\n")) != 2) bad("meth", "bad");
+    if (methodCode(of("G(ET /x HTTP/1.1\r\nHost: t\r\n\r\n")) != 2) bad("meth-bad", "code");
     muro_http_reset();
-    if (methodCode(of("OPTIONS * HTTP/1.1\r\nHost: t\r\n\r\n")) != 0) bad("meth", "star");
+    if (methodCode(of("OPTIONS * HTTP/1.1\r\nHost: t\r\n\r\n")) != 0) bad("meth-star", "code");
     muro_http_reset();
-    if (methodCode(of("GET * HTTP/1.1\r\nHost: t\r\n\r\n")) != 2) bad("meth", "get-star");
+    if (methodCode(of("GET * HTTP/1.1\r\nHost: t\r\n\r\n")) != 2) bad("meth-get-star", "code");
     classify_of("opt-star", "OPTIONS * HTTP/1.1\r\nHost: t\r\n\r\n", ST_OK, 1, K_YES);
     classify_of("get-star", "GET * HTTP/1.1\r\nHost: t\r\n\r\n", ST_BAD, 0, 0);
     classify_of("meth-bad", "G(ET /x HTTP/1.1\r\nHost: t\r\n\r\n", ST_BAD, 0, 0);
@@ -256,19 +256,19 @@ int main(void) {
     classify_of("put-ok", "PUT /x HTTP/1.1\r\nHost: t\r\n\r\n", ST_OK, 1, K_YES);
     muro_http_reset();
     if (teCode(of("POST /p HTTP/1.1\r\nHost: t\r\nTransfer-Encoding: chunked\r\n\r\n")) != 1)
-      bad("te", "chunked");
+      bad("te-chunk", "code");
     muro_http_reset();
     if (teCode(of("POST /p HTTP/1.1\r\nHost: t\r\nTransfer-Encoding: Chunked\r\n\r\n")) != 1)
       bad("te", "case");
     muro_http_reset();
     if (teCode(of("POST /p HTTP/1.1\r\nHost: t\r\nTransfer-Encoding: gzip\r\n\r\n")) != 2)
-      bad("te", "gzip");
+      bad("te-gzip", "code");
     muro_http_reset();
     if (teCode(of("POST /p HTTP/1.1\r\nHost: t\r\nTransfer-Encoding: chunked, gzip\r\n\r\n")) != 3)
-      bad("te", "list");
+      bad("te-not-final", "code");
     muro_http_reset();
     if (teCode(of("POST /p HTTP/1.1\r\nHost: t\r\nTransfer-Encoding: gzip, chunked\r\n\r\n")) != 2)
-      bad("te", "gzip-final");
+      bad("te-gzip-code", "code");
     muro_http_reset();
     if (teCode(of("POST /p HTTP/1.1\r\nHost: t\r\nTransfer-Encoding: chunked, chunked\r\n\r\n")) != 3)
       bad("te", "twice");
@@ -302,7 +302,7 @@ int main(void) {
     muro_http_reset();
     if (expectCode(of("POST /p HTTP/1.1\r\nHost: t\r\nExpect: 100-continue\r\nContent-Length: "
                       "1\r\n\r\n")) != 1)
-      bad("exp", "100");
+      bad("exp-100", "code");
     muro_http_reset();
     if (expectCode(of("POST /p HTTP/1.1\r\nHost: t\r\nExpect: 100-Continue\r\nContent-Length: "
                       "1\r\n\r\n")) != 1)
@@ -311,7 +311,7 @@ int main(void) {
     if (expectCode(of(
             "POST /p HTTP/1.1\r\nHost: t\r\nExpect: 100-continue\r\nExpect: 100-continue\r\n\r\n")) !=
         2)
-      bad("exp", "two");
+      bad("exp-two", "code");
     muro_http_reset();
     if (expectCode(of("POST /p HTTP/1.1\r\nHost: t\r\nExpect:\r\n\r\n")) != 2) bad("exp", "empty");
     expect_chunk("ck-empty",
@@ -338,16 +338,18 @@ int main(void) {
     if (framedEnd(of(pipe)) >= strlen(pipe)) bad("frame", "pipe");
     muro_http_reset();
     if (framedEnd(of(post)) != strlen(post)) bad("frame", "post");
+    /* Header only. stream-cl and cap-cl are classify. The skipped
+       refls are stream-take-hi and stream-take-edge. */
     snprintf(big, sizeof big, "POST /p HTTP/1.1\r\nHost: t\r\nContent-Length: 16385\r\n\r\n");
     classify_of("stream-cl", big, ST_OK, 1, K_YES);
     muro_http_reset();
     if (contentLength(of(big)) != 16385) bad("stream-cl", "length");
     muro_http_reset();
-    if (streamTake(of(big)) != 1) bad("stream-cl", "take");
+    if (streamTake(of(big)) != 1) bad("stream-take-hi", "take");
     snprintf(cap, sizeof cap, "POST /p HTTP/1.1\r\nHost: t\r\nContent-Length: 16384\r\n\r\n");
     classify_of("cap-cl", cap, ST_NEED, 0, 0);
     muro_http_reset();
-    if (streamTake(of(cap)) != 0) bad("cap-cl", "take");
+    if (streamTake(of(cap)) != 0) bad("stream-take-edge", "take");
     muro_http_reset();
     if (streamTake(of("POST /posts HTTP/1.1\r\nHost: t\r\nContent-Length: 2\r\n\r\n")) != 0)
       bad("post-take-short", "take");

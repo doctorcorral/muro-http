@@ -107,9 +107,13 @@ that still uses CRLF stays need-more. The function is total.
 `framedEnd` is the first byte after this message. `streamTake` is 1
 when the host must read the rest from the socket. Both have `refl`s
 for a short `Content-Length`, an empty chunk, and the 16384 / 16385
-boundary with no body bytes. A body of that size is a C test
-(`stream-cl`, `cap-cl`), because the evidence term would carry the
-body.
+boundary with no body bytes (`stream-take-hi`, `stream-end-hi`,
+`stream-take-edge`, `stream-end-edge`). Those terms are the header
+block alone. `c/test_classify` checks the same header-only buffers.
+`stream-cl` and `cap-cl` are the classify status of those buffers,
+not a body of 16385 or 16384 bytes. A body past that window is
+`c/test_http11` (a response of 1 MiB + 1, and a 20000-byte echo)
+and `c/test_hello` (a 20000-byte echo).
 
 Routing lives in the handler. The challenge routes are
 `priv/muro/challenge/route.muro` (`routeVerb`, `routePath`, `routeId`,
@@ -274,10 +278,13 @@ next request. `MuroHttpResponse.pull` is the response side. With
 bytes. Without a length, HTTP/1.1 is chunked and HTTP/1.0 is the
 raw bytes followed by close. `HEAD` does not call `pull`. The
 default max body is 8388608. `0` rejects every positive length.
-`--max-body` and `MURO_HTTP_MAX_BODY` set it. Above the max is 413,
-before the handler, when the length is already known. A
-`Content-Length` of at most 16384 is read to the end by the image
-and then refused if it is over the max.
+`--max-body` and `MURO_HTTP_MAX_BODY` set it. Once the headers are
+done and a `Content-Length` is known, `host_in_policy` returns 413
+when that length is over the max. The host copies `httpTooLarge`
+and closes. It does not read the body to the end first. That holds
+for a length of at most 16384 and for a longer one. A length of at
+most 16384 that is within the max stays buffered: the image waits
+until those bytes have arrived.
 
 `Expect: 100-continue` on an otherwise acceptable HTTP/1.1 request
 writes `HTTP/1.1 100 Continue` and `Date` before the body is read,
@@ -389,7 +396,9 @@ reply, then reply, and key `b` is accept. These lines hold:
 3721 and 10521 are a regression pin of that script. 10521 is the
 successor table, not a breadth-first parent map. A different count
 means the script, the meeting, the hold rule, or the checker
-explored a different graph. The walk is not a proof for every key
+explored a different graph. CI does not run `mix muro.check`. The
+jobs `check`, `asan`, and `macos` do not print these counts. The
+walk is not a proof for every key
 count, and it is not a bound on live sockets. The pin proves the
 hold rule for any number of keys and any number of instances
 (`agda/Muro/Family.agda` in muro 0.22.14). This repository does not
@@ -524,16 +533,20 @@ SIGINT and SIGTERM drain and exit 0.
 
 `examples/hello/hello.c` is a second server on `c/muro_http.h`.
 `make` builds `c/muro-hello`. It does not link SQLite. GET answers
-`hello\n`. POST echoes the buffered body. A streamed body is
-discarded, so the echo is empty, and the connection can stay up.
+`hello\n`. POST echoes the body. A buffered body is the bytes
+already in `req->body`. A streamed body is read with
+`muro_http_body_read` into a buffer that outlives the handler, and
+that echo is the response. The connection can stay up.
 PUT, DELETE, OPTIONS, PATCH, and HEAD are 405 `method\n`. HEAD
 carries that `Content-Length` and no body. A method the library
 does not know is 501 and does not reach this handler.
 `GET /health` is that same hello. It is not the challenge route.
 `c/test_hello` checks those responses, a missing `Host` (the book's
-400 `malformed`), keep-alive, and `--bind 127.0.0.1` winning over
-`MURO_HTTP_BIND=nope`. A bind host that is not IPv4 exits 2 and does
-not listen.
+400 `malformed`), keep-alive, `--bind 127.0.0.1` winning over
+`MURO_HTTP_BIND=nope`, a 20000-byte streamed POST echo, and SIGTERM
+while a 20000-byte body has only partly arrived (the listen socket
+closes and the process exits 0). A bind host that is not IPv4
+exits 2 and does not listen.
 
 ## The stream example
 
@@ -585,8 +598,11 @@ The reduction equations in `render.muro` are the `refl`s for the
 strings they name: an empty keep response, an empty close response,
 204, `HEAD` of an empty body, `httpMalformed`, `httpInternal`,
 `httpNotImplemented`, `httpTooLarge`, `httpExpect`, `httpContinue`,
-the last-chunk bytes `0\r\n\r\n`, the chunked header block, the
+the last-chunk bytes `0\r\n\r\n` from `httpChunk` of an empty body
+(`chunk-last`), the chunked header block, the
 close-delimited header block, and a declared length of 0.
+The host calls `httpLastChunk`, which is that same literal. That
+call is not `chunk-last`.
 `mix muro.gen` typechecks them and reduces each `refl` under the
 fuel bound. That reduction is the evidence term. It is not a
 separate program, and it is not the poll loop. ExUnit does not run
@@ -600,8 +616,11 @@ form is a machine term. The request names are `crlf-end`, `lf-end`,
 `post-framed-short`, `post-take-short`, `ck-framed`,
 `ck-framed-hdr`, `ck-take-hdr`, `stream-take-hi`, `stream-end-hi`,
 `stream-take-edge`, `stream-end-edge`, and `stream-take-lf`.
-`c/test_classify` checks each of those results. The connection
-names are `unimpl-code` (ExUnit runs `unimpl-origin` instead, and
+`c/test_classify` checks each of those results, and the failure
+name is the equation name. `stream-take-hi` and `stream-take-edge`
+are the header-only buffers. `stream-cl` and `cap-cl` name the
+classify status of those same buffers, not a body of that size.
+The connection names are `unimpl-code` (ExUnit runs `unimpl-origin` instead, and
 `c/test_conn` wants origin 2), `after-close`, and
 `after-close-tick`. A positive `Content-Length` walks `rdShow`, and that
 reduction does not finish, so it is not an equation. `c/test_render`
@@ -705,7 +724,9 @@ book linked beside it must not import that book. `decide.muro` and
   payload JSON are decoded into a 4096-byte buffer.
 - The receive buffer is 65536 bytes and the write buffer is 69632.
   A header block past 16384 is 400. A body past 16384 is streamed,
-  up to the max body (default 8 MiB), and a larger length is 413. A
+  up to the max body (default 8 MiB). A known `Content-Length` over
+  that max is 413 at the headers, including one of at most 16384.
+  The host does not read that body to the end first. A
   buffered response that does not fit the write buffer closes. A
   feed or a read that does not fit closes the socket. Create and like
   render inside the transaction. If that row does not fit, the store

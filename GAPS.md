@@ -274,9 +274,11 @@ no body bytes. `omit` 1 on `httpRender` drops the body and keeps
 empty keep, empty close, 204, `HEAD` of an empty body, the six
 dated literals (`httpMalformed`, `httpInternal`,
 `httpNotImplemented`, `httpTooLarge`, `httpExpect`,
-`httpContinue`), the last-chunk bytes `0\r\n\r\n`, the chunked
+`httpContinue`), the last-chunk bytes `0\r\n\r\n` from `httpChunk`
+of an empty body (`chunk-last`), the chunked
 header block, the close-delimited header block, and a declared
-length of 0. That reduction is the evidence term. It is not a
+length of 0. The host calls `httpLastChunk`, which is that same
+literal and is not `chunk-last`. The reduction is the evidence term. It is not a
 separate program, and it is not the poll loop. `rdShow` of 0 is the literal
 `0`, so an empty body is an equation. A positive length does not
 finish, so a ten-byte body is not an equation, and neither is `HEAD`
@@ -332,7 +334,9 @@ writes the dispatcher is not proved.
 The three family lines share one graph. 3721 states and 10521
 successor-table entries are a regression pin of the script (key `a`
 is accept, then reply, then reply; key `b` is accept). A different
-count means that graph changed. It is not the proof above, and it
+count means that graph changed. CI does not run `mix muro.check`.
+The jobs `check`, `asan`, and `macos` do not print these counts.
+It is not the proof above, and it
 is not a bound on live sockets. `test/family_test.exs` is a second
 check: two keys on the emitted dispatcher, in host order (accept
 before reply), a refused step on a held reply, a withdraw that does
@@ -449,9 +453,10 @@ form is a machine term. `test/conn_eq_test.exs` skips three:
 flag that runs, and `c/test_conn` wants word 6 to be 2), and
 `after-close` and `after-close-tick` (`step` takes the unboxed
 `Conn`, so the argument normal form is a machine term). The host
-suite runs nullary wrappers (`sawAfterDo`, `sawAfterMode`) whose
-results are declared data. Those two `Conn` equations are the ones
-the wrapper does not cover. `test/request_test.exs` skips thirty,
+suite runs nullary wrappers (`sawAfterDo`, `sawAfterTick`,
+`sawAfterMode`) whose results are declared data. ExUnit runs
+`after-close-do`, `after-close-tick-do`, and `after-close-mode`.
+`after-close` and `after-close-tick` stay skipped. `test/request_test.exs` skips thirty,
 all named in `CHANGELOG.md`: the `U64` method, coding, and Expect
 codes, `crlf-end`, `lf-end`, `hdr-prefers-crlf`, `header-count`,
 `header-name-0`, `ck-empty`, `ck-hi`, `te-not-final`,
@@ -459,4 +464,9 @@ codes, `crlf-end`, `lf-end`, `hdr-prefers-crlf`, `header-count`,
 (`post-framed`, `post-framed-short`, `post-take-short`,
 `ck-framed`, `ck-framed-hdr`, `ck-take-hdr`, `stream-take-hi`,
 `stream-end-hi`, `stream-take-edge`, `stream-end-edge`,
-`stream-take-lf`). `c/test_classify` checks each of those results.
+`stream-take-lf`). `c/test_classify` checks each of those results,
+and the failure name is the equation name. `stream-take-hi` and
+`stream-take-edge` are header-only buffers. `stream-cl` and
+`cap-cl` are the classify status of those buffers, not a body of
+that size. A body past the window is `c/test_http11` and
+`c/test_hello`.

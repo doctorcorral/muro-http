@@ -79,18 +79,26 @@
   `ck-framed`, `ck-framed-hdr`, `ck-take-hdr`, `stream-take-hi`,
   `stream-end-hi`, `stream-take-edge`, `stream-end-edge`, and
   `stream-take-lf`. `c/test_classify` checks each of those results,
-  including `streamTake` of a short `Content-Length`, a chunked
-  header with no chunk bytes, and a bare LF. `test/conn_eq_test.exs`
-  skips `unimpl-code`, `after-close`, and `after-close-tick`.
-  `unimpl-origin` is the flag ExUnit runs for origin 2.
-  `c/test_conn` wants that field to be 2. `sawAfterDo` and
-  `sawAfterMode` cover the two after-close wrappers.
+  and the failure name is the equation name. `stream-take-hi` and
+  `stream-take-edge` are header-only buffers. `stream-cl` and
+  `cap-cl` are the classify status of those buffers, not a body of
+  that size. A body past the window is `c/test_http11` and
+  `c/test_hello`. The checks also include `streamTake` of a short
+  `Content-Length`, a chunked header with no chunk bytes, and a
+  bare LF. `test/conn_eq_test.exs` skips `unimpl-code`,
+  `after-close`, and `after-close-tick`. `unimpl-origin` is the
+  flag ExUnit runs for origin 2. `c/test_conn` wants that field to
+  be 2. ExUnit runs the wrappers `sawAfterDo` (`after-close-do`),
+  `sawAfterTick` (`after-close-tick-do`), and `sawAfterMode`
+  (`after-close-mode`).
   `render.muro` is emitted as C only, same as before. Its new
   `refl`s typecheck under `mix muro.gen`, which reduces each `refl`
   under the fuel bound: `Date`, `HEAD` of an empty body, the
   100/400/413/417/500/501 literals, the chunked and close-delimited
   header blocks, a declared length of 0, and the last-chunk bytes
-  `0\r\n\r\n`. That reduction is the evidence term. It is not a
+  `0\r\n\r\n` from `httpChunk` of an empty body (`chunk-last`).
+  The host calls `httpLastChunk`, which is that same literal and is
+  not `chunk-last`. The reduction is the evidence term. It is not a
   separate program, and it is not the poll loop. ExUnit does not run
   that book. A positive `Content-Length` or chunk size walks
   `rdShow` or `hxShow` and is not an equation. `c/test_render`
@@ -116,7 +124,8 @@
   states and 3 transitions, and `reply-order`, `accept-free`, and
   `reply-opens` each in 3721 states and 10521 transitions. Those
   three share one graph. The counts are a regression pin of the
-  script. The pin proves the hold rule for any number of keys and
+  script. CI does not run `mix muro.check`, so those counts are not
+  a CI result. The pin proves the hold rule for any number of keys and
   instances. This repository does not contain that proof.
   `test/family_test.exs` checks the emitted dispatcher on two keys,
   accepting before it replies. Not proved: `nconn` at most
