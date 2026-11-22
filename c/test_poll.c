@@ -4,14 +4,16 @@
 #include "host_poll.h"
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
 #include <sys/socket.h>
 
 static int failures;
+static const char *suite = "default";
 
 static void fail(const char *name, const char *what) {
-  fprintf(stderr, "FAIL %s: %s\n", name, what);
+  fprintf(stderr, "FAIL %s %s: %s\n", suite, name, what);
   failures += 1;
 }
 
@@ -366,13 +368,61 @@ done:
   host_poll_close(p);
 }
 
-int main(void) {
+static void run_suite(const char *name) {
+  HostPoll *p;
+  const char *got;
+  suite = name ? name : "default";
+  if (name) setenv("MURO_HTTP_WAIT", name, 1);
+  else unsetenv("MURO_HTTP_WAIT");
+  p = host_poll_open();
+  if (!p) {
+    fail("open", "backend");
+    return;
+  }
+  got = host_poll_backend(p);
+  if (!got || (name && strcmp(got, name) != 0)) fail("open", "name");
+  if (!name) {
+#if defined(__APPLE__)
+    if (!got || strcmp(got, "kqueue") != 0) fail("open", "default");
+#elif defined(__linux__)
+    if (!got || strcmp(got, "epoll") != 0) fail("open", "default");
+#else
+    if (!got || strcmp(got, "poll") != 0) fail("open", "default");
+#endif
+  }
+  host_poll_close(p);
   check_deadline();
   check_empty();
   check_read_hangup();
   check_write_hangup();
   check_scan();
   check_drop();
+}
+
+static void reject(const char *name) {
+  HostPoll *p;
+  suite = name;
+  setenv("MURO_HTTP_WAIT", name, 1);
+  p = host_poll_open();
+  if (p) {
+    fail("reject", "opened");
+    host_poll_close(p);
+  }
+  if (host_poll_supported(name)) fail("reject", "supported");
+}
+
+int main(void) {
+  run_suite(NULL);
+  run_suite("poll");
+#if defined(__APPLE__)
+  run_suite("kqueue");
+  reject("epoll");
+#elif defined(__linux__)
+  run_suite("epoll");
+  reject("kqueue");
+#endif
+  reject("select");
+  unsetenv("MURO_HTTP_WAIT");
   if (failures) {
     fprintf(stderr, "%d failures\n", failures);
     return 1;
