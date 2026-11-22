@@ -18,6 +18,7 @@ c/test_route
 c/test_tags
 c/test_hello
 c/test_serve
+c/test_workers
 c/test_http11
 c/muro-httpd
 c/muro-hello

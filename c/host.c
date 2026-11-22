@@ -41,6 +41,7 @@
 #include <string.h>
 #include <sys/ioctl.h>
 #include <sys/socket.h>
+#include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -65,6 +66,7 @@ enum {
 
 static volatile sig_atomic_t stop_flag;
 static volatile sig_atomic_t draining_flag;
+static volatile sig_atomic_t parent_stop;
 static uint64_t drain_deadline_ms;
 
 int host_io_should_stop(void) {
@@ -75,6 +77,11 @@ int host_io_should_stop(void) {
 static void on_signal(int sig) {
   (void)sig;
   stop_flag = 1;
+}
+
+static void parent_on_signal(int sig) {
+  (void)sig;
+  parent_stop = 1;
 }
 
 static const char *cfg_name(const MuroHttpConfig *cfg) {
@@ -154,6 +161,7 @@ typedef struct Server {
   int draining;
   uint64_t drain_deadline;
   int stall_100;
+  int channel; /* listen_fd carries SCM_RIGHTS, it is not a TCP listener */
 } Server;
 
 /* The body reader re-enters this loop. NULL outside muro_http_serve. */
@@ -1131,70 +1139,134 @@ static int take_conn(int lfd, struct sockaddr_in *peer, socklen_t *len) {
   return accept(lfd, (struct sockaddr *)peer, len);
 }
 
+/* 0 adopted, 1 skipped this fd, -1 stop accepting. Closes fd unless
+   it was adopted. */
+static int adopt_fd(Server *sv, int fd) {
+  Slot *s = NULL;
+  int i;
+  if (set_nb_cloexec(fd) < 0) {
+    close(fd);
+    return 1;
+  }
+  if (set_int(fd, IPPROTO_TCP, TCP_NODELAY, 1) < 0) {
+    close(fd);
+    return 1;
+  }
+#ifdef SO_NOSIGPIPE
+  if (set_int(fd, SOL_SOCKET, SO_NOSIGPIPE, 1) < 0) {
+    close(fd);
+    return 1;
+  }
+#endif
+  for (i = 0; i < sv->max_conn; i++) {
+    if (!sv->slots[i].used) {
+      s = &sv->slots[i];
+      break;
+    }
+  }
+  if (!s) {
+    close(fd);
+    return -1;
+  }
+  memset(s, 0, sizeof *s);
+  s->fd = fd;
+  s->in = malloc(sv->in_cap);
+  s->out = malloc(OUT_CAP);
+  s->out_cap = s->out ? (size_t)OUT_CAP : 0;
+  s->proto = proto_begin();
+  if (!s->in || !s->out || !s->proto) {
+    proto_free(s->proto);
+    free(s->in);
+    free(s->out);
+    close(fd);
+    memset(s, 0, sizeof *s);
+    s->fd = -1;
+    fprintf(stderr, "%s: connection setup failed\n", sv->name);
+    return -1;
+  }
+  s->st = begin();
+  host_in_init(&s->hin, fd, sv->max_body);
+  s->ver11 = 1;
+  s->used = 1;
+  s->want_read = 1;
+  s->deadline = host_poll_now_ms() + (uint64_t)sv->idle_ms;
+  sv->nconn += 1;
+  sync_watch(sv, s);
+  if (sv->fatal) return -1;
+  return 0;
+}
+
+/* One SCM_RIGHTS message. 1 and *out set, 0 on a clean close, -1 on
+   error. *out is -1 when the message carried no fd. */
+static int recv_passed(int ch, int *out) {
+  struct msghdr msg;
+  struct iovec iov;
+  char dummy = 0;
+  char cbuf[CMSG_SPACE(sizeof(int))];
+  struct cmsghdr *cmsg;
+  ssize_t n;
+  *out = -1;
+  memset(&msg, 0, sizeof msg);
+  memset(cbuf, 0, sizeof cbuf);
+  iov.iov_base = &dummy;
+  iov.iov_len = 1;
+  msg.msg_iov = &iov;
+  msg.msg_iovlen = 1;
+  msg.msg_control = cbuf;
+  msg.msg_controllen = sizeof cbuf;
+  n = recvmsg(ch, &msg, 0);
+  if (n < 0) return -1;
+  if (n == 0) return 0;
+  for (cmsg = CMSG_FIRSTHDR(&msg); cmsg; cmsg = CMSG_NXTHDR(&msg, cmsg)) {
+    if (cmsg->cmsg_level == SOL_SOCKET && cmsg->cmsg_type == SCM_RIGHTS &&
+        cmsg->cmsg_len >= CMSG_LEN(sizeof(int))) {
+      memcpy(out, CMSG_DATA(cmsg), sizeof *out);
+      break;
+    }
+  }
+  return 1;
+}
+
+static void take_passed(Server *sv) {
+  while (sv->nconn < sv->max_conn && !sv->fatal && sv->listen_fd >= 0) {
+    int fd = -1;
+    int rc = recv_passed(sv->listen_fd, &fd);
+    if (rc < 0) {
+      if (errno == EINTR) continue;
+      if (errno == EAGAIN || errno == EWOULDBLOCK) break;
+      fprintf(stderr, "%s: recv fd: %s\n", sv->name, strerror(errno));
+      break;
+    }
+    if (rc == 0) {
+      int lfd = sv->listen_fd;
+      sv->listen_fd = -1;
+      if (sv->pq) (void)host_poll_watch(sv->pq, lfd, 0, 0);
+      close(lfd);
+      break;
+    }
+    if (fd < 0) continue;
+    if (adopt_fd(sv, fd) < 0) break;
+  }
+  (void)sync_listen(sv);
+}
+
 static void accept_some(Server *sv) {
   if (sv->draining || sv->listen_fd < 0) return;
+  if (sv->channel) {
+    take_passed(sv);
+    return;
+  }
   while (sv->nconn < sv->max_conn && !sv->fatal) {
     struct sockaddr_in peer;
     socklen_t len = sizeof peer;
     int fd = take_conn(sv->listen_fd, &peer, &len);
-    Slot *s;
-    int i;
     if (fd < 0) {
       if (errno == EINTR) continue;
       if (errno == EAGAIN || errno == EWOULDBLOCK) return;
       fprintf(stderr, "%s: accept: %s\n", sv->name, strerror(errno));
       return;
     }
-    if (set_nb_cloexec(fd) < 0) {
-      close(fd);
-      continue;
-    }
-    if (set_int(fd, IPPROTO_TCP, TCP_NODELAY, 1) < 0) {
-      close(fd);
-      continue;
-    }
-#ifdef SO_NOSIGPIPE
-    if (set_int(fd, SOL_SOCKET, SO_NOSIGPIPE, 1) < 0) {
-      close(fd);
-      continue;
-    }
-#endif
-    s = NULL;
-    for (i = 0; i < sv->max_conn; i++) {
-      if (!sv->slots[i].used) {
-        s = &sv->slots[i];
-        break;
-      }
-    }
-    if (!s) {
-      close(fd);
-      return;
-    }
-    memset(s, 0, sizeof *s);
-    s->fd = fd;
-    s->in = malloc(sv->in_cap);
-    s->out = malloc(OUT_CAP);
-    s->out_cap = s->out ? (size_t)OUT_CAP : 0;
-    s->proto = proto_begin();
-    if (!s->in || !s->out || !s->proto) {
-      proto_free(s->proto);
-      free(s->in);
-      free(s->out);
-      close(fd);
-      memset(s, 0, sizeof *s);
-      s->fd = -1;
-      fprintf(stderr, "%s: connection setup failed\n", sv->name);
-      return;
-    }
-    s->st = begin();
-    host_in_init(&s->hin, fd, sv->max_body);
-    s->ver11 = 1;
-    s->used = 1;
-    s->want_read = 1;
-    s->deadline = host_poll_now_ms() + (uint64_t)sv->idle_ms;
-    sv->nconn += 1;
-    sync_watch(sv, s);
-    if (sv->fatal) return;
+    if (adopt_fd(sv, fd) < 0) return;
   }
   (void)sync_listen(sv);
 }
@@ -1245,7 +1317,7 @@ static void arm_soonest(Server *sv) {
   sv->armed_deadline = soon;
 }
 
-static int listen_on(const char *host, int port) {
+static int listen_on(const char *host, int port, int reuseport) {
 #if defined(SOCK_CLOEXEC)
   int fd = socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0);
 #else
@@ -1256,6 +1328,19 @@ static int listen_on(const char *host, int port) {
   if (set_int(fd, SOL_SOCKET, SO_REUSEADDR, 1) < 0) {
     close(fd);
     return -1;
+  }
+  if (reuseport) {
+#ifdef SO_REUSEPORT
+    if (set_int(fd, SOL_SOCKET, SO_REUSEPORT, 1) < 0) {
+      close(fd);
+      return -1;
+    }
+#else
+    (void)reuseport;
+    close(fd);
+    errno = ENOTSUP;
+    return -1;
+#endif
   }
   memset(&addr, 0, sizeof addr);
   addr.sin_family = AF_INET;
@@ -1305,6 +1390,7 @@ void muro_http_config_init(MuroHttpConfig *cfg) {
   cfg->max_conn = 128;
   cfg->max_body = 8 * 1024 * 1024;
   cfg->drain_ms = 1000;
+  cfg->workers = 1;
 }
 
 void muro_http_config_usage(FILE *out, const MuroHttpConfig *cfg) {
@@ -1319,13 +1405,18 @@ void muro_http_config_usage(FILE *out, const MuroHttpConfig *cfg) {
           "  --max-connections N    accept cap. default 128, max 1024\n"
           "  --max-body N           body cap in bytes. default 8388608\n"
           "  --drain-ms N           SIGINT/SIGTERM drain. default 1000\n"
+          "  --workers N            processes. default 1, max 64\n"
+          "  --wait NAME            poll, kqueue, or epoll. default is native\n"
           "\n"
           "Environment, used when the flag is absent: MURO_HTTP_BIND,\n"
           "MURO_HTTP_PORT, MURO_HTTP_IDLE_MS, MURO_HTTP_MAX_CONNECTIONS,\n"
-          "MURO_HTTP_MAX_BODY, MURO_HTTP_DRAIN_MS.\n"
-          "The default bind host is 127.0.0.1. SIGINT and SIGTERM stop\n"
+          "MURO_HTTP_MAX_BODY, MURO_HTTP_DRAIN_MS, MURO_HTTP_WORKERS,\n"
+          "MURO_HTTP_WAIT.\n"
+          "The default bind host is 127.0.0.1. One worker is one process.\n"
+          "max-connections is per worker. SIGINT and SIGTERM stop\n"
           "accepting, finish an in-flight request, and close idle\n"
-          "connections. The process exits when the drain time is up.\n",
+          "connections. Each worker drains itself. The process exits\n"
+          "when the drain time is up.\n",
           name);
 }
 
@@ -1347,6 +1438,14 @@ int muro_http_config_env(MuroHttpConfig *cfg) {
   if (take_env_i(cfg, "MURO_HTTP_MAX_CONNECTIONS", 1, 1024, &cfg->max_conn) < 0) return -1;
   if (take_env_i(cfg, "MURO_HTTP_MAX_BODY", 0, 2147483647L, &cfg->max_body) < 0) return -1;
   if (take_env_i(cfg, "MURO_HTTP_DRAIN_MS", 0, 86400000L, &cfg->drain_ms) < 0) return -1;
+  if (take_env_i(cfg, "MURO_HTTP_WORKERS", 1, 64, &cfg->workers) < 0) return -1;
+  {
+    const char *wait = getenv("MURO_HTTP_WAIT");
+    if (wait && (!wait[0] || !host_poll_supported(wait))) {
+      fprintf(stderr, "%s: bad MURO_HTTP_WAIT\n", cfg_name(cfg));
+      return -1;
+    }
+  }
   bind = getenv("MURO_HTTP_BIND");
   if (bind) {
     if (!bind[0]) {
@@ -1382,6 +1481,20 @@ int muro_http_config_arg(MuroHttpConfig *cfg, int *index, int argc, char **argv)
     cfg->bind_host = val;
     return 1;
   }
+  if (strcmp(a, "--wait") == 0) {
+    if (*index + 1 >= argc) {
+      fprintf(stderr, "%s: --wait needs a value\n", cfg_name(cfg));
+      return -1;
+    }
+    *index += 1;
+    val = argv[*index];
+    if (!val || !host_poll_supported(val)) {
+      fprintf(stderr, "%s: bad --wait\n", cfg_name(cfg));
+      return -1;
+    }
+    if (setenv("MURO_HTTP_WAIT", val, 1) != 0) return -1;
+    return 1;
+  }
   if (strcmp(a, "--port") == 0) {
     slot = &cfg->port;
     lo = 0;
@@ -1402,6 +1515,10 @@ int muro_http_config_arg(MuroHttpConfig *cfg, int *index, int argc, char **argv)
     slot = &cfg->drain_ms;
     lo = 0;
     hi = 86400000L;
+  } else if (strcmp(a, "--workers") == 0) {
+    slot = &cfg->workers;
+    lo = 1;
+    hi = 64;
   } else {
     return 0;
   }
@@ -1625,12 +1742,13 @@ void host_io_progress(int fd) {
   s->body_idle = 0;
 }
 
-int muro_http_serve(const MuroHttpConfig *cfg, MuroHttpHandler handler, void *user) {
+static int serve_one(const MuroHttpConfig *cfg, MuroHttpHandler handler, void *user,
+                     int existing_fd, int channel, int reuseport) {
   Server sv;
   struct sigaction sa;
   const char *bind;
   const char *name;
-  int port;
+  int port = 0;
   int rc = 0;
   /* The flag parser already caps 1..1024. A caller that fills the
      struct directly gets the same refusal, before any allocation. */
@@ -1648,6 +1766,7 @@ int muro_http_serve(const MuroHttpConfig *cfg, MuroHttpHandler handler, void *us
   sv.max_conn = cfg->max_conn;
   sv.max_body = (uint64_t)cfg->max_body;
   sv.drain_ms = cfg->drain_ms;
+  sv.channel = channel;
   sv.in_cap = env_in_cap();
   sv.write_limit = env_write_limit();
   sv.stall_100 = env_stall_100();
@@ -1681,22 +1800,29 @@ int muro_http_serve(const MuroHttpConfig *cfg, MuroHttpHandler handler, void *us
     rc = -1;
     goto out;
   }
-  sv.listen_fd = listen_on(sv.bind_host, cfg->port);
-  if (sv.listen_fd == -2) {
-    fprintf(stderr, "%s: bad bind host\n", sv.name);
-    rc = -2;
-    goto out;
+  fprintf(stderr, "%s: wait %s\n", sv.name, host_poll_backend(sv.pq));
+  if (existing_fd >= 0) {
+    sv.listen_fd = existing_fd;
+  } else {
+    sv.listen_fd = listen_on(sv.bind_host, cfg->port, reuseport);
+    if (sv.listen_fd == -2) {
+      fprintf(stderr, "%s: bad bind host\n", sv.name);
+      rc = -2;
+      goto out;
+    }
+    if (sv.listen_fd < 0) {
+      fprintf(stderr, "%s: listen %s:%d: %s\n", sv.name, sv.bind_host, cfg->port, strerror(errno));
+      rc = -1;
+      goto out;
+    }
   }
-  if (sv.listen_fd < 0) {
-    fprintf(stderr, "%s: listen %s:%d: %s\n", sv.name, sv.bind_host, cfg->port, strerror(errno));
-    rc = -1;
-    goto out;
-  }
-  port = bound_port(sv.listen_fd);
-  if (port < 0) {
-    fprintf(stderr, "%s: getsockname: %s\n", sv.name, strerror(errno));
-    rc = -1;
-    goto out;
+  if (!channel) {
+    port = bound_port(sv.listen_fd);
+    if (port < 0) {
+      fprintf(stderr, "%s: getsockname: %s\n", sv.name, strerror(errno));
+      rc = -1;
+      goto out;
+    }
   }
   memset(&sa, 0, sizeof sa);
   sa.sa_handler = on_signal;
@@ -1705,12 +1831,21 @@ int muro_http_serve(const MuroHttpConfig *cfg, MuroHttpHandler handler, void *us
   sigaction(SIGINT, &sa, NULL);
   sigaction(SIGTERM, &sa, NULL);
   signal(SIGPIPE, SIG_IGN);
+  {
+    sigset_t unblock;
+    sigemptyset(&unblock);
+    sigaddset(&unblock, SIGINT);
+    sigaddset(&unblock, SIGTERM);
+    sigprocmask(SIG_UNBLOCK, &unblock, NULL);
+  }
   if (sync_listen(&sv) < 0) {
     rc = -1;
     goto out;
   }
-  printf("listening %s %d\n", sv.bind_host, port);
-  fflush(stdout);
+  if (!channel) {
+    printf("listening %s %d\n", sv.bind_host, port);
+    fflush(stdout);
+  }
   live_sv = &sv;
   while (!sv.fatal) {
     HostEv evs[32];
@@ -1724,7 +1859,7 @@ int muro_http_serve(const MuroHttpConfig *cfg, MuroHttpHandler handler, void *us
     arm_soonest(&sv);
     n = host_poll_wait(sv.pq, evs, 32);
     if (n < 0) {
-      fprintf(stderr, "%s: poll: %s\n", sv.name, strerror(errno));
+      fprintf(stderr, "%s: wait: %s\n", sv.name, strerror(errno));
       rc = -1;
       break;
     }
@@ -1784,4 +1919,332 @@ out:
   host_poll_close(sv.pq);
   free(sv.slots);
   return rc;
+}
+
+static void signal_pids(pid_t *pids, int n, int sig) {
+  int i;
+  for (i = 0; i < n; i++) {
+    if (pids[i] > 0) kill(pids[i], sig);
+  }
+}
+
+static int reap_children(pid_t *pids, int n) {
+  int left = 0;
+  int i;
+  int failed = 0;
+  int signaled = 0;
+  for (i = 0; i < n; i++) {
+    if (pids[i] > 0) left += 1;
+  }
+  while (left > 0) {
+    int status = 0;
+    pid_t pid;
+    if (parent_stop && !signaled) {
+      signal_pids(pids, n, SIGTERM);
+      signaled = 1;
+    }
+    pid = waitpid(-1, &status, 0);
+    if (pid < 0) {
+      if (errno == EINTR) continue;
+      return -1;
+    }
+    left -= 1;
+    if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) {
+      failed = 1;
+      if (!signaled) {
+        signal_pids(pids, n, SIGTERM);
+        signaled = 1;
+      }
+    }
+  }
+  return failed ? -1 : 0;
+}
+
+#if defined(__linux__)
+static int serve_reuseport(const MuroHttpConfig *cfg, MuroHttpHandler handler, void *user) {
+  pid_t pids[64];
+  int n = cfg->workers;
+  int i;
+  sigset_t block;
+  sigset_t old;
+  struct sigaction sa;
+  memset(pids, 0, sizeof pids);
+  parent_stop = 0;
+  sigemptyset(&block);
+  sigaddset(&block, SIGINT);
+  sigaddset(&block, SIGTERM);
+  if (sigprocmask(SIG_BLOCK, &block, &old) < 0) return -1;
+  fflush(stdout);
+  fflush(stderr);
+  for (i = 0; i < n; i++) {
+    pid_t pid = fork();
+    if (pid < 0) {
+      fprintf(stderr, "%s: fork: %s\n", cfg_name(cfg), strerror(errno));
+      signal_pids(pids, i, SIGTERM);
+      parent_stop = 1;
+      sigprocmask(SIG_SETMASK, &old, NULL);
+      reap_children(pids, i);
+      return -1;
+    }
+    if (pid == 0) {
+      int rc = serve_one(cfg, handler, user, -1, 0, 1);
+      _exit(rc == 0 ? 0 : 1);
+    }
+    pids[i] = pid;
+  }
+  memset(&sa, 0, sizeof sa);
+  sa.sa_handler = parent_on_signal;
+  sigemptyset(&sa.sa_mask);
+  sigaction(SIGINT, &sa, NULL);
+  sigaction(SIGTERM, &sa, NULL);
+  signal(SIGPIPE, SIG_IGN);
+  sigprocmask(SIG_SETMASK, &old, NULL);
+  fprintf(stderr, "%s: workers %d reuseport\n", cfg_name(cfg), n);
+  return reap_children(pids, n);
+}
+#else
+static int send_fd(int sock, int fd) {
+  struct msghdr msg;
+  struct iovec iov;
+  char dummy = 'c';
+  char cbuf[CMSG_SPACE(sizeof(int))];
+  struct cmsghdr *cmsg;
+  memset(&msg, 0, sizeof msg);
+  memset(cbuf, 0, sizeof cbuf);
+  iov.iov_base = &dummy;
+  iov.iov_len = 1;
+  msg.msg_iov = &iov;
+  msg.msg_iovlen = 1;
+  msg.msg_control = cbuf;
+  msg.msg_controllen = sizeof cbuf;
+  cmsg = CMSG_FIRSTHDR(&msg);
+  if (!cmsg) return -1;
+  cmsg->cmsg_level = SOL_SOCKET;
+  cmsg->cmsg_type = SCM_RIGHTS;
+  cmsg->cmsg_len = CMSG_LEN(sizeof(int));
+  memcpy(CMSG_DATA(cmsg), &fd, sizeof fd);
+  if (sendmsg(sock, &msg, 0) < 0) return -1;
+  return 0;
+}
+
+static int serve_handoff(const MuroHttpConfig *cfg, MuroHttpHandler handler, void *user) {
+  pid_t pids[64];
+  int parent_end[64];
+  int n = cfg->workers;
+  int lfd = -1;
+  int i;
+  int rr = 0;
+  int failed = 0;
+  int port;
+  sigset_t block;
+  sigset_t old;
+  struct sigaction sa;
+  const char *name = cfg_name(cfg);
+  const char *bind = (cfg->bind_host && cfg->bind_host[0]) ? cfg->bind_host : "127.0.0.1";
+  for (i = 0; i < 64; i++) {
+    pids[i] = 0;
+    parent_end[i] = -1;
+  }
+  lfd = listen_on(bind, cfg->port, 0);
+  if (lfd == -2) {
+    fprintf(stderr, "%s: bad bind host\n", name);
+    return -2;
+  }
+  if (lfd < 0) {
+    fprintf(stderr, "%s: listen %s:%d: %s\n", name, bind, cfg->port, strerror(errno));
+    return -1;
+  }
+  parent_stop = 0;
+  sigemptyset(&block);
+  sigaddset(&block, SIGINT);
+  sigaddset(&block, SIGTERM);
+  if (sigprocmask(SIG_BLOCK, &block, &old) < 0) {
+    close(lfd);
+    return -1;
+  }
+  fflush(stdout);
+  fflush(stderr);
+  for (i = 0; i < n; i++) {
+    int sp[2] = {-1, -1};
+    pid_t pid;
+    if (socketpair(AF_UNIX, SOCK_STREAM, 0, sp) < 0) {
+      fprintf(stderr, "%s: socketpair: %s\n", name, strerror(errno));
+      failed = 1;
+      break;
+    }
+    if (set_nb_cloexec(sp[0]) < 0 || set_nb_cloexec(sp[1]) < 0) {
+      fprintf(stderr, "%s: socketpair: %s\n", name, strerror(errno));
+      close(sp[0]);
+      close(sp[1]);
+      failed = 1;
+      break;
+    }
+    pid = fork();
+    if (pid < 0) {
+      fprintf(stderr, "%s: fork: %s\n", name, strerror(errno));
+      close(sp[0]);
+      close(sp[1]);
+      failed = 1;
+      break;
+    }
+    if (pid == 0) {
+      int j;
+      int rc;
+      close(lfd);
+      close(sp[0]);
+      for (j = 0; j < i; j++) {
+        if (parent_end[j] >= 0) close(parent_end[j]);
+      }
+      rc = serve_one(cfg, handler, user, sp[1], 1, 0);
+      _exit(rc == 0 ? 0 : 1);
+    }
+    close(sp[1]);
+    parent_end[i] = sp[0];
+    pids[i] = pid;
+  }
+  memset(&sa, 0, sizeof sa);
+  sa.sa_handler = parent_on_signal;
+  sigemptyset(&sa.sa_mask);
+  sigaction(SIGINT, &sa, NULL);
+  sigaction(SIGTERM, &sa, NULL);
+  signal(SIGPIPE, SIG_IGN);
+  sigprocmask(SIG_SETMASK, &old, NULL);
+  if (failed) {
+    parent_stop = 1;
+    signal_pids(pids, n, SIGTERM);
+    for (i = 0; i < n; i++) {
+      if (parent_end[i] >= 0) close(parent_end[i]);
+    }
+    close(lfd);
+    reap_children(pids, n);
+    return -1;
+  }
+  port = bound_port(lfd);
+  if (port < 0) {
+    fprintf(stderr, "%s: getsockname: %s\n", name, strerror(errno));
+    parent_stop = 1;
+    signal_pids(pids, n, SIGTERM);
+    for (i = 0; i < n; i++) {
+      if (parent_end[i] >= 0) close(parent_end[i]);
+    }
+    close(lfd);
+    reap_children(pids, n);
+    return -1;
+  }
+  fprintf(stderr, "%s: workers %d handoff\n", name, n);
+  printf("listening %s %d\n", bind, port);
+  fflush(stdout);
+  while (!parent_stop) {
+    struct pollfd pfd;
+    int pr;
+    pfd.fd = lfd;
+    pfd.events = POLLIN;
+    pr = poll(&pfd, 1, 200);
+    if (pr < 0) {
+      if (errno == EINTR) continue;
+      failed = 1;
+      break;
+    }
+    if (pr == 0) continue;
+    while (!parent_stop) {
+      struct sockaddr_in peer;
+      socklen_t len = sizeof peer;
+      int c = take_conn(lfd, &peer, &len);
+      int tries;
+      int sent = 0;
+      int alive = 0;
+      if (c < 0) {
+        if (errno == EINTR) continue;
+        if (errno == EAGAIN || errno == EWOULDBLOCK) break;
+        fprintf(stderr, "%s: accept: %s\n", name, strerror(errno));
+        failed = 1;
+        parent_stop = 1;
+        break;
+      }
+      for (tries = 0; tries < n; tries++) {
+        int w = (rr + tries) % n;
+        if (parent_end[w] < 0) continue;
+        if (send_fd(parent_end[w], c) == 0) {
+          rr = (w + 1) % n;
+          sent = 1;
+          break;
+        }
+        if (errno != EAGAIN && errno != EWOULDBLOCK) {
+          close(parent_end[w]);
+          parent_end[w] = -1;
+        }
+      }
+      if (!sent) {
+        struct pollfd pfds[64];
+        int map[64];
+        int np = 0;
+        int k;
+        for (tries = 0; tries < n; tries++) {
+          if (parent_end[tries] < 0) continue;
+          pfds[np].fd = parent_end[tries];
+          pfds[np].events = POLLOUT;
+          map[np] = tries;
+          np += 1;
+        }
+        if (np > 0 && poll(pfds, (nfds_t)np, 20) > 0) {
+          for (k = 0; k < np; k++) {
+            if (!(pfds[k].revents & POLLOUT)) continue;
+            if (send_fd(parent_end[map[k]], c) == 0) {
+              rr = (map[k] + 1) % n;
+              sent = 1;
+              break;
+            }
+          }
+        }
+      }
+      close(c);
+      if (sent) continue;
+      for (tries = 0; tries < n; tries++) {
+        if (parent_end[tries] >= 0) alive = 1;
+      }
+      if (!alive) {
+        failed = 1;
+        parent_stop = 1;
+        break;
+      }
+    }
+  }
+  parent_stop = 1;
+  signal_pids(pids, n, SIGTERM);
+  for (i = 0; i < n; i++) {
+    if (parent_end[i] >= 0) close(parent_end[i]);
+  }
+  close(lfd);
+  if (reap_children(pids, n) < 0) failed = 1;
+  return failed ? -1 : 0;
+}
+#endif
+
+int muro_http_serve(const MuroHttpConfig *cfg, MuroHttpHandler handler, void *user) {
+  int workers;
+  const char *bind;
+  struct in_addr probe;
+  if (!cfg || !handler || cfg->port < 0 || cfg->port > 65535 || cfg->idle_ms < 1 ||
+      cfg->max_conn < 1 || cfg->max_conn > 1024 || cfg->max_body < 0 || cfg->drain_ms < 0)
+    return -1;
+  workers = cfg->workers;
+  if (workers < 1 || workers > 64) {
+    fprintf(stderr, "%s: bad workers\n", cfg_name(cfg));
+    return -1;
+  }
+  if (workers == 1) return serve_one(cfg, handler, user, -1, 0, 0);
+  if (cfg->port == 0) {
+    fprintf(stderr, "%s: workers need a fixed port\n", cfg_name(cfg));
+    return -1;
+  }
+  bind = (cfg->bind_host && cfg->bind_host[0]) ? cfg->bind_host : "127.0.0.1";
+  if (inet_pton(AF_INET, bind, &probe) != 1) {
+    fprintf(stderr, "%s: bad bind host\n", cfg_name(cfg));
+    return -2;
+  }
+#if defined(__linux__)
+  return serve_reuseport(cfg, handler, user);
+#else
+  return serve_handoff(cfg, handler, user);
+#endif
 }

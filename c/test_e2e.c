@@ -91,6 +91,8 @@ static pid_t start_server(int idle_ms, int max_conn, int *port, const char *writ
     unsetenv("MURO_HTTP_BIND");
     unsetenv("MURO_HTTP_MAX_BODY");
     unsetenv("MURO_HTTP_DRAIN_MS");
+    unsetenv("MURO_HTTP_WORKERS");
+    unsetenv("MURO_HTTP_WAIT");
     if (bind_env && bind_env[0]) setenv("MURO_HTTP_BIND", bind_env, 1);
     unsetenv("MURO_HTTP_DB");
     unsetenv("MURO_HTTP_JWT_KEY");
@@ -1181,6 +1183,8 @@ static void check_exit2(const char *name, char **av, const char *sqlite_env, con
     unsetenv("MURO_HTTP_MAX_CONNECTIONS");
     unsetenv("MURO_HTTP_MAX_BODY");
     unsetenv("MURO_HTTP_DRAIN_MS");
+    unsetenv("MURO_HTTP_WORKERS");
+    unsetenv("MURO_HTTP_WAIT");
     unsetenv("SQLITE_PATH");
     unsetenv("MURO_TEST_FAIL_DB_ADMIT");
     unsetenv("MURO_TEST_WRITE_LIMIT");
