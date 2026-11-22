@@ -1566,6 +1566,9 @@ int main(int argc, char **argv) {
             "POST /echo HTTP/1.1\r\nHost: h\r\nTransfer-Encoding: chunked;q=\"a,b\"\r\n\r\n"
             "4\r\nwiki\r\n0\r\n\r\n",
             400, "malformed", 1);
+  expect_cl(port, "te-param-empty-q",
+            "POST /echo HTTP/1.1\r\nHost: h\r\nTransfer-Encoding: chunked;q=\"\"\r\n\r\n",
+            400, "malformed", 1);
   expect_cl(port, "chunk-bad",
             "POST /echo HTTP/1.1\r\nHost: h\r\nTransfer-Encoding: chunked\r\n\r\nzz\r\n", 400,
             "malformed", 1);
