@@ -84,12 +84,6 @@ static const char *wanted(void) {
 #endif
 }
 
-static int cloexec_fd(int fd) {
-  int fl = fcntl(fd, F_GETFD, 0);
-  if (fl < 0) return -1;
-  return fcntl(fd, F_SETFD, fl | FD_CLOEXEC);
-}
-
 static int find_fd(const HostPoll *p, int fd) {
   int i;
   for (i = 0; i < p->n; i++) {
@@ -450,6 +444,12 @@ static HostPoll *new_poll(void) {
 }
 
 #if defined(__APPLE__)
+static int cloexec_fd(int fd) {
+  int fl = fcntl(fd, F_GETFD, 0);
+  if (fl < 0) return -1;
+  return fcntl(fd, F_SETFD, fl | FD_CLOEXEC);
+}
+
 static HostPoll *new_kqueue(void) {
   HostPoll *p = calloc(1, sizeof *p);
   if (!p) return NULL;
