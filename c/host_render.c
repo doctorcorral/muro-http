@@ -12,8 +12,9 @@
 /* The handler does not own the framing headers, and it cannot put a
    CR or LF into the reason or end the header block early. A bad
    reason or a bad extra block fails the copy. Connection,
-   Content-Length, and Transfer-Encoding in the extra block are
-   dropped. The book still writes Connection and Content-Length. */
+   Content-Length, Transfer-Encoding, and Date in the extra block
+   are dropped. The book still writes Date, Connection, and either
+   Content-Length or Transfer-Encoding. */
 
 static int bytes_have(const uint8_t *p, size_t n, uint8_t a, uint8_t b) {
   size_t i;
@@ -38,7 +39,7 @@ static int name_is(const uint8_t *p, size_t n, const char *lit) {
 
 static int owned_name(const uint8_t *p, size_t n) {
   return name_is(p, n, "connection") || name_is(p, n, "content-length") ||
-         name_is(p, n, "transfer-encoding");
+         name_is(p, n, "transfer-encoding") || name_is(p, n, "date");
 }
 
 /* 0 keeps *out (malloc'd, or NULL when nothing remains). -1 rejects. */
@@ -119,8 +120,9 @@ static size_t copy_out(uint8_t *dst, size_t cap, muro__slice msg, size_t *got) {
 }
 
 size_t host_copy_response(uint8_t *dst, size_t cap, uint64_t status, const uint8_t *reason,
-                          size_t reason_n, const uint8_t *extra, size_t extra_n,
-                          const uint8_t *body, size_t body_n, uint64_t keep, size_t *got) {
+                          size_t reason_n, const uint8_t *date, size_t date_n, const uint8_t *extra,
+                          size_t extra_n, const uint8_t *body, size_t body_n, uint64_t keep,
+                          uint64_t omit, size_t *got) {
   uint8_t *filtered = NULL;
   size_t filtered_n = 0;
   muro__slice msg;
@@ -131,17 +133,123 @@ size_t host_copy_response(uint8_t *dst, size_t cap, uint64_t status, const uint8
     muro_http_reset();
     return 0;
   }
-  msg = httpRender(status, as_slice(reason, reason_n), as_slice(filtered, filtered_n),
-                   as_slice(body, body_n), keep);
+  msg = httpRender(status, as_slice(reason, reason_n), as_slice(date, date_n),
+                   as_slice(filtered, filtered_n), as_slice(body, body_n), keep, omit);
   n = copy_out(dst, cap, msg, got);
   free(filtered);
   return n;
 }
 
-size_t host_copy_malformed(uint8_t *dst, size_t cap, size_t *got) {
-  return copy_out(dst, cap, httpMalformed(), got);
+static muro__slice literal_of(int which, muro__slice date, uint64_t omit) {
+  static const uint8_t type[] = "Content-Type: text/plain; charset=utf-8\r\n";
+  muro__slice extra = muro__slice_of(type, sizeof type - 1);
+  if (omit == 1 && which != 5) {
+    uint64_t status = 400;
+    muro__slice reason = muro__slice_of((const uint8_t *)"Bad Request", 11);
+    muro__slice body = muro__slice_of((const uint8_t *)"malformed", 9);
+    if (which == 1) {
+      status = 500;
+      reason = muro__slice_of((const uint8_t *)"Internal Server Error", 21);
+      body = muro__slice_of((const uint8_t *)"internal", 8);
+    } else if (which == 2) {
+      status = 501;
+      reason = muro__slice_of((const uint8_t *)"Not Implemented", 15);
+      body = muro__slice_of((const uint8_t *)"unimplemented", 13);
+    } else if (which == 3) {
+      status = 413;
+      reason = muro__slice_of((const uint8_t *)"Content Too Large", 17);
+      body = muro__slice_of((const uint8_t *)"too large", 9);
+    } else if (which == 4) {
+      status = 417;
+      reason = muro__slice_of((const uint8_t *)"Expectation Failed", 18);
+      body = muro__slice_of((const uint8_t *)"expectation", 11);
+    }
+    return httpRender(status, reason, date, extra, body, 1, 1);
+  }
+  if (which == 1) return httpInternal(date);
+  if (which == 2) return httpNotImplemented(date);
+  if (which == 3) return httpTooLarge(date);
+  if (which == 4) return httpExpect(date);
+  if (which == 5) return httpContinue(date);
+  return httpMalformed(date);
 }
 
-size_t host_copy_internal(uint8_t *dst, size_t cap, size_t *got) {
-  return copy_out(dst, cap, httpInternal(), got);
+size_t host_copy_literal(uint8_t *dst, size_t cap, int which, const uint8_t *date, size_t date_n,
+                         uint64_t omit, size_t *got) {
+  return copy_out(dst, cap, literal_of(which, as_slice(date, date_n), omit), got);
+}
+
+static int reject_reason(const uint8_t *reason, size_t reason_n, const uint8_t *extra, size_t extra_n,
+                         uint8_t **filtered, size_t *filtered_n) {
+  if (bytes_have(reason, reason_n, '\r', '\n') || filter_extra(extra, extra_n, filtered, filtered_n) < 0) {
+    muro_http_reset();
+    return -1;
+  }
+  return 0;
+}
+
+size_t host_copy_head(uint8_t *dst, size_t cap, uint64_t status, const uint8_t *reason, size_t reason_n,
+                      const uint8_t *date, size_t date_n, const uint8_t *extra, size_t extra_n,
+                      uint64_t nlen, uint64_t keep, size_t *got) {
+  uint8_t *filtered = NULL;
+  size_t filtered_n = 0;
+  muro__slice msg;
+  size_t n;
+  if (reject_reason(reason, reason_n, extra, extra_n, &filtered, &filtered_n) < 0) {
+    if (got) *got = 0;
+    return 0;
+  }
+  msg = httpHead(status, as_slice(reason, reason_n), as_slice(date, date_n), as_slice(filtered, filtered_n),
+                 nlen, keep);
+  n = copy_out(dst, cap, msg, got);
+  free(filtered);
+  return n;
+}
+
+size_t host_copy_chunked(uint8_t *dst, size_t cap, uint64_t status, const uint8_t *reason,
+                         size_t reason_n, const uint8_t *date, size_t date_n, const uint8_t *extra,
+                         size_t extra_n, uint64_t keep, size_t *got) {
+  uint8_t *filtered = NULL;
+  size_t filtered_n = 0;
+  muro__slice msg;
+  size_t n;
+  if (reject_reason(reason, reason_n, extra, extra_n, &filtered, &filtered_n) < 0) {
+    if (got) *got = 0;
+    return 0;
+  }
+  msg = httpChunked(status, as_slice(reason, reason_n), as_slice(date, date_n),
+                    as_slice(filtered, filtered_n), keep);
+  n = copy_out(dst, cap, msg, got);
+  free(filtered);
+  return n;
+}
+
+size_t host_copy_delim(uint8_t *dst, size_t cap, uint64_t status, const uint8_t *reason, size_t reason_n,
+                       const uint8_t *date, size_t date_n, const uint8_t *extra, size_t extra_n,
+                       size_t *got) {
+  uint8_t *filtered = NULL;
+  size_t filtered_n = 0;
+  muro__slice msg;
+  size_t n;
+  if (reject_reason(reason, reason_n, extra, extra_n, &filtered, &filtered_n) < 0) {
+    if (got) *got = 0;
+    return 0;
+  }
+  msg = httpDelim(status, as_slice(reason, reason_n), as_slice(date, date_n), as_slice(filtered, filtered_n));
+  n = copy_out(dst, cap, msg, got);
+  free(filtered);
+  return n;
+}
+
+size_t host_copy_chunk(uint8_t *dst, size_t cap, const uint8_t *body, size_t body_n, size_t *got) {
+  if (!body || body_n == 0) {
+    if (got) *got = 0;
+    muro_http_reset();
+    return 0;
+  }
+  return copy_out(dst, cap, httpChunk(as_slice(body, body_n)), got);
+}
+
+size_t host_copy_last(uint8_t *dst, size_t cap, size_t *got) {
+  return copy_out(dst, cap, httpLastChunk(), got);
 }

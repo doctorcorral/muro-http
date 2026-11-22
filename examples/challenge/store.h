@@ -12,7 +12,7 @@
    below NORMAL, is not opened. :memory: cannot be WAL. It stays
    journal mode memory and is for tests. It is not durable.
    With WAL and synchronous=NORMAL, a commit survives a process
-   crash and may be lost on power loss. The reopen tests prove a
+   crash and may be lost on power loss. The reopen tests check a
    clean close and reopen, not crash or power-loss durability.
    A write returns only after that commit: create returns 0, like
    returns 1 or 2. The row JSON is rendered inside that transaction.

@@ -203,10 +203,28 @@ step allocates 0.
 waits with `poll(2)`. `examples/challenge/httpd.c` and
 `examples/hello/hello.c` are each a `main`. The core owns the file
 descriptors, the buffers, the connection table, and the clock. It
-performs the action `step` returns. It does not choose a status, a
-header, or a body. A read error closes the fd. It is not `evError`.
+performs the action `step` returns. It writes `100 Continue`, 413,
+and 417, and it writes 501 for a method the book marks with method
+code 1. It copies the book's 400 and the book's unimplemented
+transfer coding (origin 2). `host_in_policy` does not return 501
+for that coding. It does not invent a status the book did not name. A
+partial `100 Continue` is not watched for read until the last byte
+is written. Arming the drain inside `muro_http_body_read` closes
+idle connections on that turn. A `muro_http_body_read` that has to
+wait uses the same poll. Other
+connections are accepted and served. A socket already inside a
+read is left out of that set, and past eight nested reads the wait
+is that socket alone. A read error closes
+the fd. It is not `evError`.
 That event holds in the read phase. A full receive buffer that the
 image did not consume is a host limit. Closing it is not a status.
+A body declared longer than 16384 is streamed, so it does not sit
+in that buffer until the 65536-byte buffer fills. A header block
+longer than 16384 is malformed in the book. An unfinished header
+that fills a smaller test cap still closes with no status. A chunk
+size discovered after the 200 has been written closes the
+connection. That close is not a 413. The chunked response has no
+last-chunk. `c/test_http11` checks that close.
 
 SQLite, the JWT check, and `decide` live in the challenge handler.
 The first `decide` passes `db-unknown` and `like-unknown`, with auth,
@@ -222,8 +240,11 @@ stepper sees one reply, with the observe bit clear.
 
 ## The response bytes are emitted
 
-`priv/muro/http/render.muro` is `httpRender(status, reason, extra,
-body, keep)`, plus the literals `httpMalformed` and `httpInternal`.
+`priv/muro/http/render.muro` is `httpRender(status, reason, date,
+extra, body, keep, omit)`, plus `httpHead`, `httpChunked`,
+`httpDelim`, `httpChunk`, `httpLastChunk`, and the literals
+`httpMalformed`, `httpInternal`, `httpNotImplemented`,
+`httpTooLarge`, `httpExpect`, and `httpContinue`.
 `--backend c` writes `c/generated/render.c`. Do not hand-edit that
 file. The book does not import `decide.muro`. Gap 6 is why: a `def`
 is a global C symbol with no book prefix. `conn.o` must not be linked
@@ -236,30 +257,50 @@ each tag against that header. Status, error, and act have no `*From`
 helper, so those header numbers are not checked against the emitter.
 The feature that would remove the copy is still gap 6.
 
-`httpRender` writes the status line, `Connection`, `Content-Length`,
-the handler's extra header block, a blank line, and the body. `keep`
-of 1 is `Connection: close`. Any other keep is `Connection:
-keep-alive`. Common codes (200, 201, 204, 400, 401, 404, 405, 500,
-503) are digit literals. Any other code goes through `rdShow`. The
-handler supplies the reason. The host drops `Connection`,
-`Content-Length`, and `Transfer-Encoding` from the extra block, and
-rejects a reason or an extra block that contains a CR or LF outside
-a CRLF line ending. The book still writes `Connection` and
+`httpRender` writes the status line, `Date`, `Connection`,
+`Content-Length`, the handler's extra header block, a blank line,
+and the body unless `omit` is 1. `keep` of 1 is `Connection: close`.
+Any other keep is `Connection: keep-alive`. Common codes (200, 201,
+204, 400, 401, 404, 405, 500, 503) are digit literals. Any other
+code goes through `rdShow`. The handler supplies the reason. The
+host drops `Connection`, `Content-Length`, `Transfer-Encoding`, and
+`Date` from the extra block, and rejects a reason or an extra block
+that contains a CR or LF outside a CRLF line ending. The book still
+writes `Date`, `Connection`, and `Content-Length`. `httpChunked`
+writes `Transfer-Encoding: chunked` instead of a length.
+`httpDelim` writes neither. `httpHead` writes a declared length and
+no body bytes. `omit` 1 on `httpRender` drops the body and keeps
 `Content-Length`.
 
-muro checks five equations by reduction (`refl`): empty keep, empty
-close, 204, `httpMalformed`, and `httpInternal`. Evidence is not a
-run. `rdShow` of 0 is the literal `0`, so an empty body reduces. A
-positive length does not finish, so a ten-byte body is not an
-equation. `c/test_render` checks the five strings and that longer
-body in the emitted C.
+`render.muro` is emitted as C only, so ExUnit does not run it.
+`mix muro.gen` typechecks and reduces, under the fuel bound, the
+empty keep, empty close, 204, `HEAD` of an empty body, the six
+dated literals (`httpMalformed`, `httpInternal`,
+`httpNotImplemented`, `httpTooLarge`, `httpExpect`,
+`httpContinue`), the last-chunk bytes `0\r\n\r\n` from `httpChunk`
+of an empty body (`chunk-last`), the chunked
+header block, the close-delimited header block, and a declared
+length of 0. `last-chunk` reduces `httpLastChunk` to `httpChunk` of
+an empty body. The host calls `httpLastChunk`. The reduction is the evidence term. It is not a
+separate program, and it is not the poll loop. `rdShow` of 0 is the literal
+`0`, so an empty body is an equation. A positive length does not
+finish, so a ten-byte body is not an equation, and neither is `HEAD`
+omit of a non-empty body or a positive chunk. `c/test_render` calls
+`httpRender`, `httpHead`, `httpChunked`, `httpDelim`, `httpChunk`,
+`httpLastChunk`, and the six literals, and checks those bytes in
+the emitted C, including the fixed date
+`Sun, 06 Nov 1994 08:49:37 GMT`. The host
+formats the live clock in `c/host_date.c` with `gmtime_r` and
+English weekday and month names. That formatter is not a book.
 
 `c/host_render.c` includes `render.h` and copies the slice into the
 host buffer, so the `httpRender` signature cannot drift. `conn.h` and
 `render.h` both put the prelude under `MURO__PRELUDE`, so one
 translation unit can include both. `c/host.c` calls
-`host_copy_response` and does not include `render.h`. The host then
-calls `muro_http_reset`.
+`host_copy_response`, `host_copy_head`, `host_copy_chunked`,
+`host_copy_delim`, `host_copy_chunk`,
+`host_copy_last`, and `host_copy_literal`. It does not include
+`render.h`. The host then calls `muro_http_reset`.
 
 muro 0.21.15 and muro 0.21.16 do not change the response bytes.
 0.21.15 is a temporal check over a keyed family. 0.21.16 ranks a
@@ -271,7 +312,10 @@ a socket loop. The pin is 0.22.14. The per-key family is below.
 `priv/muro/http/family.muro` is a hold rule over a fixed script. It
 is not `host_poll`. One key is one connection. `accept` is never
 held. `reply` is held while an earlier instance of that key is
-unresolved. Another key does not wait. The rule does not order
+unresolved. The pin's `agda/Muro/Family.agda` calls those two kinds
+`init` and `signal`. `accept` is `init`. `reply` is `signal`. The
+book does not use the Agda names. This repository does not contain
+that proof. Another key does not wait. The rule does not order
 replies across different connections. `--backend fsm` emits
 `MuroHttp.FamilyFsm.Conns`. `--backend c` omits the family.
 `c/host.c` never calls that dispatcher.
@@ -296,9 +340,14 @@ writes the dispatcher is not proved.
 The three family lines share one graph. 3721 states and 10521
 successor-table entries are a regression pin of the script (key `a`
 is accept, then reply, then reply; key `b` is accept). A different
-count means that graph changed. It is not the proof above, and it
-is not a bound on live sockets. `test/family_test.exs` is a second
-check: two keys on the emitted dispatcher, in host order (accept
+count means that graph changed. `test/family_test.exs` runs
+`Muro.CLI.Check.run` on this file and asserts the four lines above,
+including 3, 3721, and 10521. `mix test` runs that file, and the
+`check` job runs `mix test`, so the counts are a CI result. The
+jobs `check`, `asan`, and `macos` do not print these counts as
+their own step. The walk is not the proof above, and it is not a
+bound on live sockets. The same test also checks the emitted
+dispatcher: two keys, in host order (accept
 before reply), a refused step on a held reply, a withdraw that does
 not open the reply, a finished reply reported until `resolved`, and
 one send on the reply turn.
@@ -393,7 +442,10 @@ An unboxed field has to be a machine word, a `WBool`, a `Slice`, an
 `Opt` of those, or more unboxed data. `Conn` does not store a verb
 or a path. One unused id word stays 0. The image is thirteen words.
 Word 6 is the origin: 0 is a handler response, 1 is the book's
-malformed response.
+malformed response, 2 is the book's unimplemented response.
+`c/test_conn` checks that a `gzip` request steps to write with
+origin 2 and keep 1. `health-progress-off` is flag-yes only when
+the write offset is exactly 8. `c/test_conn` wants that field to be 8.
 
 A session payload of `Bytes` or `Slice` is refused. `Piece` and
 `Reply` are fieldless data. The buffer stays on the `Ev` of the image.
@@ -404,10 +456,37 @@ classifies allocates 1. The image does not call `decide`, so a reply
 step allocates 0. The challenge handler's `decide` allocates 1, and
 the handler resets the arena before the next call.
 
-ExUnit skips a closed equation when an argument's normal form is a
-machine term (`argument 1 normal form is a machine term`). `step`
-takes the unboxed `Conn`, so `after-close` and `after-close-tick`
-are reduction evidence and skipped by `test/conn_eq_test.exs`.
-The host suite runs nullary wrappers (`sawAfterDo`, `sawAfterMode`)
-whose results are declared data. Those two `Conn` equations are the
-ones the wrapper does not cover.
+ExUnit skips a closed equation when a result or an argument normal
+form is a machine term. `test/conn_eq_test.exs` skips three:
+`unimpl-code` (the origin word is a `U64`; `unimpl-origin` is the
+flag that runs, and `c/test_conn` wants word 6 to be 2), and
+`after-close` and `after-close-tick` (`step` takes the unboxed
+`Conn`, so the argument normal form is a machine term). The host
+suite runs nullary wrappers (`sawAfterDo`, `sawAfterTick`,
+`sawAfterMode`) whose results are declared data. ExUnit runs
+`after-close-do`, `after-close-tick-do`, and `after-close-mode`.
+`after-close` and `after-close-tick` stay skipped. `test/request_test.exs` skips thirty-four,
+all named in `CHANGELOG.md`: the `U64` method, coding, and Expect
+codes, `crlf-end`, `lf-end`, `hdr-prefers-crlf`, `header-count`,
+`header-name-0`, `ck-empty`, `ck-hi`, `te-not-final`,
+`te-gzip-code`, `te-chunk-param`, `te-chunk-ows`, `te-gzip-param`,
+`te-param-not-final`, and every `framedEnd` and `streamTake` refl
+(`post-framed`, `post-framed-short`, `post-take-short`,
+`ck-framed`, `ck-framed-hdr`, `ck-take-hdr`, `stream-take-hi`,
+`stream-end-hi`, `stream-take-edge`, `stream-end-edge`,
+`stream-take-lf`). `test/route_test.exs` skips sixteen
+`route.muro` equations, also named in `README.md`: `route-verb-get`,
+`route-verb-post`, `route-verb-other`, `route-health`, `route-feed`,
+`route-posts`, `route-id`, `route-like`, `route-tail`,
+`route-id-42`, `route-idn-42`, `route-id-zero`, `route-id-abc`,
+`route-id-lead`, `route-like-id`, and `route-health-id`.
+`c/test_route` checks those results. Its names drop the `route-`
+prefix (`verb-get` through `health-id`). `c/test_classify` checks
+the thirty-four skipped `request.muro` results, and the failure
+name is the equation name. `stream-take-hi` and
+`stream-take-edge` are header-only buffers. `stream-cl` and
+`cap-cl` are C checks in `c/test_classify`, not book equations.
+They name the classify status of those buffers, not a body of
+that size. A body past 16384 bytes is `c/test_http11` and
+`c/test_hello`. The hello echo waits until `muro_http_body_read`
+is entered before it sends the rest of the body.

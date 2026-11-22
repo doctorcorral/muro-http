@@ -17,6 +17,17 @@
 
 static int failures;
 static const char *bin_path = "c/muro-hello";
+static char stream_ready[96];
+
+static int wait_file(const char *path, int ms) {
+  int left = ms;
+  while (left > 0) {
+    if (access(path, R_OK) == 0) return 0;
+    usleep(20000);
+    left -= 20;
+  }
+  return -1;
+}
 
 static void fail(const char *name, const char *what) {
   fprintf(stderr, "FAIL %s: %s\n", name, what);
@@ -36,7 +47,8 @@ static int parse_port(const char *line, const char *host) {
   return port;
 }
 
-static pid_t start_hello(const char *env_bind, const char *bind_host, int *port) {
+static pid_t start_hello(const char *env_bind, const char *bind_host, int *port,
+                        const char *drain_ms, const char *idle_ms) {
   int sp[2];
   pid_t pid;
   char buf[128];
@@ -61,6 +73,8 @@ static pid_t start_hello(const char *env_bind, const char *bind_host, int *port)
     unsetenv("MURO_HTTP_PORT");
     unsetenv("MURO_HTTP_IDLE_MS");
     unsetenv("MURO_HTTP_MAX_CONNECTIONS");
+    unsetenv("MURO_HTTP_MAX_BODY");
+    unsetenv("MURO_HTTP_DRAIN_MS");
     unsetenv("MURO_HTTP_DB");
     unsetenv("MURO_HTTP_JWT_KEY");
     unsetenv("SQLITE_PATH");
@@ -71,8 +85,13 @@ static pid_t start_hello(const char *env_bind, const char *bind_host, int *port)
       av[argc++] = "--bind";
       av[argc++] = (char *)host;
     }
+    if (!idle_ms || !idle_ms[0]) idle_ms = "5000";
     av[argc++] = "--idle-ms";
-    av[argc++] = "5000";
+    av[argc++] = (char *)idle_ms;
+    if (drain_ms) {
+      av[argc++] = "--drain-ms";
+      av[argc++] = (char *)drain_ms;
+    }
     av[argc] = NULL;
     execv(bin_path, av);
     perror("exec");
@@ -349,6 +368,265 @@ static void check_help(void) {
   if (strstr(buf, "--bind") == NULL) fail("help", "usage");
 }
 
+static int send_n(int fd, const void *p, size_t n) {
+  const char *s = p;
+  size_t off = 0;
+  while (off < n) {
+    ssize_t w = send(fd, s + off, n - off, 0);
+    if (w < 0 && errno == EINTR) continue;
+    if (w <= 0) return -1;
+    off += (size_t)w;
+  }
+  return 0;
+}
+
+static void check_stream_echo(const char *host, int port) {
+  int fd = dial(host, port);
+  char head[128];
+  char *payload = NULL;
+  char *buf = NULL;
+  int hn;
+  size_t n = 0;
+  int status = 0;
+  int conn_close = 0;
+  int content_length = -1;
+  size_t body_n = 0;
+  size_t i;
+  hn = snprintf(head, sizeof head, "POST /echo HTTP/1.1\r\nHost: t\r\nContent-Length: 20000\r\n\r\n");
+  payload = malloc(20000);
+  buf = malloc(22000);
+  if (fd < 0 || hn < 0 || !payload || !buf) {
+    fail("stream-echo", "setup");
+    if (fd >= 0) close(fd);
+    free(payload);
+    free(buf);
+    return;
+  }
+  memset(payload, 'z', 20000);
+  /* Headers only. The rest waits until muro_http_body_read is entered
+     for this streamed body. Sending both at once lets one read hold
+     the whole message, streamTake stays 0, and hello echoes req->body
+     without that read. A sleep raced a slow accept. */
+  unlink(stream_ready);
+  if (send_n(fd, head, (size_t)hn) < 0) {
+    fail("stream-echo", "send");
+    close(fd);
+    free(payload);
+    free(buf);
+    return;
+  }
+  if (stream_ready[0] == 0 || wait_file(stream_ready, 5000) < 0) {
+    fail("stream-echo", "body-read");
+    close(fd);
+    free(payload);
+    free(buf);
+    return;
+  }
+  if (send_n(fd, payload, 20000) < 0) {
+    fail("stream-echo", "body");
+    close(fd);
+    free(payload);
+    free(buf);
+    return;
+  }
+  while (n < 22000) {
+    ssize_t r = read(fd, buf + n, 22000 - n);
+    if (r < 0 && errno == EINTR) continue;
+    if (r <= 0) break;
+    n += (size_t)r;
+    if (n > 200) {
+      int hend = -1;
+      size_t k;
+      for (k = 0; k + 3 < n; k++) {
+        if (buf[k] == '\r' && buf[k + 1] == '\n' && buf[k + 2] == '\r' && buf[k + 3] == '\n') {
+          hend = (int)k;
+          break;
+        }
+      }
+      if (hend >= 0 && n >= (size_t)hend + 4 + 20000) break;
+    }
+  }
+  buf[n < 22000 ? n : 21999] = 0;
+  if (sscanf(buf, "HTTP/1.1 %d", &status) != 1 || status != 200) {
+    fprintf(stderr, "FAIL stream-echo: status %d\n", status);
+    failures += 1;
+  }
+  conn_close = memmem(buf, n, "Connection: close", 17) != NULL;
+  if (conn_close) fail("stream-echo", "closed");
+  {
+    char *eoh = memmem(buf, n, "\r\n\r\n", 4);
+    if (!eoh) {
+      fail("stream-echo", "headers");
+    } else {
+      unsigned char *body = (unsigned char *)eoh + 4;
+      body_n = n - (size_t)(body - (unsigned char *)buf);
+      if (find_cl(buf, (int)(eoh - buf), &content_length) != 0 || content_length != 20000)
+        fail("stream-echo", "content-length");
+      if (body_n != 20000) {
+        fprintf(stderr, "FAIL stream-echo: body %zu\n", body_n);
+        failures += 1;
+      } else {
+        for (i = 0; i < body_n; i++) {
+          if (body[i] != 'z') {
+            fail("stream-echo", "byte");
+            break;
+          }
+        }
+      }
+    }
+  }
+  close(fd);
+  free(payload);
+  free(buf);
+}
+
+static void check_drain_before_status(void) {
+  pid_t pid;
+  int port = -1;
+  int fd;
+  char head[128];
+  char partial[64];
+  char ready[96];
+  int hn;
+  int i;
+  int closed = 0;
+  int status = 0;
+  int saw = 0;
+  if (snprintf(ready, sizeof ready, "/tmp/muro-hello-drain-%ld", (long)getpid()) < 0) {
+    fail("drain-before", "path");
+    return;
+  }
+  unlink(ready);
+  setenv("MURO_TEST_STREAM_READY", ready, 1);
+  pid = start_hello(NULL, "127.0.0.1", &port, "400", NULL);
+  unsetenv("MURO_TEST_STREAM_READY");
+  if (pid < 0) {
+    unlink(ready);
+    return;
+  }
+  fd = dial("127.0.0.1", port);
+  hn = snprintf(head, sizeof head, "POST /echo HTTP/1.1\r\nHost: t\r\nContent-Length: 20000\r\n\r\n");
+  memset(partial, 'q', sizeof partial);
+  if (fd < 0 || hn < 0 || send_n(fd, head, (size_t)hn) < 0) {
+    fail("drain-before", "send");
+    if (fd >= 0) close(fd);
+    stop_server(pid);
+    unlink(ready);
+    return;
+  }
+  /* Same gate as stream-echo: the signal is delivered only after
+     muro_http_body_read has been entered for this streamed body. */
+  if (wait_file(ready, 5000) < 0) {
+    fail("drain-before", "body-read");
+    close(fd);
+    stop_server(pid);
+    unlink(ready);
+    return;
+  }
+  if (send_n(fd, partial, sizeof partial) < 0) {
+    fail("drain-before", "partial");
+    close(fd);
+    stop_server(pid);
+    unlink(ready);
+    return;
+  }
+  kill(pid, SIGTERM);
+  for (i = 0; i < 25; i++) {
+    int nfd = dial("127.0.0.1", port);
+    if (nfd < 0) {
+      closed = 1;
+      break;
+    }
+    close(nfd);
+    usleep(20000);
+  }
+  if (!closed) fail("drain-before", "listen stayed open");
+  close(fd);
+  for (i = 0; i < 40; i++) {
+    pid_t got = waitpid(pid, &status, WNOHANG);
+    if (got == pid) {
+      saw = 1;
+      break;
+    }
+    usleep(50000);
+  }
+  if (!saw) {
+    kill(pid, SIGKILL);
+    waitpid(pid, NULL, 0);
+    fail("drain-before", "did not exit");
+    unlink(ready);
+    return;
+  }
+  if (!(WIFEXITED(status) && WEXITSTATUS(status) == 0)) fail("drain-before", "status");
+  unlink(ready);
+}
+
+/* Headers only, Content-Length past the window, then no body bytes.
+   hello calls muro_http_body_read from on_req, which is decide.
+   The idle deadline must end that read. hello returns 400 with body
+   "bad\n". host_in_after sees the read error 400 and copies
+   httpMalformed instead, then closes. A 200 would mean the body
+   was treated as already buffered. */
+static void check_decide_idle(void) {
+  pid_t pid;
+  int port = -1;
+  int fd = -1;
+  char ready[96];
+  char head[128];
+  char body[128];
+  size_t body_n = 0;
+  int hn;
+  int status = 0;
+  int conn_close = 0;
+  char extra;
+  ssize_t tail;
+  if (snprintf(ready, sizeof ready, "/tmp/muro-hello-idle-%ld", (long)getpid()) < 0) {
+    fail("decide-idle", "path");
+    return;
+  }
+  unlink(ready);
+  setenv("MURO_TEST_STREAM_READY", ready, 1);
+  pid = start_hello(NULL, "127.0.0.1", &port, NULL, "500");
+  unsetenv("MURO_TEST_STREAM_READY");
+  if (pid < 0) {
+    unlink(ready);
+    return;
+  }
+  fd = dial("127.0.0.1", port);
+  hn = snprintf(head, sizeof head, "POST /echo HTTP/1.1\r\nHost: t\r\nContent-Length: 20000\r\n\r\n");
+  if (fd < 0 || hn < 0 || send_n(fd, head, (size_t)hn) < 0) {
+    fail("decide-idle", "send");
+    if (fd >= 0) close(fd);
+    stop_server(pid);
+    unlink(ready);
+    return;
+  }
+  if (wait_file(ready, 5000) < 0) {
+    fail("decide-idle", "body-read");
+    close(fd);
+    stop_server(pid);
+    unlink(ready);
+    return;
+  }
+  if (read_response(fd, &status, &conn_close, body, sizeof body, &body_n) < 0) {
+    fail("decide-idle", "exchange");
+    close(fd);
+    stop_server(pid);
+    unlink(ready);
+    return;
+  }
+  if (status != 400 || strcmp(body, "malformed") != 0) {
+    fprintf(stderr, "FAIL decide-idle: status %d body '%s'\n", status, body);
+    failures += 1;
+  }
+  if (!conn_close) fail("decide-idle", "wanted close");
+  tail = read(fd, &extra, 1);
+  if (tail != 0) fail("decide-idle", "still open");
+  close(fd);
+  stop_server(pid);
+  unlink(ready);
+}
+
 int main(int argc, char **argv) {
   const char *host = "127.0.0.1";
   pid_t pid;
@@ -363,8 +641,20 @@ int main(int argc, char **argv) {
   alarm(60);
   check_help();
   check_bad_bind();
-  pid = start_hello("nope", host, &port);
-  if (pid < 0) return 1;
+  check_decide_idle();
+  if (snprintf(stream_ready, sizeof stream_ready, "/tmp/muro-hello-stream-%ld", (long)getpid()) <
+      0)
+    stream_ready[0] = 0;
+  else {
+    unlink(stream_ready);
+    setenv("MURO_TEST_STREAM_READY", stream_ready, 1);
+  }
+  pid = start_hello("nope", host, &port, NULL, NULL);
+  unsetenv("MURO_TEST_STREAM_READY");
+  if (pid < 0) {
+    unlink(stream_ready);
+    return 1;
+  }
   expect_one(host, port, "hello", "GET / HTTP/1.1\r\nHost: t\r\n\r\n", 200, "hello\n", 0);
   expect_one(host, port, "health-is-hello", "GET /health HTTP/1.1\r\nHost: t\r\n\r\n", 200, "hello\n",
              0);
@@ -388,7 +678,10 @@ int main(int argc, char **argv) {
   } else {
     close(fd);
   }
+  check_stream_echo(host, port);
+  unlink(stream_ready);
   stop_server(pid);
+  check_drain_before_status();
   if (failures != 0) {
     fprintf(stderr, "%d failures\n", failures);
     return 1;
