@@ -138,7 +138,8 @@ void muro_http_config_usage(FILE *out, const MuroHttpConfig *cfg);
    On Linux each worker binds with SO_REUSEPORT. Elsewhere the
    parent binds once and passes accepted sockets. The backlog is
    SOMAXCONN. The parent does not close an accepted socket because
-   workers are busy; it waits until one can take it. A drop is
+   workers are busy; it waits until one can take it, and it keeps
+   its own copy until the worker acks that receipt. A drop is
    logged as "handoff drop N: reason" and summarized as
    "handoff drops N". A worker that dies from a signal or a
    non-zero status stops the pool. */

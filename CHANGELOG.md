@@ -7,7 +7,8 @@
   and a full worker channel blocks the parent until some worker
   can take the fd. The parent scans every live channel again
   after that wait. It does not close an accepted socket because
-  the workers are busy. A channel error removes that worker from
+  the workers are busy, and it keeps its copy until the worker
+  acks the receipt. A channel error removes that worker from
   rotation. The parent reaps children with `waitpid(WNOHANG)`. A
   signalled or non-zero worker exit stops the pool, as on Linux.
   A real drop is logged (`handoff drop N: reason`) and the parent

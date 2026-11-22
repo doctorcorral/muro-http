@@ -439,7 +439,9 @@ socket to a worker with `SCM_RIGHTS`, round-robin. The listen
 backlog is `SOMAXCONN`. If every worker channel is full, the
 parent waits until one can take the socket and then scans the
 workers again. It does not close an accepted socket because the
-workers are busy. `EINTR` on that send is retried. A channel that
+workers are busy. The parent's copy stays open until the worker
+has received the fd and written one ack byte back. `EINTR` on
+that send is retried. A channel that
 errors is removed from the rotation. A worker that dies from a
 signal or a non-zero status stops the rest of the pool. A drop
 that does happen (the process is shutting down, or no worker
@@ -857,7 +859,8 @@ book linked beside it must not import that book. `decide.muro` and
   per worker. Linux workers share the port with `SO_REUSEPORT`.
   Other systems pass accepted sockets from one listener. The
   backlog is `SOMAXCONN`. A busy handoff waits; it does not drop
-  the accepted socket. `handoff drops N` on stderr is the count.
+  the accepted socket. The parent keeps its copy until the worker
+  acks. `handoff drops N` on stderr is the count.
 - `addCap` still wraps a `U64`. The driver reports a delta of 8.
 - `bc-empty`, `bc-off-empty`, `bc-len-empty`, and `bc-long` reduce.
   They return before `jbScan`. A refl that walks the scanner does not

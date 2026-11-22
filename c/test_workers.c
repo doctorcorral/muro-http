@@ -387,6 +387,9 @@ static void check_flood(const char *wait) {
   int done[32];
   pid_t pid = -1;
   int errors = 0;
+  int err_dial = 0;
+  int err_io = 0;
+  int err_late = 0;
   int i;
   if (port < 0) {
     fail("flood", "port");
@@ -414,25 +417,30 @@ static void check_flood(const char *wait) {
     fds[i] = dial_nb(port);
     if (fds[i] < 0 || wait_connected(fds[i]) < 0 || write_req(fds[i]) < 0) {
       errors += 1;
+      err_dial += 1;
       if (fds[i] >= 0) {
         close(fds[i]);
         fds[i] = -1;
       }
     }
-    if (i + 1 == workers) usleep(300000);
+    /* Give each worker time to enter the handler and stop reading
+       its handoff channel, so the rest of the wave fills the
+       socketpair and the parent has to wait. */
+    if (i + 1 == workers) usleep(500000);
   }
-  usleep(100000);
+  usleep(200000);
   if (write(gw[1], "xxxx", workers) != workers) {
     fail("flood", "release");
     goto done_flood;
   }
   for (i = 0; i < N; i++) {
     lens[i] = 0;
+    bufs[i][0] = 0;
     done[i] = fds[i] < 0;
   }
   {
     int spins;
-    for (spins = 0; spins < 80; spins++) {
+    for (spins = 0; spins < 400; spins++) {
       struct pollfd pfds[32];
       int map[32];
       int np = 0;
@@ -458,6 +466,7 @@ static void check_flood(const char *wait) {
         if (lens[k] + 1 >= sizeof bufs[k]) {
           done[k] = 1;
           errors += 1;
+          err_io += 1;
           continue;
         }
         r = recv(fds[k], bufs[k] + lens[k], sizeof bufs[k] - 1 - lens[k], 0);
@@ -465,6 +474,7 @@ static void check_flood(const char *wait) {
         if (r <= 0) {
           done[k] = 1;
           errors += 1;
+          err_io += 1;
           continue;
         }
         lens[k] += (size_t)r;
@@ -473,15 +483,20 @@ static void check_flood(const char *wait) {
         else if (st < 0) {
           done[k] = 1;
           errors += 1;
+          err_io += 1;
         }
       }
     }
   }
   for (i = 0; i < N; i++) {
-    if (fds[i] >= 0 && !done[i]) errors += 1;
+    if (fds[i] >= 0 && !done[i]) {
+      errors += 1;
+      err_late += 1;
+    }
   }
   if (errors) {
-    fprintf(stderr, "FAIL %s flood: %d errors\n", active_wait, errors);
+    fprintf(stderr, "FAIL %s flood: %d errors dial %d io %d late %d\n", active_wait, errors,
+            err_dial, err_io, err_late);
     failures += 1;
   }
 done_flood:

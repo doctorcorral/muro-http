@@ -166,6 +166,7 @@ typedef struct Server {
   uint64_t drain_deadline;
   int stall_100;
   int channel; /* listen_fd carries SCM_RIGHTS, it is not a TCP listener */
+  int ack_owed; /* SCM_RIGHTS receipts not yet acked to the parent */
 } Server;
 
 /* The body reader re-enters this loop. NULL outside muro_http_serve. */
@@ -319,7 +320,7 @@ static int sync_listen(Server *sv) {
   int err;
   if (sv->listen_fd < 0) return 0;
   on = sv->nconn < sv->max_conn;
-  if (host_poll_watch(sv->pq, sv->listen_fd, on, 0) < 0) {
+  if (host_poll_watch(sv->pq, sv->listen_fd, on, sv->ack_owed > 0) < 0) {
     err = errno;
     fprintf(stderr, "%s: listen watch failed: %s\n", sv->name, strerror(err));
     sv->fatal = 1;
@@ -1258,6 +1259,26 @@ static int recv_passed(int ch, int *out) {
   return 1;
 }
 
+/* One byte per received fd. The parent keeps its own copy until
+   these bytes arrive, so it must read them or the socketpair fills. */
+static void flush_acks(Server *sv) {
+  if (!sv->channel || sv->listen_fd < 0) return;
+  while (sv->ack_owed > 0) {
+    char buf[64];
+    int n = sv->ack_owed > 64 ? 64 : sv->ack_owed;
+    ssize_t w;
+    memset(buf, 'a', (size_t)n);
+    w = send(sv->listen_fd, buf, (size_t)n, 0);
+    if (w < 0 && errno == EINTR) continue;
+    if (w < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) return;
+    if (w <= 0) {
+      sv->ack_owed = 0;
+      return;
+    }
+    sv->ack_owed -= (int)w;
+  }
+}
+
 static void take_passed(Server *sv) {
   while (sv->nconn < sv->max_conn && !sv->fatal && sv->listen_fd >= 0) {
     int fd = -1;
@@ -1276,17 +1297,22 @@ static void take_passed(Server *sv) {
       break;
     }
     if (fd < 0) continue;
+    sv->ack_owed += 1;
+    flush_acks(sv);
     if (adopt_fd(sv, fd) < 0) break;
   }
   (void)sync_listen(sv);
 }
 
 static void accept_some(Server *sv) {
-  if (sv->draining || sv->listen_fd < 0) return;
+  if (sv->listen_fd < 0) return;
   if (sv->channel) {
-    take_passed(sv);
+    flush_acks(sv);
+    if (!sv->draining) take_passed(sv);
+    else (void)sync_listen(sv);
     return;
   }
+  if (sv->draining) return;
   while (sv->nconn < sv->max_conn && !sv->fatal) {
     struct sockaddr_in peer;
     socklen_t len = sizeof peer;
@@ -2083,16 +2109,85 @@ static void test_handoff_sndbuf(int fd) {
   (void)setsockopt(fd, SOL_SOCKET, SO_SNDBUF, &sz, sizeof sz);
 }
 
+/* In-flight SCM_RIGHTS the parent has not seen acked yet. The
+   parent's copy stays open until the ack: closing it while the
+   only other reference sits in the socketpair makes the client
+   see EOF on this kernel. */
+#define HANDOFF_FLIGHT 32
+
 static void note_drop(const char *name, unsigned long *drops, const char *why) {
   *drops += 1;
   fprintf(stderr, "%s: handoff drop %lu: %s\n", name, *drops, why);
+}
+
+static void drop_inflight(const char *name, int *q, int nq, unsigned long *drops, const char *why) {
+  int i;
+  for (i = 0; i < nq; i++) {
+    if (q[i] < 0) continue;
+    note_drop(name, drops, why);
+    close(q[i]);
+    q[i] = -1;
+  }
+}
+
+/* 1 if the caller should read again, 0 on EAGAIN, -1 if this
+   channel is closed and its in-flight fds were dropped. */
+static int drain_acks(const char *name, int w, int *parent_end, int flight[][HANDOFF_FLIGHT],
+                      int *nflight, unsigned long *drops) {
+  char buf[64];
+  ssize_t n;
+  int i;
+  int ch = parent_end[w];
+  int nq;
+  if (ch < 0) return 0;
+  nq = nflight[w];
+  n = recv(ch, buf, sizeof buf, 0);
+  if (n < 0) {
+    if (errno == EINTR) return 1;
+    if (errno == EAGAIN || errno == EWOULDBLOCK) return 0;
+    fprintf(stderr, "%s: handoff worker %d: %s\n", name, w, strerror(errno));
+    drop_inflight(name, flight[w], nq, drops, "channel");
+    nflight[w] = 0;
+    close(ch);
+    parent_end[w] = -1;
+    return -1;
+  }
+  if (n == 0 || n > nq) {
+    if (n > nq) fprintf(stderr, "%s: handoff worker %d: ack\n", name, w);
+    drop_inflight(name, flight[w], nq, drops, "channel");
+    nflight[w] = 0;
+    close(ch);
+    parent_end[w] = -1;
+    return -1;
+  }
+  for (i = 0; i < (int)n; i++) {
+    close(flight[w][i]);
+    flight[w][i] = -1;
+  }
+  nflight[w] = nq - (int)n;
+  if (nflight[w] > 0)
+    memmove(flight[w], flight[w] + n, (size_t)nflight[w] * sizeof flight[w][0]);
+  return 1;
+}
+
+static void drain_all(const char *name, int *parent_end, int n, int flight[][HANDOFF_FLIGHT],
+                      int *nflight, unsigned long *drops) {
+  int w;
+  for (w = 0; w < n; w++) {
+    int rc;
+    do {
+      rc = drain_acks(name, w, parent_end, flight, nflight, drops);
+    } while (rc > 0);
+  }
 }
 
 /* Reap exited workers without blocking. A signalled or non-zero
    exit stops the pool the way the Linux reuseport parent does.
    A clean exit only removes that worker. 0 if the accept loop
    can continue, -1 if it must stop. */
-static int reap_handoff(const char *name, pid_t *pids, int *parent_end, int n, int *failed) {
+static int reap_handoff(const char *name, pid_t *pids, int *parent_end, int n,
+                        int flight[][HANDOFF_FLIGHT], int *nflight, int *failed,
+                        unsigned long *drops) {
   for (;;) {
     int status = 0;
     int idx;
@@ -2118,8 +2213,14 @@ static int reap_handoff(const char *name, pid_t *pids, int *parent_end, int n, i
       }
     }
     if (idx >= 0) {
+      int rc;
       pids[idx] = 0;
+      do {
+        rc = drain_acks(name, idx, parent_end, flight, nflight, drops);
+      } while (rc > 0);
       if (parent_end[idx] >= 0) {
+        drop_inflight(name, flight[idx], nflight[idx], drops, "worker exit");
+        nflight[idx] = 0;
         close(parent_end[idx]);
         parent_end[idx] = -1;
       }
@@ -2139,46 +2240,55 @@ static int reap_handoff(const char *name, pid_t *pids, int *parent_end, int n, i
   }
 }
 
-/* Hand c to a worker. Closes c on every return. 0 when a worker
-   has the socket. -1 when this process had to drop it. Busy
-   workers are not a drop: this blocks until one channel can take
-   the fd, rescanning every worker after each wait. */
+/* Hand c to a worker. On success the worker's flight queue owns c
+   and this does not close it. -1 drops c. Busy workers are not a
+   drop: this blocks until a channel has room, rescanning every
+   worker after each wait. */
 static int pass_conn(const char *name, int *parent_end, pid_t *pids, int n, int *rr, int c,
-                     int *failed, unsigned long *drops) {
+                     int flight[][HANDOFF_FLIGHT], int *nflight, int *failed,
+                     unsigned long *drops) {
   for (;;) {
     int tries;
     int alive;
     struct pollfd pfds[64];
-    int map[64];
     int np;
     int pr;
-    if (reap_handoff(name, pids, parent_end, n, failed) < 0 || parent_stop) {
+    if (reap_handoff(name, pids, parent_end, n, flight, nflight, failed, drops) < 0 ||
+        parent_stop) {
       note_drop(name, drops, "shutting down");
       close(c);
       return -1;
     }
+    drain_all(name, parent_end, n, flight, nflight, drops);
     for (tries = 0; tries < n; tries++) {
       int w = (*rr + tries) % n;
       if (parent_end[w] < 0) continue;
+      if (nflight[w] >= HANDOFF_FLIGHT) continue;
       if (send_fd(parent_end[w], c) == 0) {
+        flight[w][nflight[w]] = c;
+        nflight[w] += 1;
         *rr = (w + 1) % n;
-        close(c);
         return 0;
       }
       if (errno == EAGAIN || errno == EWOULDBLOCK) continue;
       fprintf(stderr, "%s: handoff worker %d: %s\n", name, w, strerror(errno));
+      drop_inflight(name, flight[w], nflight[w], drops, "channel");
+      nflight[w] = 0;
       close(parent_end[w]);
       parent_end[w] = -1;
     }
     np = 0;
     alive = 0;
     for (tries = 0; tries < n; tries++) {
+      short ev = 0;
       if (parent_end[tries] < 0) continue;
       alive = 1;
+      if (nflight[tries] < HANDOFF_FLIGHT) ev = (short)(ev | POLLOUT);
+      if (nflight[tries] > 0) ev = (short)(ev | POLLIN);
+      if (!ev) continue;
       pfds[np].fd = parent_end[tries];
-      pfds[np].events = POLLOUT;
+      pfds[np].events = ev;
       pfds[np].revents = 0;
-      map[np] = tries;
       np += 1;
     }
     if (!alive || np == 0) {
@@ -2203,6 +2313,8 @@ static int pass_conn(const char *name, int *parent_end, pid_t *pids, int n, int 
 static int serve_handoff(const MuroHttpConfig *cfg, MuroHttpHandler handler, void *user) {
   pid_t pids[64];
   int parent_end[64];
+  int flight[64][HANDOFF_FLIGHT];
+  int nflight[64];
   int n = cfg->workers;
   int lfd = -1;
   int i;
@@ -2216,8 +2328,11 @@ static int serve_handoff(const MuroHttpConfig *cfg, MuroHttpHandler handler, voi
   const char *name = cfg_name(cfg);
   const char *bind = (cfg->bind_host && cfg->bind_host[0]) ? cfg->bind_host : "127.0.0.1";
   for (i = 0; i < 64; i++) {
+    int j;
     pids[i] = 0;
     parent_end[i] = -1;
+    nflight[i] = 0;
+    for (j = 0; j < HANDOFF_FLIGHT; j++) flight[i][j] = -1;
   }
   lfd = listen_on(bind, cfg->port, 0);
   if (lfd == -2) {
@@ -2312,7 +2427,8 @@ static int serve_handoff(const MuroHttpConfig *cfg, MuroHttpHandler handler, voi
   while (!parent_stop) {
     struct pollfd pfd;
     int pr;
-    if (reap_handoff(name, pids, parent_end, n, &failed) < 0) break;
+    if (reap_handoff(name, pids, parent_end, n, flight, nflight, &failed, &drops) < 0) break;
+    drain_all(name, parent_end, n, flight, nflight, &drops);
     pfd.fd = lfd;
     pfd.events = POLLIN;
     pr = poll(&pfd, 1, 200);
@@ -2326,7 +2442,7 @@ static int serve_handoff(const MuroHttpConfig *cfg, MuroHttpHandler handler, voi
       struct sockaddr_in peer;
       socklen_t len = sizeof peer;
       int c;
-      if (reap_handoff(name, pids, parent_end, n, &failed) < 0) break;
+      if (reap_handoff(name, pids, parent_end, n, flight, nflight, &failed, &drops) < 0) break;
       c = take_conn(lfd, &peer, &len);
       if (c < 0) {
         if (errno == EINTR) continue;
@@ -2336,12 +2452,16 @@ static int serve_handoff(const MuroHttpConfig *cfg, MuroHttpHandler handler, voi
         parent_stop = 1;
         break;
       }
-      if (pass_conn(name, parent_end, pids, n, &rr, c, &failed, &drops) < 0) break;
+      if (pass_conn(name, parent_end, pids, n, &rr, c, flight, nflight, &failed, &drops) < 0)
+        break;
     }
   }
   parent_stop = 1;
+  drain_all(name, parent_end, n, flight, nflight, &drops);
   signal_pids(pids, n, SIGTERM);
   for (i = 0; i < n; i++) {
+    drop_inflight(name, flight[i], nflight[i], &drops, "shutting down");
+    nflight[i] = 0;
     if (parent_end[i] >= 0) close(parent_end[i]);
   }
   close(lfd);
