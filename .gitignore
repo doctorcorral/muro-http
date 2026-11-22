@@ -22,4 +22,5 @@ c/test_http11
 c/muro-httpd
 c/muro-hello
 c/muro-stream
+/bench/loadgen
 *.o

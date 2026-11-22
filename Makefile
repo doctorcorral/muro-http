@@ -7,6 +7,9 @@ CHALLENGE_INC = -I examples/challenge
 
 .PHONY: all c-check c-sanitize clean
 
+bench/loadgen: bench/loadgen.c
+	$(CC) -Wall -Wextra -Werror -std=c11 -O2 -o $@ bench/loadgen.c -pthread
+
 SAN_CFLAGS = -Wall -Wextra -Werror -std=c11 -D_GNU_SOURCE -I c -I c/generated -include c/shim.h -g -fno-omit-frame-pointer -fsanitize=address,undefined
 SAN_LDFLAGS = -fsanitize=address,undefined
 

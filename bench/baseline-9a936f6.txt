@@ -1,0 +1,352 @@
+DATE Sun Nov 22 11:28:33 CST 2026
+UNAME Darwin 192.168.0.129 24.6.0 Darwin Kernel Version 24.6.0: Mon Jan 19 22:01:58 PST 2026; root:xnu-11417.140.69.708.3~1/RELEASE_ARM64_T6041 arm64
+11:28  up 162 days, 14:31, 3 users, load averages: 0.97 1.22 1.38
+PAGESIZE 16384
+Mach Virtual Memory Statistics: (page size of 16384 bytes)
+Pages free:                               40432.
+Pages active:                            262171.
+Pages inactive:                          260575.
+Pages speculative:                         1483.
+Pages throttled:                              0.
+Pages wired down:                        182714.
+Pages purgeable:                            253.
+"Translation faults":              415890013289.
+Pages copy-on-write:                 3687983284.
+Pages zero filled:                  57707983009.
+Pages reactivated:                 123193823311.
+PROCS
+63442 10.0% 0.7% /Users/rcc/.grok/bin/grok
+63440 0.2% 0.0% script
+37946 0.2% 14.2% /System/Library/Frameworks/Virtualization.framework/Versions/A/XPCServices/com.apple.Virtualization.VirtualMachine.xpc/Contents/MacOS/com.apple.Virtualization.VirtualMachine
+37944 0.0% 0.1% /Applications/Docker.app/Contents/MacOS/com.docker.virtualization
+37940 0.0% 0.2% /Applications/Docker.app/Contents/MacOS/com.docker.build
+37913 0.0% 0.1% /Applications/Docker.app/Contents/MacOS/com.docker.backend
+37912 0.0% 0.6% /Applications/Docker.app/Contents/MacOS/com.docker.backend
+37908 0.0% 0.1% /Applications/Docker.app/Contents/MacOS/com.docker.backend
+85656 0.0% 0.0% /opt/homebrew/Cellar/erlang/28.1/lib/erlang/erts-16.1/bin/beam.smp
+GIT 9a936f6a0c6c76d9a8447836fb27a59185478481
+SERVER_CMD ./c/muro-hello --bind 127.0.0.1 --port 18180 --max-connections 1024 --idle-ms 60000
+TOOL ./bench/loadgen --host 127.0.0.1 --port 18180 --concurrency N --duration SEC --mode keepalive|close
+SERVER_LOG
+listening 127.0.0.1 18180
+==== WARMUP mode=keepalive c=1 ====
+requests 63556
+errors 0
+non2xx 0
+overflow 0
+elapsed_ms 2000
+rps 31778.00
+p50_us 32
+p99_us 41
+warmup_exit 0
+==== RUN mode=keepalive c=1 n=1 ====
+requests 162565
+errors 0
+non2xx 0
+overflow 0
+elapsed_ms 5000
+rps 32513.00
+p50_us 31
+p99_us 37
+exit 0
+==== RUN mode=keepalive c=1 n=2 ====
+requests 162460
+errors 0
+non2xx 0
+overflow 0
+elapsed_ms 5000
+rps 32492.00
+p50_us 31
+p99_us 37
+exit 0
+==== RUN mode=keepalive c=1 n=3 ====
+requests 162787
+errors 0
+non2xx 0
+overflow 0
+elapsed_ms 5000
+rps 32557.40
+p50_us 31
+p99_us 37
+exit 0
+==== WARMUP mode=keepalive c=8 ====
+requests 118144
+errors 0
+non2xx 0
+overflow 0
+elapsed_ms 2000
+rps 59072.00
+p50_us 119
+p99_us 243
+warmup_exit 0
+==== RUN mode=keepalive c=8 n=1 ====
+requests 293396
+errors 0
+non2xx 0
+overflow 0
+elapsed_ms 5000
+rps 58679.20
+p50_us 119
+p99_us 245
+exit 0
+==== RUN mode=keepalive c=8 n=2 ====
+requests 295182
+errors 0
+non2xx 0
+overflow 0
+elapsed_ms 5000
+rps 59036.40
+p50_us 119
+p99_us 244
+exit 0
+==== RUN mode=keepalive c=8 n=3 ====
+requests 294622
+errors 0
+non2xx 0
+overflow 0
+elapsed_ms 5000
+rps 58924.40
+p50_us 119
+p99_us 244
+exit 0
+==== WARMUP mode=keepalive c=32 ====
+requests 119135
+errors 0
+non2xx 0
+overflow 0
+elapsed_ms 2000
+rps 59567.50
+p50_us 519
+p99_us 1050
+warmup_exit 0
+==== RUN mode=keepalive c=32 n=1 ====
+requests 295413
+errors 0
+non2xx 0
+overflow 0
+elapsed_ms 5000
+rps 59082.60
+p50_us 524
+p99_us 1061
+exit 0
+==== RUN mode=keepalive c=32 n=2 ====
+requests 297386
+errors 0
+non2xx 0
+overflow 0
+elapsed_ms 5000
+rps 59477.20
+p50_us 519
+p99_us 1054
+exit 0
+==== RUN mode=keepalive c=32 n=3 ====
+requests 297196
+errors 0
+non2xx 0
+overflow 0
+elapsed_ms 5000
+rps 59439.20
+p50_us 520
+p99_us 1053
+exit 0
+==== WARMUP mode=keepalive c=128 ====
+requests 114657
+errors 0
+non2xx 0
+overflow 0
+elapsed_ms 2002
+rps 57271.23
+p50_us 2226
+p99_us 2355
+warmup_exit 0
+==== RUN mode=keepalive c=128 n=1 ====
+requests 287454
+errors 0
+non2xx 0
+overflow 0
+elapsed_ms 5002
+rps 57467.81
+p50_us 2219
+p99_us 2327
+exit 0
+==== RUN mode=keepalive c=128 n=2 ====
+requests 286187
+errors 0
+non2xx 0
+overflow 0
+elapsed_ms 5002
+rps 57214.51
+p50_us 2228
+p99_us 2337
+exit 0
+==== RUN mode=keepalive c=128 n=3 ====
+requests 288008
+errors 0
+non2xx 0
+overflow 0
+elapsed_ms 5002
+rps 57578.57
+p50_us 2213
+p99_us 2329
+exit 0
+==== WARMUP mode=close c=1 ====
+requests 32316
+errors 0
+non2xx 0
+overflow 0
+elapsed_ms 2000
+rps 16158.00
+p50_us 32
+p99_us 39
+warmup_exit 0
+==== RUN mode=close c=1 n=1 ====
+requests 80357
+errors 0
+non2xx 0
+overflow 0
+elapsed_ms 5000
+rps 16071.40
+p50_us 32
+p99_us 39
+exit 0
+==== RUN mode=close c=1 n=2 ====
+requests 80463
+errors 0
+non2xx 0
+overflow 0
+elapsed_ms 5000
+rps 16092.60
+p50_us 33
+p99_us 39
+exit 0
+==== RUN mode=close c=1 n=3 ====
+requests 80534
+errors 0
+non2xx 0
+overflow 0
+elapsed_ms 5000
+rps 16106.80
+p50_us 32
+p99_us 39
+exit 0
+==== WARMUP mode=close c=8 ====
+requests 86968
+errors 0
+non2xx 0
+overflow 0
+elapsed_ms 2000
+rps 43484.00
+p50_us 109
+p99_us 189
+warmup_exit 0
+==== RUN mode=close c=8 n=1 ====
+requests 212896
+errors 0
+non2xx 0
+overflow 0
+elapsed_ms 5000
+rps 42579.20
+p50_us 108
+p99_us 189
+exit 0
+==== RUN mode=close c=8 n=2 ====
+requests 212921
+errors 0
+non2xx 0
+overflow 0
+elapsed_ms 5028
+rps 42347.06
+p50_us 108
+p99_us 187
+exit 0
+==== RUN mode=close c=8 n=3 ====
+requests 209788
+errors 0
+non2xx 0
+overflow 0
+elapsed_ms 5000
+rps 41957.60
+p50_us 108
+p99_us 191
+exit 0
+==== WARMUP mode=close c=32 ====
+requests 90840
+errors 0
+non2xx 0
+overflow 0
+elapsed_ms 2000
+rps 45420.00
+p50_us 384
+p99_us 696
+warmup_exit 0
+==== RUN mode=close c=32 n=1 ====
+requests 216277
+errors 0
+non2xx 0
+overflow 0
+elapsed_ms 5000
+rps 43255.40
+p50_us 388
+p99_us 704
+exit 0
+==== RUN mode=close c=32 n=2 ====
+requests 220679
+errors 0
+non2xx 0
+overflow 0
+elapsed_ms 5000
+rps 44135.80
+p50_us 385
+p99_us 643
+exit 0
+==== RUN mode=close c=32 n=3 ====
+requests 220603
+errors 0
+non2xx 0
+overflow 0
+elapsed_ms 5000
+rps 44120.60
+p50_us 383
+p99_us 678
+exit 0
+==== WARMUP mode=close c=128 ====
+requests 82879
+errors 0
+non2xx 0
+overflow 0
+elapsed_ms 2002
+rps 41398.10
+p50_us 1452
+p99_us 2028
+warmup_exit 0
+==== RUN mode=close c=128 n=1 ====
+requests 208732
+errors 0
+non2xx 0
+overflow 0
+elapsed_ms 5002
+rps 41729.71
+p50_us 1463
+p99_us 2550
+exit 0
+==== RUN mode=close c=128 n=2 ====
+requests 207141
+errors 0
+non2xx 0
+overflow 0
+elapsed_ms 5140
+rps 40299.81
+p50_us 1505
+p99_us 2085
+exit 0
+==== RUN mode=close c=128 n=3 ====
+requests 211838
+errors 0
+non2xx 0
+overflow 0
+elapsed_ms 5002
+rps 42350.66
+p50_us 1466
+p99_us 2943
+exit 0
+BASELINE_DONE
