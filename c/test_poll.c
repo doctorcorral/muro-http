@@ -632,6 +632,43 @@ static void check_kq_partial(void) {
   close_pair(sp[0], sp[1]);
   host_poll_close(p);
 }
+
+/* Read add succeeds, write add fails, and the read rollback also
+   fails. The failed rollback has to delete the leftover knote so
+   a later wait does not report the socket, and a following watch
+   still works. */
+static void check_kq_rollback_fail(void) {
+  HostPoll *p = host_poll_open();
+  int sp[2] = {-1, -1};
+  int rc;
+  if (!p) {
+    fail("rollback-fail", "open");
+    return;
+  }
+  if (!kqueue_backend(p)) {
+    host_poll_close(p);
+    return;
+  }
+  if (socketpair(AF_UNIX, SOCK_STREAM, 0, sp) < 0) {
+    fail("rollback-fail", "socketpair");
+    host_poll_close(p);
+    return;
+  }
+  setenv("MURO_HTTP_TEST_KQ_FAIL_AFTER", "1", 1);
+  setenv("MURO_HTTP_TEST_KQ_FAIL_TIMES", "2", 1);
+  rc = host_poll_watch(p, sp[0], 1, 1);
+  unsetenv("MURO_HTTP_TEST_KQ_FAIL_AFTER");
+  unsetenv("MURO_HTTP_TEST_KQ_FAIL_TIMES");
+  if (rc == 0) fail("rollback-fail", "applied");
+  if (write(sp[1], "z", 1) != 1) fail("rollback-fail", "write");
+  if (saw_read(p, sp[0])) fail("rollback-fail", "stuck");
+  if (host_poll_watch(p, sp[0], 1, 0) < 0 || !saw_read(p, sp[0])) fail("rollback-fail", "recover");
+  unsetenv("MURO_HTTP_TEST_KQ_FAIL_AFTER");
+  unsetenv("MURO_HTTP_TEST_KQ_FAIL_TIMES");
+  host_poll_watch(p, sp[0], 0, 0);
+  close_pair(sp[0], sp[1]);
+  host_poll_close(p);
+}
 #endif
 
 static void run_suite(const char *name) {
@@ -687,6 +724,7 @@ int main(void) {
   check_fd_reuse_fail();
   check_kq_eintr();
   check_kq_partial();
+  check_kq_rollback_fail();
   reject("epoll");
 #elif defined(__linux__)
   run_suite("epoll");

@@ -16,12 +16,14 @@
   worker's `recvmsg` is an error: the fd is not adopted, and a
   complete fd in that buffer is closed.
 - kqueue applies one filter per `kevent` and retries `EINTR`. A
-  failed second filter is rolled back. A failed delete still
+  failed second filter is rolled back. If that undo also fails,
+  both filters are deleted and the watch row is dropped, so a
+  leftover knote cannot outlive the row. A failed delete still
   drops the watch row, so a reused fd number gets `EV_ADD`.
   `poll`, kqueue, and epoll reserve a slot for a due idle tick
   instead of overwriting an fd event. `c/test_poll` checks that
-  slot, fd reuse, an injected `EINTR`, and a partial kevent
-  change. `c/test_workers` runs on `poll` and on the native wait.
+  slot, fd reuse, an injected `EINTR`, a partial kevent change,
+  and a failed rollback. `c/test_workers` runs on `poll` and on the native wait.
   It includes a close-mode flood with `workers > 1` and a
   `SIGKILL` of one worker.
 - `bench/loadgen` includes `sys/time.h`, defines `_DEFAULT_SOURCE`,

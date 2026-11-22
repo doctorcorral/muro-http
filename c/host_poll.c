@@ -270,7 +270,9 @@ static int poll_wait(HostPoll *p, HostEv *out, int max) {
    MURO_HTTP_TEST_KQ_EINTR=N makes the next N change calls return
    EINTR once, then run the real kevent.
    MURO_HTTP_TEST_KQ_FAIL_AFTER=N lets N change calls reach kevent,
-   then fails one call with EIO. */
+   then fails one call with EIO.
+   MURO_HTTP_TEST_KQ_FAIL_TIMES=M, with FAIL_AFTER, fails M calls
+   in a row. The default is 1. */
 static int kq_env_take(const char *name, int *left) {
   const char *e = getenv(name);
   char *end = NULL;
@@ -309,6 +311,23 @@ static int kq_one(HostPoll *p, int fd, int16_t filt, int add) {
     }
     took = kq_env_take("MURO_HTTP_TEST_KQ_FAIL_AFTER", &left);
     if (took == 1) {
+      const char *times = getenv("MURO_HTTP_TEST_KQ_FAIL_TIMES");
+      char *tend = NULL;
+      long n = 1;
+      if (times && *times) {
+        errno = 0;
+        n = strtol(times, &tend, 10);
+        if (errno || !tend || *tend || n < 1 || n > 1000000L) n = 1;
+      }
+      if (n > 1) {
+        char buf[16];
+        snprintf(buf, sizeof buf, "%ld", n - 1);
+        if (setenv("MURO_HTTP_TEST_KQ_FAIL_TIMES", buf, 1) == 0) {
+          (void)setenv("MURO_HTTP_TEST_KQ_FAIL_AFTER", "0", 1);
+        }
+      } else {
+        unsetenv("MURO_HTTP_TEST_KQ_FAIL_TIMES");
+      }
       errno = EIO;
       return -1;
     }
@@ -342,12 +361,24 @@ static int kq_apply(HostPoll *p, int fd, int16_t filt, int had, int want) {
   return kq_one(p, fd, filt, want);
 }
 
+/* 0: kernel matches the new interests. -1: kernel still matches
+   had_*. -2: rollback failed and both filters were deleted, so
+   the caller must drop any watch row. */
 static int kq_change(HostPoll *p, int fd, int had_r, int had_w, int read, int write) {
   if (kq_apply(p, fd, EVFILT_READ, had_r, read) < 0) return -1;
   if (kq_apply(p, fd, EVFILT_WRITE, had_w, write) < 0) {
     /* The read filter already matches `read`. Put it back so a
        failed write change does not stick in the kernel alone. */
-    (void)kq_apply(p, fd, EVFILT_READ, read, had_r);
+    if (kq_apply(p, fd, EVFILT_READ, read, had_r) < 0) {
+      int err = errno;
+      /* The undo failed. Userland has not updated the row, but
+         the kernel may still hold the new read knote. Delete
+         both filters so that knote cannot outlive the row. */
+      (void)kq_one(p, fd, EVFILT_READ, 0);
+      (void)kq_one(p, fd, EVFILT_WRITE, 0);
+      errno = err;
+      return -2;
+    }
     return -1;
   }
   return 0;
@@ -375,7 +406,13 @@ static int kq_watch(HostPoll *p, int fd, int read, int write) {
     return 0;
   }
   if (i < 0 && p->wn == p->wcap && grow_w(p) < 0) return -1;
-  if (kq_change(p, fd, had_r, had_w, read, write) < 0) return -1;
+  rc = kq_change(p, fd, had_r, had_w, read, write);
+  if (rc < 0) {
+    /* -2 means the kernel watch was cleared after a failed
+       rollback. Drop a leftover row so a reused fd gets EV_ADD. */
+    if (rc == -2 && i >= 0) drop_w(p, i);
+    return -1;
+  }
   if (i >= 0) {
     p->w[i].read = read;
     p->w[i].write = write;
