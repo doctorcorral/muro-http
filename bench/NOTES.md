@@ -24,8 +24,11 @@ samples at or above 200 ms. `TCP_NODELAY` is set. The request is
 `Connection: close`. A run stops at `duration` seconds. Threads
 finish an in-flight request, so `elapsed_ms` can be a little over
 the duration. `rps` is completed responses divided by that wall
-clock. `errors` are connect, write, read, or parse failures.
-`non2xx` is a completed response outside 200–299.
+clock. `errors` is the sum of `err_connect`, `err_write`,
+`err_read`, and `err_parse`. `non2xx` is a completed response
+outside 200–299. A server handoff that closes an accepted socket
+prints `handoff drop N: reason` and, when the process exits,
+`handoff drops N`.
 
 Warmup is the same command with `--duration 2`, discarded. Then
 three measured runs with `--duration 5`.

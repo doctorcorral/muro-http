@@ -2,6 +2,32 @@
 
 ## 0.1.0-dev — unreleased
 
+- The listen backlog is `SOMAXCONN`. On macOS the parent still
+  passes accepted sockets with `SCM_RIGHTS`. It retries `EINTR`,
+  and a full worker channel blocks the parent until some worker
+  can take the fd. The parent scans every live channel again
+  after that wait. It does not close an accepted socket because
+  the workers are busy. A channel error removes that worker from
+  rotation. The parent reaps children with `waitpid(WNOHANG)`. A
+  signalled or non-zero worker exit stops the pool, as on Linux.
+  A real drop is logged (`handoff drop N: reason`) and the parent
+  prints `handoff drops N` when it exits. `MSG_CTRUNC` on the
+  worker's `recvmsg` is an error: the fd is not adopted, and a
+  complete fd in that buffer is closed.
+- kqueue applies one filter per `kevent` and retries `EINTR`. A
+  failed second filter is rolled back. A failed delete still
+  drops the watch row, so a reused fd number gets `EV_ADD`.
+  `poll`, kqueue, and epoll reserve a slot for a due idle tick
+  instead of overwriting an fd event. `c/test_poll` checks that
+  slot, fd reuse, an injected `EINTR`, and a partial kevent
+  change. `c/test_workers` runs on `poll` and on the native wait.
+  It includes a close-mode flood with `workers > 1` and a
+  `SIGKILL` of one worker.
+- `bench/loadgen` includes `sys/time.h`, defines `_DEFAULT_SOURCE`,
+  and sleeps with `nanosleep`, so `make bench/loadgen` builds with
+  `-std=c11 -Werror` on Linux. `errors` is the sum of
+  `err_connect`, `err_write`, `err_read`, and `err_parse`.
+  `make c-check` compiles the tool and does not run it.
 - The wait is kqueue on macOS and epoll on Linux. `poll(2)` stays
   compiled and is selected with `--wait poll` or `MURO_HTTP_WAIT=poll`.
   The default is the native backend. The contract stays

@@ -136,7 +136,12 @@ void muro_http_config_usage(FILE *out, const MuroHttpConfig *cfg);
    Default is one process and does not fork. Above that, each
    worker is its own process, event loop, and connection table.
    On Linux each worker binds with SO_REUSEPORT. Elsewhere the
-   parent binds once and passes accepted sockets. */
+   parent binds once and passes accepted sockets. The backlog is
+   SOMAXCONN. The parent does not close an accepted socket because
+   workers are busy; it waits until one can take it. A drop is
+   logged as "handoff drop N: reason" and summarized as
+   "handoff drops N". A worker that dies from a signal or a
+   non-zero status stops the pool. */
 int muro_http_serve(const MuroHttpConfig *cfg, MuroHttpHandler handler, void *user);
 
 #endif

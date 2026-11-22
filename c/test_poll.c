@@ -1,5 +1,5 @@
-/* host_poll: absolute timer, empty set, hangup/error flags, and
-   scan-cursor fairness. */
+/* host_poll: absolute timer, empty set, hangup/error flags,
+   scan-cursor fairness, timer-slot reserve, and kqueue fd reuse. */
 
 #include "host_poll.h"
 
@@ -368,6 +368,272 @@ done:
   host_poll_close(p);
 }
 
+static void spin_ms(unsigned ms) {
+  uint64_t t0 = host_poll_now_ms();
+  while (host_poll_now_ms() < t0 + ms) {
+  }
+}
+
+/* Three ready fds and a due tick. max 2 is one fd plus the timer.
+   max 1 is the timer alone. The fd that did not fit stays ready. */
+static void check_timer_room(void) {
+  HostPoll *p = host_poll_open();
+  HostEv evs[4];
+  int sp[3][2];
+  int i;
+  int n;
+  int timers;
+  int fds;
+  if (!p) {
+    fail("room", "open");
+    return;
+  }
+  for (i = 0; i < 3; i++) {
+    sp[i][0] = -1;
+    sp[i][1] = -1;
+  }
+  for (i = 0; i < 3; i++) {
+    if (pipe(sp[i]) < 0 || write(sp[i][1], "x", 1) != 1 || host_poll_watch(p, sp[i][0], 1, 0) < 0) {
+      fail("room", "pipe");
+      goto done;
+    }
+  }
+  if (host_poll_arm(p, 1) < 0) {
+    fail("room", "arm");
+    goto done;
+  }
+  spin_ms(3);
+  n = host_poll_wait(p, evs, 2);
+  timers = 0;
+  fds = 0;
+  if (n != 2) {
+    fail("room", "max 2 count");
+    goto done;
+  }
+  for (i = 0; i < n; i++) {
+    if (evs[i].timer) timers += 1;
+    else if (evs[i].fd >= 0) fds += 1;
+  }
+  if (timers != 1 || fds != 1) fail("room", "max 2 mix");
+  if (host_poll_arm(p, 1) < 0) {
+    fail("room", "rearm");
+    goto done;
+  }
+  spin_ms(3);
+  n = host_poll_wait(p, evs, 1);
+  if (n != 1 || !evs[0].timer || evs[0].fd >= 0) fail("room", "max 1");
+
+done:
+  for (i = 0; i < 3; i++) {
+    if (p && sp[i][0] >= 0) host_poll_watch(p, sp[i][0], 0, 0);
+    close_pair(sp[i][0], sp[i][1]);
+  }
+  host_poll_close(p);
+}
+
+#if defined(__APPLE__)
+static int kqueue_backend(HostPoll *p) {
+  const char *b = host_poll_backend(p);
+  return b && strcmp(b, "kqueue") == 0;
+}
+
+/* Place `want` at fd number `num`. The peer comes back in *peer. */
+static int take_number(int num, int *peer) {
+  int sp[2] = {-1, -1};
+  if (socketpair(AF_UNIX, SOCK_STREAM, 0, sp) < 0) return -1;
+  if (sp[0] == num) {
+    *peer = sp[1];
+    return 0;
+  }
+  if (sp[1] == num) {
+    *peer = sp[0];
+    return 0;
+  }
+  if (dup2(sp[0], num) < 0) {
+    close_pair(sp[0], sp[1]);
+    return -1;
+  }
+  close(sp[0]);
+  *peer = sp[1];
+  return 0;
+}
+
+static int saw_read(HostPoll *p, int fd) {
+  HostEv evs[4];
+  int n;
+  int i;
+  if (host_poll_arm(p, 200) < 0) return 0;
+  n = wait_retry(p, evs, 4);
+  for (i = 0; i < n; i++) {
+    if (evs[i].fd == fd && evs[i].readable) return 1;
+  }
+  return 0;
+}
+
+/* Close the watched fd first so the knote is gone, then unwatch.
+   The row has to be dropped even though delete fails, and the
+   reused number has to get a real EV_ADD. */
+static void check_fd_reuse(void) {
+  HostPoll *p = host_poll_open();
+  int sp[2] = {-1, -1};
+  int peer = -1;
+  int fd;
+  if (!p) {
+    fail("reuse", "open");
+    return;
+  }
+  if (!kqueue_backend(p)) {
+    host_poll_close(p);
+    return;
+  }
+  if (socketpair(AF_UNIX, SOCK_STREAM, 0, sp) < 0) {
+    fail("reuse", "socketpair");
+    host_poll_close(p);
+    return;
+  }
+  fd = sp[0];
+  if (host_poll_watch(p, fd, 1, 0) < 0) {
+    fail("reuse", "watch");
+    close_pair(sp[0], sp[1]);
+    host_poll_close(p);
+    return;
+  }
+  close(fd);
+  sp[0] = -1;
+  (void)host_poll_watch(p, fd, 0, 0);
+  if (take_number(fd, &peer) < 0 || host_poll_watch(p, fd, 1, 0) < 0 || write(peer, "z", 1) != 1) {
+    fail("reuse", "rewatch");
+    if (peer >= 0) close(peer);
+    close(sp[1]);
+    host_poll_close(p);
+    return;
+  }
+  if (!saw_read(p, fd)) fail("reuse", "silent");
+  host_poll_watch(p, fd, 0, 0);
+  close(fd);
+  close(peer);
+  close(sp[1]);
+  host_poll_close(p);
+}
+
+/* A failed delete still drops the row. FAIL_AFTER=0 fails that
+   delete with EIO before kevent. */
+static void check_fd_reuse_fail(void) {
+  HostPoll *p = host_poll_open();
+  int sp[2] = {-1, -1};
+  int peer = -1;
+  int fd;
+  int held = -1;
+  int rc;
+  if (!p) {
+    fail("reuse-fail", "open");
+    return;
+  }
+  if (!kqueue_backend(p)) {
+    host_poll_close(p);
+    return;
+  }
+  if (socketpair(AF_UNIX, SOCK_STREAM, 0, sp) < 0) {
+    fail("reuse-fail", "socketpair");
+    host_poll_close(p);
+    return;
+  }
+  fd = sp[0];
+  held = fd;
+  if (host_poll_watch(p, fd, 1, 0) < 0) {
+    fail("reuse-fail", "watch");
+    goto done;
+  }
+  setenv("MURO_HTTP_TEST_KQ_FAIL_AFTER", "0", 1);
+  rc = host_poll_watch(p, fd, 0, 0);
+  unsetenv("MURO_HTTP_TEST_KQ_FAIL_AFTER");
+  if (rc == 0) {
+    fail("reuse-fail", "delete succeeded");
+    goto done;
+  }
+  close(fd);
+  sp[0] = -1;
+  held = -1;
+  if (take_number(fd, &peer) < 0 || host_poll_watch(p, fd, 1, 0) < 0 || write(peer, "z", 1) != 1) {
+    fail("reuse-fail", "rewatch");
+    held = fd;
+    goto done;
+  }
+  held = fd;
+  if (!saw_read(p, fd)) fail("reuse-fail", "silent");
+  host_poll_watch(p, fd, 0, 0);
+
+done:
+  unsetenv("MURO_HTTP_TEST_KQ_FAIL_AFTER");
+  unsetenv("MURO_HTTP_TEST_KQ_EINTR");
+  if (p && held >= 0) host_poll_watch(p, held, 0, 0);
+  if (held >= 0) close(held);
+  if (sp[0] >= 0 && sp[0] != held) close(sp[0]);
+  if (sp[1] >= 0) close(sp[1]);
+  if (peer >= 0) close(peer);
+  host_poll_close(p);
+}
+
+static void check_kq_eintr(void) {
+  HostPoll *p = host_poll_open();
+  int sp[2] = {-1, -1};
+  if (!p) {
+    fail("eintr", "open");
+    return;
+  }
+  if (!kqueue_backend(p)) {
+    host_poll_close(p);
+    return;
+  }
+  if (socketpair(AF_UNIX, SOCK_STREAM, 0, sp) < 0) {
+    fail("eintr", "socketpair");
+    host_poll_close(p);
+    return;
+  }
+  setenv("MURO_HTTP_TEST_KQ_EINTR", "4", 1);
+  if (host_poll_watch(p, sp[0], 1, 0) < 0 || write(sp[1], "z", 1) != 1 || !saw_read(p, sp[0])) {
+    fail("eintr", "retry");
+  }
+  unsetenv("MURO_HTTP_TEST_KQ_EINTR");
+  host_poll_watch(p, sp[0], 0, 0);
+  close_pair(sp[0], sp[1]);
+  host_poll_close(p);
+}
+
+/* The second filter fails. The first add has to be rolled back,
+   so a later wait does not report the socket. A following watch
+   still works. */
+static void check_kq_partial(void) {
+  HostPoll *p = host_poll_open();
+  int sp[2] = {-1, -1};
+  int rc;
+  if (!p) {
+    fail("partial", "open");
+    return;
+  }
+  if (!kqueue_backend(p)) {
+    host_poll_close(p);
+    return;
+  }
+  if (socketpair(AF_UNIX, SOCK_STREAM, 0, sp) < 0) {
+    fail("partial", "socketpair");
+    host_poll_close(p);
+    return;
+  }
+  setenv("MURO_HTTP_TEST_KQ_FAIL_AFTER", "1", 1);
+  rc = host_poll_watch(p, sp[0], 1, 1);
+  unsetenv("MURO_HTTP_TEST_KQ_FAIL_AFTER");
+  if (rc == 0) fail("partial", "applied");
+  if (write(sp[1], "z", 1) != 1) fail("partial", "write");
+  if (saw_read(p, sp[0])) fail("partial", "stuck");
+  if (host_poll_watch(p, sp[0], 1, 0) < 0 || !saw_read(p, sp[0])) fail("partial", "recover");
+  unsetenv("MURO_HTTP_TEST_KQ_FAIL_AFTER");
+  host_poll_watch(p, sp[0], 0, 0);
+  close_pair(sp[0], sp[1]);
+  host_poll_close(p);
+}
+#endif
+
 static void run_suite(const char *name) {
   HostPoll *p;
   const char *got;
@@ -397,6 +663,7 @@ static void run_suite(const char *name) {
   check_write_hangup();
   check_scan();
   check_drop();
+  check_timer_room();
 }
 
 static void reject(const char *name) {
@@ -416,6 +683,10 @@ int main(void) {
   run_suite("poll");
 #if defined(__APPLE__)
   run_suite("kqueue");
+  check_fd_reuse();
+  check_fd_reuse_fail();
+  check_kq_eintr();
+  check_kq_partial();
   reject("epoll");
 #elif defined(__linux__)
   run_suite("epoll");

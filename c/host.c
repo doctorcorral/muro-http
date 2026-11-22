@@ -74,6 +74,10 @@ int host_io_should_stop(void) {
   return host_poll_now_ms() >= drain_deadline_ms;
 }
 
+/* sa_flags stays 0 on these handlers. SA_RESTART would hide the
+   EINTR that lets an accept loop or a wait notice the flag.
+   kevent changes, sendmsg, and the handoff poll retry EINTR
+   themselves. */
 static void on_signal(int sig) {
   (void)sig;
   stop_flag = 1;
@@ -1196,8 +1200,30 @@ static int adopt_fd(Server *sv, int fd) {
   return 0;
 }
 
+/* Close a complete SCM_RIGHTS fd that arrived in a truncated
+   control buffer. A short header is not a socket to close. */
+static void close_truncated_fds(struct msghdr *msg, char *cbuf, size_t cap) {
+  struct cmsghdr *cmsg;
+  unsigned char *base = (unsigned char *)cbuf;
+  if (msg->msg_controllen > cap) return;
+  for (cmsg = CMSG_FIRSTHDR(msg); cmsg; cmsg = CMSG_NXTHDR(msg, cmsg)) {
+    unsigned char *hdr = (unsigned char *)cmsg;
+    int passed = -1;
+    size_t off;
+    if (hdr < base) break;
+    off = (size_t)(hdr - base);
+    if (off + sizeof(struct cmsghdr) > msg->msg_controllen) break;
+    if (cmsg->cmsg_len < CMSG_LEN(sizeof(int))) continue;
+    if (off + cmsg->cmsg_len > msg->msg_controllen) continue;
+    if (cmsg->cmsg_level != SOL_SOCKET || cmsg->cmsg_type != SCM_RIGHTS) continue;
+    memcpy(&passed, CMSG_DATA(cmsg), sizeof passed);
+    if (passed >= 0) close(passed);
+  }
+}
+
 /* One SCM_RIGHTS message. 1 and *out set, 0 on a clean close, -1 on
-   error. *out is -1 when the message carried no fd. */
+   error. *out is -1 when the message carried no fd. MSG_CTRUNC is
+   an error: it is not "no fd" and it is not a socket to adopt. */
 static int recv_passed(int ch, int *out) {
   struct msghdr msg;
   struct iovec iov;
@@ -1217,6 +1243,11 @@ static int recv_passed(int ch, int *out) {
   n = recvmsg(ch, &msg, 0);
   if (n < 0) return -1;
   if (n == 0) return 0;
+  if (msg.msg_flags & MSG_CTRUNC) {
+    close_truncated_fds(&msg, cbuf, sizeof cbuf);
+    errno = EMSGSIZE;
+    return -1;
+  }
   for (cmsg = CMSG_FIRSTHDR(&msg); cmsg; cmsg = CMSG_NXTHDR(&msg, cmsg)) {
     if (cmsg->cmsg_level == SOL_SOCKET && cmsg->cmsg_type == SCM_RIGHTS &&
         cmsg->cmsg_len >= CMSG_LEN(sizeof(int))) {
@@ -1353,7 +1384,9 @@ static int listen_on(const char *host, int port, int reuseport) {
     close(fd);
     return -1;
   }
-  if (listen(fd, 128) < 0) {
+  /* The kernel clamps this to somaxconn. A busy handoff stops
+     accept and this queue is the backpressure. */
+  if (listen(fd, SOMAXCONN) < 0) {
     close(fd);
     return -1;
   }
@@ -2023,8 +2056,148 @@ static int send_fd(int sock, int fd) {
   cmsg->cmsg_type = SCM_RIGHTS;
   cmsg->cmsg_len = CMSG_LEN(sizeof(int));
   memcpy(CMSG_DATA(cmsg), &fd, sizeof fd);
-  if (sendmsg(sock, &msg, 0) < 0) return -1;
-  return 0;
+  for (;;) {
+    if (sendmsg(sock, &msg, 0) < 0) {
+      if (errno == EINTR) continue;
+      return -1;
+    }
+    return 0;
+  }
+}
+
+/* MURO_HTTP_TEST_HANDOFF_SNDBUF is a test seam. A small send
+   buffer makes the handoff channel return EAGAIN after a few
+   queued fds. Unset in production, where the socket keeps the
+   system default. Values below 256 are ignored: one SCM_RIGHTS
+   message has to fit or the parent would block forever. */
+static void test_handoff_sndbuf(int fd) {
+  const char *e = getenv("MURO_HTTP_TEST_HANDOFF_SNDBUF");
+  char *end = NULL;
+  long n;
+  int sz;
+  if (!e || !*e) return;
+  errno = 0;
+  n = strtol(e, &end, 10);
+  if (errno || !end || *end || n < 256 || n > 1024L * 1024L) return;
+  sz = (int)n;
+  (void)setsockopt(fd, SOL_SOCKET, SO_SNDBUF, &sz, sizeof sz);
+}
+
+static void note_drop(const char *name, unsigned long *drops, const char *why) {
+  *drops += 1;
+  fprintf(stderr, "%s: handoff drop %lu: %s\n", name, *drops, why);
+}
+
+/* Reap exited workers without blocking. A signalled or non-zero
+   exit stops the pool the way the Linux reuseport parent does.
+   A clean exit only removes that worker. 0 if the accept loop
+   can continue, -1 if it must stop. */
+static int reap_handoff(const char *name, pid_t *pids, int *parent_end, int n, int *failed) {
+  for (;;) {
+    int status = 0;
+    int idx;
+    int bad;
+    pid_t pid = waitpid(-1, &status, WNOHANG);
+    if (pid < 0) {
+      if (errno == EINTR) continue;
+      if (errno == ECHILD) return 0;
+      fprintf(stderr, "%s: wait: %s\n", name, strerror(errno));
+      *failed = 1;
+      parent_stop = 1;
+      return -1;
+    }
+    if (pid == 0) return 0;
+    idx = -1;
+    {
+      int i;
+      for (i = 0; i < n; i++) {
+        if (pids[i] == pid) {
+          idx = i;
+          break;
+        }
+      }
+    }
+    if (idx >= 0) {
+      pids[idx] = 0;
+      if (parent_end[idx] >= 0) {
+        close(parent_end[idx]);
+        parent_end[idx] = -1;
+      }
+    }
+    bad = !WIFEXITED(status) || WEXITSTATUS(status) != 0;
+    if (!bad) continue;
+    if (WIFSIGNALED(status)) {
+      fprintf(stderr, "%s: worker %ld signal %d\n", name, (long)pid, WTERMSIG(status));
+    } else {
+      fprintf(stderr, "%s: worker %ld exit %d\n", name, (long)pid,
+              WIFEXITED(status) ? WEXITSTATUS(status) : -1);
+    }
+    *failed = 1;
+    parent_stop = 1;
+    signal_pids(pids, n, SIGTERM);
+    return -1;
+  }
+}
+
+/* Hand c to a worker. Closes c on every return. 0 when a worker
+   has the socket. -1 when this process had to drop it. Busy
+   workers are not a drop: this blocks until one channel can take
+   the fd, rescanning every worker after each wait. */
+static int pass_conn(const char *name, int *parent_end, pid_t *pids, int n, int *rr, int c,
+                     int *failed, unsigned long *drops) {
+  for (;;) {
+    int tries;
+    int alive;
+    struct pollfd pfds[64];
+    int map[64];
+    int np;
+    int pr;
+    if (reap_handoff(name, pids, parent_end, n, failed) < 0 || parent_stop) {
+      note_drop(name, drops, "shutting down");
+      close(c);
+      return -1;
+    }
+    for (tries = 0; tries < n; tries++) {
+      int w = (*rr + tries) % n;
+      if (parent_end[w] < 0) continue;
+      if (send_fd(parent_end[w], c) == 0) {
+        *rr = (w + 1) % n;
+        close(c);
+        return 0;
+      }
+      if (errno == EAGAIN || errno == EWOULDBLOCK) continue;
+      fprintf(stderr, "%s: handoff worker %d: %s\n", name, w, strerror(errno));
+      close(parent_end[w]);
+      parent_end[w] = -1;
+    }
+    np = 0;
+    alive = 0;
+    for (tries = 0; tries < n; tries++) {
+      if (parent_end[tries] < 0) continue;
+      alive = 1;
+      pfds[np].fd = parent_end[tries];
+      pfds[np].events = POLLOUT;
+      pfds[np].revents = 0;
+      map[np] = tries;
+      np += 1;
+    }
+    if (!alive || np == 0) {
+      note_drop(name, drops, "no workers");
+      close(c);
+      *failed = 1;
+      parent_stop = 1;
+      return -1;
+    }
+    pr = poll(pfds, (nfds_t)np, -1);
+    if (pr < 0) {
+      if (errno == EINTR) continue;
+      note_drop(name, drops, "poll");
+      close(c);
+      *failed = 1;
+      parent_stop = 1;
+      return -1;
+    }
+  }
 }
 
 static int serve_handoff(const MuroHttpConfig *cfg, MuroHttpHandler handler, void *user) {
@@ -2035,6 +2208,7 @@ static int serve_handoff(const MuroHttpConfig *cfg, MuroHttpHandler handler, voi
   int i;
   int rr = 0;
   int failed = 0;
+  unsigned long drops = 0;
   int port;
   sigset_t block;
   sigset_t old;
@@ -2099,6 +2273,7 @@ static int serve_handoff(const MuroHttpConfig *cfg, MuroHttpHandler handler, voi
       _exit(rc == 0 ? 0 : 1);
     }
     close(sp[1]);
+    test_handoff_sndbuf(sp[0]);
     parent_end[i] = sp[0];
     pids[i] = pid;
   }
@@ -2137,6 +2312,7 @@ static int serve_handoff(const MuroHttpConfig *cfg, MuroHttpHandler handler, voi
   while (!parent_stop) {
     struct pollfd pfd;
     int pr;
+    if (reap_handoff(name, pids, parent_end, n, &failed) < 0) break;
     pfd.fd = lfd;
     pfd.events = POLLIN;
     pr = poll(&pfd, 1, 200);
@@ -2149,10 +2325,9 @@ static int serve_handoff(const MuroHttpConfig *cfg, MuroHttpHandler handler, voi
     while (!parent_stop) {
       struct sockaddr_in peer;
       socklen_t len = sizeof peer;
-      int c = take_conn(lfd, &peer, &len);
-      int tries;
-      int sent = 0;
-      int alive = 0;
+      int c;
+      if (reap_handoff(name, pids, parent_end, n, &failed) < 0) break;
+      c = take_conn(lfd, &peer, &len);
       if (c < 0) {
         if (errno == EINTR) continue;
         if (errno == EAGAIN || errno == EWOULDBLOCK) break;
@@ -2161,52 +2336,7 @@ static int serve_handoff(const MuroHttpConfig *cfg, MuroHttpHandler handler, voi
         parent_stop = 1;
         break;
       }
-      for (tries = 0; tries < n; tries++) {
-        int w = (rr + tries) % n;
-        if (parent_end[w] < 0) continue;
-        if (send_fd(parent_end[w], c) == 0) {
-          rr = (w + 1) % n;
-          sent = 1;
-          break;
-        }
-        if (errno != EAGAIN && errno != EWOULDBLOCK) {
-          close(parent_end[w]);
-          parent_end[w] = -1;
-        }
-      }
-      if (!sent) {
-        struct pollfd pfds[64];
-        int map[64];
-        int np = 0;
-        int k;
-        for (tries = 0; tries < n; tries++) {
-          if (parent_end[tries] < 0) continue;
-          pfds[np].fd = parent_end[tries];
-          pfds[np].events = POLLOUT;
-          map[np] = tries;
-          np += 1;
-        }
-        if (np > 0 && poll(pfds, (nfds_t)np, 20) > 0) {
-          for (k = 0; k < np; k++) {
-            if (!(pfds[k].revents & POLLOUT)) continue;
-            if (send_fd(parent_end[map[k]], c) == 0) {
-              rr = (map[k] + 1) % n;
-              sent = 1;
-              break;
-            }
-          }
-        }
-      }
-      close(c);
-      if (sent) continue;
-      for (tries = 0; tries < n; tries++) {
-        if (parent_end[tries] >= 0) alive = 1;
-      }
-      if (!alive) {
-        failed = 1;
-        parent_stop = 1;
-        break;
-      }
+      if (pass_conn(name, parent_end, pids, n, &rr, c, &failed, &drops) < 0) break;
     }
   }
   parent_stop = 1;
@@ -2216,6 +2346,7 @@ static int serve_handoff(const MuroHttpConfig *cfg, MuroHttpHandler handler, voi
   }
   close(lfd);
   if (reap_children(pids, n) < 0) failed = 1;
+  fprintf(stderr, "%s: handoff drops %lu\n", name, drops);
   return failed ? -1 : 0;
 }
 #endif

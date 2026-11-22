@@ -1,3 +1,5 @@
+#define _DEFAULT_SOURCE
+
 /* HTTP/1.1 load generator for this repo. No third-party libraries.
    One pthread per concurrency slot. Keep-alive reuses one TCP
    connection per thread. Close opens a new connection per request
@@ -9,7 +11,8 @@
    nearest-rank: rank = ceil(p/100 * N), reported as the 1 us bucket
    index. A sample at or above 200 ms lands in the last bucket and
    is counted in overflow. TCP_NODELAY is set. The request is
-   GET / HTTP/1.1. */
+   GET / HTTP/1.1. errors is the sum of err_connect, err_write,
+   err_read, and err_parse. */
 
 #include <arpa/inet.h>
 #include <errno.h>
@@ -24,6 +27,7 @@
 #include <string.h>
 #include <strings.h>
 #include <sys/socket.h>
+#include <sys/time.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -32,6 +36,10 @@ enum { HIST = 200000 };
 static uint32_t *hist;
 static uint64_t requests;
 static uint64_t errors;
+static uint64_t err_connect;
+static uint64_t err_write;
+static uint64_t err_read;
+static uint64_t err_parse;
 static uint64_t non2xx;
 static uint64_t overflow;
 static int opt_port = 18180;
@@ -57,6 +65,19 @@ static uint64_t now_us(void) {
 
 static void add_u64(uint64_t *p, uint64_t n) {
   __atomic_fetch_add(p, n, __ATOMIC_RELAXED);
+}
+
+static void add_err(uint64_t *part) {
+  add_u64(part, 1);
+  add_u64(&errors, 1);
+}
+
+static void sleep_ms(unsigned ms) {
+  struct timespec ts;
+  ts.tv_sec = (time_t)(ms / 1000u);
+  ts.tv_nsec = (long)(ms % 1000u) * 1000000L;
+  while (nanosleep(&ts, &ts) < 0 && errno == EINTR) {
+  }
 }
 
 /* Close mode aborts with SO_LINGER 0. A graceful FIN parks the tuple
@@ -153,7 +174,8 @@ static int write_full(int fd, const char *p, size_t n) {
   return 0;
 }
 
-/* One response. Status and content-length are required. 0 ok, -1 error.
+/* One response. Status and content-length are required.
+   0 ok, -1 a short read, -2 a parse error.
    *status is set when the status line parsed. */
 static int read_response(int fd, int *status) {
   char buf[4096];
@@ -165,7 +187,7 @@ static int read_response(int fd, int *status) {
   *status = 0;
   for (;;) {
     ssize_t r;
-    if (n + 1 >= sizeof buf) return -1;
+    if (n + 1 >= sizeof buf) return -2;
     r = recv(fd, buf + n, sizeof buf - 1 - n, 0);
     if (r < 0 && errno == EINTR) continue;
     if (r <= 0) return -1;
@@ -174,7 +196,7 @@ static int read_response(int fd, int *status) {
     end = strstr(buf, "\r\n\r\n");
     if (end) break;
   }
-  if (sscanf(buf, "HTTP/1.%*d %d", &code) != 1) return -1;
+  if (sscanf(buf, "HTTP/1.%*d %d", &code) != 1) return -2;
   *status = code;
   line = buf;
   while (line < end) {
@@ -187,11 +209,11 @@ static int read_response(int fd, int *status) {
     }
     line = nl + 2;
   }
-  if (clen < 0 || clen > 1048576L) return -1;
+  if (clen < 0 || clen > 1048576L) return -2;
   {
     size_t header_n = (size_t)(end + 4 - buf);
     size_t have = n - header_n;
-    if ((long)have > clen) return -1;
+    if ((long)have > clen) return -2;
     if (discard_n(fd, (size_t)clen - have) < 0) return -1;
   }
   return 0;
@@ -221,24 +243,32 @@ static void *worker(void *arg) {
                    "\r\n",
                    opt_host, opt_port, opt_close ? "close" : "keep-alive");
   if (req_n < 0 || req_n >= (int)sizeof req) {
-    add_u64(&errors, 1);
+    add_err(&err_parse);
     return NULL;
   }
   while (now_ms() < deadline_ms && take_request()) {
     int status = 0;
+    int rr;
     uint64_t t0;
     uint64_t dt;
     if (fd < 0) {
       fd = dial();
       if (fd < 0) {
-        add_u64(&errors, 1);
-        usleep(1000);
+        add_err(&err_connect);
+        sleep_ms(1);
         continue;
       }
     }
     t0 = now_us();
-    if (write_full(fd, req, (size_t)req_n) < 0 || read_response(fd, &status) < 0) {
-      add_u64(&errors, 1);
+    if (write_full(fd, req, (size_t)req_n) < 0) {
+      add_err(&err_write);
+      close(fd);
+      fd = -1;
+      continue;
+    }
+    rr = read_response(fd, &status);
+    if (rr < 0) {
+      add_err(rr == -2 ? &err_parse : &err_read);
       close(fd);
       fd = -1;
       continue;
@@ -302,6 +332,10 @@ int main(int argc, char **argv) {
   uint64_t elapsed;
   uint64_t reqs;
   uint64_t errs;
+  uint64_t nconn;
+  uint64_t nwrite;
+  uint64_t nread;
+  uint64_t nparse;
   uint64_t bad;
   uint64_t over;
   for (i = 1; i < argc; i++) {
@@ -358,10 +392,18 @@ int main(int argc, char **argv) {
   if (elapsed == 0) elapsed = 1;
   reqs = __atomic_load_n(&requests, __ATOMIC_RELAXED);
   errs = __atomic_load_n(&errors, __ATOMIC_RELAXED);
+  nconn = __atomic_load_n(&err_connect, __ATOMIC_RELAXED);
+  nwrite = __atomic_load_n(&err_write, __ATOMIC_RELAXED);
+  nread = __atomic_load_n(&err_read, __ATOMIC_RELAXED);
+  nparse = __atomic_load_n(&err_parse, __ATOMIC_RELAXED);
   bad = __atomic_load_n(&non2xx, __ATOMIC_RELAXED);
   over = __atomic_load_n(&overflow, __ATOMIC_RELAXED);
   printf("requests %llu\n", (unsigned long long)reqs);
   printf("errors %llu\n", (unsigned long long)errs);
+  printf("err_connect %llu\n", (unsigned long long)nconn);
+  printf("err_write %llu\n", (unsigned long long)nwrite);
+  printf("err_read %llu\n", (unsigned long long)nread);
+  printf("err_parse %llu\n", (unsigned long long)nparse);
   printf("non2xx %llu\n", (unsigned long long)bad);
   printf("overflow %llu\n", (unsigned long long)over);
   printf("elapsed_ms %llu\n", (unsigned long long)elapsed);

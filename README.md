@@ -408,7 +408,9 @@ deadline. An earlier ready socket does not move that deadline.
 that fills its event cap still visits high-index sockets on the
 next wait. kqueue and epoll return kernel order. They do not keep
 that cursor. A level-triggered fd that did not fit in the batch
-stays ready for a later wait. A write-only hangup without
+stays ready for a later wait. When the idle tick is due, one
+slot in the batch is the timer on every backend. An fd event is
+not written into that slot. A write-only hangup without
 writability is an error and closes that slot; a peer FIN while the
 host is still reading becomes `evEof`, and a request that already
 arrived can still be answered. The image's timer field says whether
@@ -433,11 +435,19 @@ Each has its own event loop, connection table, and arena.
 address with `SO_REUSEPORT` and accepts on it. macOS
 `SO_REUSEPORT` does not spread accepted TCP connections, so there
 the parent binds once, accepts with `poll(2)`, and passes each
-socket to a worker with `SCM_RIGHTS`, round-robin. If no worker
-can take the socket, the parent polls 20 ms for room and tries
-once more. If it still cannot, it closes that socket. The workers
-still use the selected wait. A count that cannot be set up
-returns -1. The parent is not an HTTP worker.
+socket to a worker with `SCM_RIGHTS`, round-robin. The listen
+backlog is `SOMAXCONN`. If every worker channel is full, the
+parent waits until one can take the socket and then scans the
+workers again. It does not close an accepted socket because the
+workers are busy. `EINTR` on that send is retried. A channel that
+errors is removed from the rotation. A worker that dies from a
+signal or a non-zero status stops the rest of the pool. A drop
+that does happen (the process is shutting down, or no worker
+channel is left) is counted and written as
+`handoff drop N: reason`, and the parent exits with
+`handoff drops N`. The workers still use the selected wait. A
+count that cannot be set up returns -1. The parent is not an
+HTTP worker.
 
 Each accepted socket is one `Conn` and one session. Bytes, peer FIN,
 write progress, write done, write error, and the idle tick go through
@@ -845,7 +855,9 @@ book linked beside it must not import that book. `decide.muro` and
 - Workers are 1 through 64 processes. The default is 1 and does
   not fork. More than one worker needs a fixed port. `max_conn` is
   per worker. Linux workers share the port with `SO_REUSEPORT`.
-  Other systems pass accepted sockets from one listener.
+  Other systems pass accepted sockets from one listener. The
+  backlog is `SOMAXCONN`. A busy handoff waits; it does not drop
+  the accepted socket. `handoff drops N` on stderr is the count.
 - `addCap` still wraps a `U64`. The driver reports a delta of 8.
 - `bc-empty`, `bc-off-empty`, `bc-len-empty`, and `bc-long` reduce.
   They return before `jbScan`. A refl that walks the scanner does not

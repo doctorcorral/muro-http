@@ -12,7 +12,9 @@
    The timer is a one-shot deadline. Arming it again replaces that
    deadline. ms == 0 disarms it. A ready socket that wakes the wait
    early does not move the deadline. host_poll_wait reports at most
-   `max` events (and at most 64).
+   `max` events (and at most 64). When the deadline is due, one of
+   those slots is the timer. poll, kqueue, and epoll leave that
+   slot empty instead of overwriting an fd event.
 
    poll(2) scans from a rotating cursor, so a full batch does not
    starve high-index fds. kqueue and epoll do not have that cursor.

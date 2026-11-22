@@ -9,13 +9,16 @@
    poll(2) collects ready events from a rotating cursor. kqueue and
    epoll return whatever the kernel queued, capped at `max`. They
    do not invent a cursor. A fd left out of this batch is still
-   level-triggered, so a later wait can report it. */
+   level-triggered, so a later wait can report it. When the idle
+   tick is due, every backend reserves one slot for it and does
+   not overwrite an fd event. */
 
 #include "host_poll.h"
 
 #include <errno.h>
 #include <fcntl.h>
 #include <poll.h>
+#include <stdio.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
@@ -176,10 +179,21 @@ static void fill_poll(HostEv *e, const struct pollfd *pf) {
   if (e->hangup && !(pf->events & POLLIN) && !e->writable) e->error = 1;
 }
 
+static int timer_due(const HostPoll *p) {
+  return p->timer_on && host_poll_now_ms() >= p->timer_at;
+}
+
+/* Leave one slot empty when the tick is due so finish_timer can
+   write it. An fd that does not fit stays level-triggered. */
+static int event_room(const HostPoll *p, int max) {
+  int room = max;
+  if (timer_due(p) && room > 0) room -= 1;
+  return room;
+}
+
 static int finish_timer(HostPoll *p, HostEv *out, int count, int max) {
-  int due = p->timer_on && host_poll_now_ms() >= p->timer_at;
-  if (!due) return count;
-  if (count >= max) count = max - 1;
+  if (!timer_due(p)) return count;
+  if (count >= max) return count;
   memset(&out[count], 0, sizeof out[count]);
   out[count].fd = -1;
   out[count].timer = 1;
@@ -216,7 +230,6 @@ static int poll_wait(HostPoll *p, HostEv *out, int max) {
   int n;
   int i;
   int count;
-  int timer_due;
   int room;
   int start;
   int seen;
@@ -233,9 +246,7 @@ static int poll_wait(HostPoll *p, HostEv *out, int max) {
   timeout = wait_timeout(p);
   n = poll(pf, nfds, timeout);
   if (n < 0) return errno == EINTR ? 0 : -1;
-  timer_due = p->timer_on && host_poll_now_ms() >= p->timer_at;
-  room = max;
-  if (timer_due && room > 0) room -= 1;
+  room = event_room(p, max);
   count = 0;
   if (n > 0 && p->n > 0) {
     start = p->next_scan;
@@ -251,30 +262,94 @@ static int poll_wait(HostPoll *p, HostEv *out, int max) {
     if (p->next_scan >= p->n) p->next_scan -= p->n;
     if (p->next_scan < 0 || p->next_scan >= p->n) p->next_scan = 0;
   }
-  if (timer_due) {
-    HostEv *e = &out[count++];
-    memset(e, 0, sizeof *e);
-    e->fd = -1;
-    e->timer = 1;
-    p->timer_on = 0;
-  }
-  return count;
+  return finish_timer(p, out, count, max);
 }
 
 #if defined(__APPLE__)
+/* Test seams. Unset in production.
+   MURO_HTTP_TEST_KQ_EINTR=N makes the next N change calls return
+   EINTR once, then run the real kevent.
+   MURO_HTTP_TEST_KQ_FAIL_AFTER=N lets N change calls reach kevent,
+   then fails one call with EIO. */
+static int kq_env_take(const char *name, int *left) {
+  const char *e = getenv(name);
+  char *end = NULL;
+  char buf[16];
+  long v;
+  if (!e || !*e) return 0;
+  errno = 0;
+  v = strtol(e, &end, 10);
+  if (errno || !end || *end || v < 0 || v > 1000000L) return 0;
+  *left = (int)v;
+  if (*left == 0) {
+    unsetenv(name);
+    return 1;
+  }
+  snprintf(buf, sizeof buf, "%d", *left - 1);
+  if (setenv(name, buf, 1) != 0) return 0;
+  return 2;
+}
+
+/* One filter. 0 applied, -1 failed and errno is set. EINTR is
+   retried. ENOENT on delete means the filter is already gone.
+   A two-filter change is two calls so a failure cannot leave the
+   first filter applied without a rollback. Darwin reports a
+   changelist error as EV_ERROR when the event list has room, and
+   as -1 otherwise. */
+static int kq_one(HostPoll *p, int fd, int16_t filt, int add) {
+  for (;;) {
+    struct kevent in;
+    struct kevent out;
+    int rc;
+    int left = 0;
+    int took = kq_env_take("MURO_HTTP_TEST_KQ_EINTR", &left);
+    if (took == 2) {
+      errno = EINTR;
+      continue;
+    }
+    took = kq_env_take("MURO_HTTP_TEST_KQ_FAIL_AFTER", &left);
+    if (took == 1) {
+      errno = EIO;
+      return -1;
+    }
+    memset(&out, 0, sizeof out);
+    EV_SET(&in, (uintptr_t)fd, filt, add ? EV_ADD : EV_DELETE, 0, 0, NULL);
+    /* A null timeout waits for a readiness event. This call only
+       applies one change, so the wait is zero. */
+    {
+      struct timespec zero;
+      zero.tv_sec = 0;
+      zero.tv_nsec = 0;
+      rc = kevent(p->kq, &in, 1, &out, 1, &zero);
+    }
+    if (rc < 0) {
+      if (errno == EINTR) continue;
+      if (!add && errno == ENOENT) return 0;
+      return -1;
+    }
+    if (rc > 0 && (out.flags & EV_ERROR) && out.ident == in.ident && out.filter == in.filter) {
+      if (out.data == EINTR) continue;
+      if (!add && out.data == ENOENT) return 0;
+      errno = (int)out.data;
+      return -1;
+    }
+    return 0;
+  }
+}
+
+static int kq_apply(HostPoll *p, int fd, int16_t filt, int had, int want) {
+  if (had == want) return 0;
+  return kq_one(p, fd, filt, want);
+}
+
 static int kq_change(HostPoll *p, int fd, int had_r, int had_w, int read, int write) {
-  struct kevent ch[2];
-  int nch = 0;
-  if (had_r != read) {
-    EV_SET(&ch[nch], (uintptr_t)fd, EVFILT_READ, read ? EV_ADD : EV_DELETE, 0, 0, NULL);
-    nch += 1;
+  if (kq_apply(p, fd, EVFILT_READ, had_r, read) < 0) return -1;
+  if (kq_apply(p, fd, EVFILT_WRITE, had_w, write) < 0) {
+    /* The read filter already matches `read`. Put it back so a
+       failed write change does not stick in the kernel alone. */
+    (void)kq_apply(p, fd, EVFILT_READ, read, had_r);
+    return -1;
   }
-  if (had_w != write) {
-    EV_SET(&ch[nch], (uintptr_t)fd, EVFILT_WRITE, write ? EV_ADD : EV_DELETE, 0, 0, NULL);
-    nch += 1;
-  }
-  if (nch == 0) return 0;
-  if (kevent(p->kq, ch, nch, NULL, 0, NULL) < 0) return -1;
   return 0;
 }
 
@@ -282,14 +357,20 @@ static int kq_watch(HostPoll *p, int fd, int read, int write) {
   int i = find_w(p, fd);
   int had_r = 0;
   int had_w = 0;
+  int rc;
   if (i >= 0) {
     had_r = p->w[i].read;
     had_w = p->w[i].write;
   }
   if (!read && !write) {
     if (i >= 0) {
-      if (kq_change(p, fd, had_r, had_w, 0, 0) < 0) return -1;
+      /* Drop the row even when delete fails. close_slot closes the
+         fd after this returns, and a later socket can reuse the
+         number. A stale row whose interests already match would
+         skip EV_ADD, so the new socket would not be watched. */
+      rc = kq_change(p, fd, had_r, had_w, 0, 0);
       drop_w(p, i);
+      if (rc < 0) return -1;
     }
     return 0;
   }
@@ -315,6 +396,7 @@ static int kq_wait(HostPoll *p, HostEv *out, int max) {
   int n;
   int i;
   int count = 0;
+  int room;
   if (timeout >= 0) {
     ts.tv_sec = timeout / 1000;
     ts.tv_nsec = (long)(timeout % 1000) * 1000000L;
@@ -322,6 +404,7 @@ static int kq_wait(HostPoll *p, HostEv *out, int max) {
   }
   n = kevent(p->kq, NULL, 0, evs, max, tsp);
   if (n < 0) return errno == EINTR ? 0 : -1;
+  room = event_room(p, max);
   for (i = 0; i < n; i++) {
     int fd = (int)evs[i].ident;
     int slot = -1;
@@ -335,7 +418,7 @@ static int kq_wait(HostPoll *p, HostEv *out, int max) {
       }
     }
     if (slot < 0) {
-      if (count >= max) continue;
+      if (count >= room) continue;
       memset(&out[count], 0, sizeof out[count]);
       out[count].fd = fd;
       slot = count;
@@ -368,6 +451,14 @@ static uint32_t ep_bits(int read, int write) {
   return ev;
 }
 
+static int ep_ctl(HostPoll *p, int op, int fd, struct epoll_event *ee) {
+  for (;;) {
+    if (epoll_ctl(p->kq, op, fd, ee) == 0) return 0;
+    if (errno == EINTR) continue;
+    return -1;
+  }
+}
+
 static int ep_apply(HostPoll *p, int fd, int existed, uint32_t bits) {
   struct epoll_event ee;
   int op;
@@ -376,11 +467,11 @@ static int ep_apply(HostPoll *p, int fd, int existed, uint32_t bits) {
   ee.events = bits;
   if (!bits) {
     if (!existed) return 0;
-    if (epoll_ctl(p->kq, EPOLL_CTL_DEL, fd, &ee) < 0 && errno != ENOENT) return -1;
+    if (ep_ctl(p, EPOLL_CTL_DEL, fd, &ee) < 0 && errno != ENOENT) return -1;
     return 0;
   }
   op = existed ? EPOLL_CTL_MOD : EPOLL_CTL_ADD;
-  if (epoll_ctl(p->kq, op, fd, &ee) < 0) return -1;
+  if (ep_ctl(p, op, fd, &ee) < 0) return -1;
   return 0;
 }
 
@@ -410,8 +501,11 @@ static int ep_wait(HostPoll *p, HostEv *out, int max) {
   int timeout = wait_timeout(p);
   int n;
   int i;
+  int room;
   n = epoll_wait(p->kq, evs, max, timeout);
   if (n < 0) return errno == EINTR ? 0 : -1;
+  room = event_room(p, max);
+  if (n > room) n = room;
   for (i = 0; i < n; i++) {
     uint32_t r = evs[i].events;
     int fd = evs[i].data.fd;
