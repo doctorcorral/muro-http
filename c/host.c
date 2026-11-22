@@ -1071,17 +1071,20 @@ static void on_tick(Server *sv, Slot *s, uint64_t now) {
   int phase;
   if (!s->used || s->deadline == 0 || s->deadline > now) return;
   phase = (int)field(s->st, 0);
-  s->deadline = 0;
-  if (phase != PH_READ && phase != PH_IDLE) {
-    /* Decide and write leave the book timer off, so a tick would
-       hold. A deadline in those phases was armed while
-       muro_http_body_read was waiting. Do not close_slot here: the
-       handler or the response pull is still on the stack. The wait
-       returns and that caller closes. */
+  /* A socket on io_skip is inside muro_http_body_read. Do not step
+     the image: the handler or the pull is still on the stack.
+     Decide and write leave the book timer off, so a deadline there
+     was armed by that wait. Read and idle arm the book timer too.
+     Clearing the deadline without body_idle lets the next
+     host_io_once arm a new window, and the wait never ends. Set
+     body_idle in every phase. The wait returns and that caller
+     closes. Do not close_slot here. */
+  if (fd_skipped(s->fd) || (phase != PH_READ && phase != PH_IDLE)) {
+    s->deadline = 0;
     s->body_idle = 1;
     return;
   }
-  if (fd_skipped(s->fd)) return;
+  s->deadline = 0;
   if (!step_ev(sv, s, evTick())) {
     close_slot(sv, s);
     return;

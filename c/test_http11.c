@@ -1608,6 +1608,12 @@ int main(int argc, char **argv) {
   expect_cl(port, "te-param-not-final",
             "POST /echo HTTP/1.1\r\nHost: h\r\nTransfer-Encoding: chunked;q=1, gzip\r\n\r\n", 400,
             "malformed", 1);
+  expect_cl(port, "te-param-twice",
+            "POST /echo HTTP/1.1\r\nHost: h\r\nTransfer-Encoding: chunked;q=1, chunked\r\n\r\n",
+            400, "malformed", 1);
+  expect_cl(port, "te-gzip-param-final",
+            "POST /echo HTTP/1.1\r\nHost: h\r\nTransfer-Encoding: gzip;q=1, chunked\r\n\r\n", 400,
+            "malformed", 1);
   expect_cl(port, "te-list",
             "POST /echo HTTP/1.1\r\nHost: h\r\nTransfer-Encoding: chunked, gzip\r\n\r\n", 400,
             "malformed", 1);

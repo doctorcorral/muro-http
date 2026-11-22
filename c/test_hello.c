@@ -48,7 +48,7 @@ static int parse_port(const char *line, const char *host) {
 }
 
 static pid_t start_hello(const char *env_bind, const char *bind_host, int *port,
-                        const char *drain_ms) {
+                        const char *drain_ms, const char *idle_ms) {
   int sp[2];
   pid_t pid;
   char buf[128];
@@ -85,8 +85,9 @@ static pid_t start_hello(const char *env_bind, const char *bind_host, int *port,
       av[argc++] = "--bind";
       av[argc++] = (char *)host;
     }
+    if (!idle_ms || !idle_ms[0]) idle_ms = "5000";
     av[argc++] = "--idle-ms";
-    av[argc++] = "5000";
+    av[argc++] = (char *)idle_ms;
     if (drain_ms) {
       av[argc++] = "--drain-ms";
       av[argc++] = (char *)drain_ms;
@@ -497,7 +498,7 @@ static void check_drain_before_status(void) {
   }
   unlink(ready);
   setenv("MURO_TEST_STREAM_READY", ready, 1);
-  pid = start_hello(NULL, "127.0.0.1", &port, "400");
+  pid = start_hello(NULL, "127.0.0.1", &port, "400", NULL);
   unsetenv("MURO_TEST_STREAM_READY");
   if (pid < 0) {
     unlink(ready);
@@ -560,6 +561,72 @@ static void check_drain_before_status(void) {
   unlink(ready);
 }
 
+/* Headers only, Content-Length past the window, then no body bytes.
+   hello calls muro_http_body_read from on_req, which is decide.
+   The idle deadline must end that read. hello returns 400 with body
+   "bad\n". host_in_after sees the read error 400 and copies
+   httpMalformed instead, then closes. A 200 would mean the body
+   was treated as already buffered. */
+static void check_decide_idle(void) {
+  pid_t pid;
+  int port = -1;
+  int fd = -1;
+  char ready[96];
+  char head[128];
+  char body[128];
+  size_t body_n = 0;
+  int hn;
+  int status = 0;
+  int conn_close = 0;
+  char extra;
+  ssize_t tail;
+  if (snprintf(ready, sizeof ready, "/tmp/muro-hello-idle-%ld", (long)getpid()) < 0) {
+    fail("decide-idle", "path");
+    return;
+  }
+  unlink(ready);
+  setenv("MURO_TEST_STREAM_READY", ready, 1);
+  pid = start_hello(NULL, "127.0.0.1", &port, NULL, "500");
+  unsetenv("MURO_TEST_STREAM_READY");
+  if (pid < 0) {
+    unlink(ready);
+    return;
+  }
+  fd = dial("127.0.0.1", port);
+  hn = snprintf(head, sizeof head, "POST /echo HTTP/1.1\r\nHost: t\r\nContent-Length: 20000\r\n\r\n");
+  if (fd < 0 || hn < 0 || send_n(fd, head, (size_t)hn) < 0) {
+    fail("decide-idle", "send");
+    if (fd >= 0) close(fd);
+    stop_server(pid);
+    unlink(ready);
+    return;
+  }
+  if (wait_file(ready, 5000) < 0) {
+    fail("decide-idle", "body-read");
+    close(fd);
+    stop_server(pid);
+    unlink(ready);
+    return;
+  }
+  if (read_response(fd, &status, &conn_close, body, sizeof body, &body_n) < 0) {
+    fail("decide-idle", "exchange");
+    close(fd);
+    stop_server(pid);
+    unlink(ready);
+    return;
+  }
+  if (status != 400 || strcmp(body, "malformed") != 0) {
+    fprintf(stderr, "FAIL decide-idle: status %d body '%s'\n", status, body);
+    failures += 1;
+  }
+  if (!conn_close) fail("decide-idle", "wanted close");
+  tail = read(fd, &extra, 1);
+  if (tail != 0) fail("decide-idle", "still open");
+  close(fd);
+  stop_server(pid);
+  unlink(ready);
+}
+
 int main(int argc, char **argv) {
   const char *host = "127.0.0.1";
   pid_t pid;
@@ -574,6 +641,7 @@ int main(int argc, char **argv) {
   alarm(60);
   check_help();
   check_bad_bind();
+  check_decide_idle();
   if (snprintf(stream_ready, sizeof stream_ready, "/tmp/muro-hello-stream-%ld", (long)getpid()) <
       0)
     stream_ready[0] = 0;
@@ -581,7 +649,7 @@ int main(int argc, char **argv) {
     unlink(stream_ready);
     setenv("MURO_TEST_STREAM_READY", stream_ready, 1);
   }
-  pid = start_hello("nope", host, &port, NULL);
+  pid = start_hello("nope", host, &port, NULL, NULL);
   unsetenv("MURO_TEST_STREAM_READY");
   if (pid < 0) {
     unlink(stream_ready);
