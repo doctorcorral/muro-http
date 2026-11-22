@@ -1092,6 +1092,37 @@ static void on_tick(Server *sv, Slot *s, uint64_t now) {
   after_io(sv, s);
 }
 
+/* These servers do not call muro_http_body_read while the image is
+   in read or idle. c/test_serve still runs this branch: a skipped
+   fd, phase read or idle, deadline already due. Returns 0 when
+   on_tick sets body_idle, clears the deadline, and leaves the slot
+   open. A fall-through would step the image or close the slot. */
+int host_test_skipped_tick(int phase) {
+  Server sv;
+  Slot s;
+  int saved_depth;
+  int saved_skip;
+  int rc;
+  saved_depth = io_depth;
+  saved_skip = io_skip[0];
+  memset(&sv, 0, sizeof sv);
+  memset(&s, 0, sizeof s);
+  sv.listen_fd = -1;
+  s.used = 1;
+  /* -1 is not a live socket. close(-1) does not drop a real fd
+     if on_tick falls through into close_slot. */
+  s.fd = -1;
+  s.deadline = 1;
+  s.st.muro__as.conn.muro__f_0 = (uint64_t)phase;
+  io_skip[0] = s.fd;
+  io_depth = 1;
+  on_tick(&sv, &s, 2);
+  rc = (s.used && s.body_idle == 1 && s.deadline == 0) ? 0 : -1;
+  io_depth = saved_depth;
+  io_skip[0] = saved_skip;
+  return rc;
+}
+
 static int take_conn(int lfd, struct sockaddr_in *peer, socklen_t *len) {
 #if defined(SOCK_CLOEXEC) && defined(SOCK_NONBLOCK)
   int fd = accept4(lfd, (struct sockaddr *)peer, len, SOCK_CLOEXEC | SOCK_NONBLOCK);

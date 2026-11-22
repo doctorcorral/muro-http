@@ -26,9 +26,10 @@
   later `chunked` does not make the coding unimplemented. `mix test`
   reduces those `statusOf` equations. `c/test_classify` checks
   `teCode` 3 for the same buffers. `c/test_http11` checks the 400.
-  `te-param-quote` and `te-param-empty-q` stay C checks in
-  `c/test_classify` and `c/test_http11`. They need a `"` inside the
-  header, and the book byte strings have none.
+  `te-param-quote` (`chunked;q="a,b"`) and `te-param-empty-q`
+  (`chunked;q=""`) stay C checks in `c/test_classify` and
+  `c/test_http11`. They need a `"` inside the header, and the book
+  byte strings have none.
   A chunk size that
   does not fit in a `U64` is 400. `Transfer-Encoding`
   together with `Content-Length` is 400 (RFC 9112 6.3). `chunked`
@@ -100,7 +101,12 @@
   and copies `httpMalformed` instead of the handler body, then
   closes. `c/test_hello` `check_decide_idle` uses the same stalled
   `Content-Length: 20000` and sees 400, body `malformed`, and a
-  close.
+  close. These servers do not read a body while the image is in
+  read or idle. `c/test_serve` still runs that skipped tick.
+  `host_test_skipped_tick` marks the fd skipped, sets the phase
+  to read and to idle, and calls `on_tick`. It checks that
+  `body_idle` is set, the deadline is cleared, and the slot stays
+  open. That call is not a wire exchange.
   While that read waits, the server poll accepts and serves other
   connections. A nested read does not watch a socket already inside
   a read. Past eight nested reads, the wait is that socket alone.

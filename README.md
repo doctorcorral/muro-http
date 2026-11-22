@@ -190,6 +190,12 @@ handler that reads the body does it while the image is in decide.
 `examples/hello` returns 400 when that read fails. `host_in_after`
 sees the read error and copies `httpMalformed`. `c/test_hello`
 `check_decide_idle` sees 400, body `malformed`, and a close.
+These servers do not read a body while the image is in read or
+idle. `c/test_serve` still runs that skipped tick:
+`host_test_skipped_tick` marks the fd skipped, sets the phase to
+read and to idle, and calls `on_tick`. It checks that `body_idle`
+is set, the deadline is cleared, and the slot stays open. That
+call is not a wire exchange.
 `conn.muro` imports
 `request.muro` and calls `classify`. It does not import `decide.muro`.
 
@@ -313,8 +319,12 @@ and sees 400, body `malformed`, and a close. A tick for a socket
 already inside that read does not step the image. In read and
 idle, as in decide and write, it sets `body_idle` and clears the
 deadline, so the next wait cannot arm a fresh window. The wire
-tests cover decide and write. A read-phase body wait is not a
-path these servers take. A nested read does not
+tests cover decide and write. These servers do not read a body
+while the image is in read or idle. `c/test_serve` still runs
+that branch: `host_test_skipped_tick` marks the fd skipped, sets
+the phase to read and to idle, and calls `on_tick`. It checks
+that `body_idle` is set, the deadline is cleared, and the slot
+stays open. That call is not a wire exchange. A nested read does not
 watch a socket that is already inside a read, so those bytes stay
 in the kernel until the inner read returns. Past eight nested
 reads, the wait is this socket alone, and the same deadline still
@@ -483,7 +493,10 @@ The same pin does not prove three properties of the poll loop.
 
 - `nconn` stays at most `max_conn`. The family has no numeric cap.
   `accept_some` accepts while `nconn < max_conn`. `c/test_serve`
-  refuses a cap outside 1..1024. `c/test_e2e` fills the table.
+  refuses a cap outside 1..1024. The same program runs
+  `host_test_skipped_tick` for a skipped fd in read and in idle.
+  That check is the host `body_idle` flag, not this cap.
+  `c/test_e2e` fills the table.
 - An accepted connection is eventually closed. `reply-opens` is the
   script above. A keep-alive connection stays open. The hold rule
   does not make the host resolve.
@@ -686,9 +699,11 @@ form is a machine term. The request names are `crlf-end`, `lf-end`,
 `post-framed-short`, `post-take-short`, `ck-framed`,
 `ck-framed-hdr`, `ck-take-hdr`, `stream-take-hi`, `stream-end-hi`,
 `stream-take-edge`, `stream-end-edge`, and `stream-take-lf`.
-`te-param-quote` and `te-param-empty-q` are C checks in
-`c/test_classify` and `c/test_http11`, not book equations. They
-need a `"` inside the header, and the book byte strings have none.
+`te-param-quote` (`chunked;q="a,b"`) and `te-param-empty-q`
+(`chunked;q=""`) are C checks in `c/test_classify` and
+`c/test_http11`, not book equations. They need a `"` inside the
+header, and the book byte strings have none. `c/test_http11`
+expects 400 and body `malformed` for both.
 `te-param-junk`, `te-param-twice`, and `te-gzip-param-final` are
 `statusOf` equations. Each reduces to `status-malformed`, and
 `mix test` runs them. `c/test_classify` also checks `teCode` of
