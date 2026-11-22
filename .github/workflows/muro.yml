@@ -43,6 +43,7 @@ jobs:
       - name: Install SQLite
         run: sudo apt-get update && sudo apt-get install -y libsqlite3-dev
 
+      # Default wait on this runner is epoll. c/test_poll also runs poll.
       - name: Build and run the C drivers and muro-httpd
         run: make c-check
 
@@ -55,19 +56,20 @@ jobs:
       - name: Install SQLite
         run: sudo apt-get update && sudo apt-get install -y libsqlite3-dev
 
+      # Default wait on this runner is epoll. c/test_poll also runs poll.
       - name: C drivers and muro-httpd under ASan and UBSan
         run: make c-sanitize
 
   # doctorcorral/muro-http is public. Standard macos-latest is not
   # billed. Larger macOS runners are billed, so this job does not use
   # them. Self-hosted muro-mac-1 and muro-mac-2 are not used.
-  # The wait is poll(2) on both platforms. This job runs the same
-  # drivers on macOS.
+  # make c-check uses the native wait: epoll on the Linux jobs,
+  # kqueue here. c/test_poll and c/test_workers also run poll(2).
   macos:
     name: macos
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v5
 
-      - name: C drivers and muro-httpd with poll
+      - name: C drivers and muro-httpd with kqueue
         run: make c-check

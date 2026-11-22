@@ -261,20 +261,26 @@ terminal image and has no live session.
 `c/muro_http.h` is the reusable server. `muro_http_serve` takes a
 `MuroHttpConfig` and a handler `Request -> Response`. The config is
 the bind host (NULL is `127.0.0.1`, IPv4 only), the port, the idle
-timeout, the connection cap (1 through 1024), and a log-name prefix.
+timeout, the connection cap (1 through 1024 per worker), a log-name
+prefix, and a worker count (1 through 64, default 1).
 It does not carry a database path or a JWT key.
 `muro_http_config_init` sets port 8080, 5000 ms, 128 connections,
-a max body of 8388608, and a drain of 1000 ms.
+a max body of 8388608, a drain of 1000 ms, and 1 worker.
 `muro_http_config_env` reads `MURO_HTTP_BIND`, `MURO_HTTP_PORT`,
 `MURO_HTTP_IDLE_MS`, `MURO_HTTP_MAX_CONNECTIONS`,
-`MURO_HTTP_MAX_BODY`, and `MURO_HTTP_DRAIN_MS`.
+`MURO_HTTP_MAX_BODY`, `MURO_HTTP_DRAIN_MS`, `MURO_HTTP_WORKERS`,
+and `MURO_HTTP_WAIT`.
 `muro_http_config_arg` consumes `--bind`, `--port`, `--idle-ms`,
-`--max-connections`, `--max-body`, `--drain-ms`, and `--help`. A
+`--max-connections`, `--max-body`, `--drain-ms`, `--workers`,
+`--wait`, and `--help`. A
 bind host longer than 15 characters, or one `inet_pton` rejects,
 makes `muro_http_serve` return -2. A connection cap outside
-1..1024, a negative max body or drain time, or a listen failure,
-returns -1. SIGINT and SIGTERM drain and return 0. Every successful
-listen prints `listening <host> <port>`, including port 0.
+1..1024, a worker count outside 1..64, more than one worker on
+port 0, a negative max body or drain time, a wait name this OS
+cannot open, or a listen failure, returns -1. SIGINT and SIGTERM
+drain and return 0. Every successful listen prints
+`listening <host> <port>`, including port 0. More than one worker
+prints one line per listening socket.
 
 The handler returns 0 to send the response, or -1 to close. Request
 slices point at the receive buffer. That buffer stays live while the
@@ -302,8 +308,9 @@ written.
 
 `req->body_in` reads the body. A buffered body is already in
 `req->body` as well. A streamed body has `req->body.n == 0` and
-`muro_http_body_read` pulls the rest, through the server `poll(2)`
-when the socket has nothing queued. That wait accepts and serves
+`muro_http_body_read` pulls the rest, through the server wait
+(kqueue, epoll, or poll) when the socket has nothing queued. That
+wait accepts and serves
 other connections. It also arms the idle deadline while the image
 is in decide or write, where the book timer is off. No body byte
 before the deadline makes that read return. The caller then closes.
@@ -327,8 +334,8 @@ that `body_idle` is set, the deadline is cleared, and the slot
 stays open. That call is not a wire exchange. A nested read does not
 watch a socket that is already inside a read, so those bytes stay
 in the kernel until the inner read returns. Past eight nested
-reads, the wait is this socket alone, and the same deadline still
-bounds it. If the handler returns without reading a
+reads, the wait is `poll(2)` on this socket alone, and the same
+deadline still bounds it. If the handler returns without reading a
 streamed body, and the response pull will not read it either, the
 host closes. That keeps unread body bytes from being parsed as the
 next request. `MuroHttpResponse.pull` is the response side. With
@@ -371,45 +378,64 @@ lets a request that has already reached the handler finish. The
 process exits 0 when no connection remains or `drain_ms` has passed.
 The default is 1000. `--drain-ms` and `MURO_HTTP_DRAIN_MS` set it,
 from 0 through 86400000. A negative max body or drain time makes
-`muro_http_serve` return -1. The flag is noticed between polls and
+`muro_http_serve` return -1. The flag is noticed between waits and
 inside `muro_http_body_read`. That arms the drain at once, on that
 same turn: the listen socket closes, idle connections close, and
 the body read keeps going until the body ends, `drain_ms` passes,
 or the idle deadline passes with no further body byte. The process
-then exits 0.
+then exits 0. One worker is that process. Above one worker, the
+parent forwards SIGINT and SIGTERM and waits. Each worker drains
+itself. The parent returns 0 when every worker exits 0.
 
 `c/host.c` owns the sockets, the buffers, the connection table, the
-clock, and `poll`. `make c-check` compiles it with
+clock, and the wait. `make c-check` compiles it with
 `-Wall -Wextra -Werror -std=c11 -O2`, then runs the drivers. The loop
 does not choose a session move. It writes 100, 413, and 417, and
 it writes 501 for a method the book marks with method code 1. It
 copies the book's 400 and the book's unimplemented transfer coding
 (origin 2). `host_in_policy` does not answer that coding.
 It formats `Date`. The image chooses malformed and unimplemented.
-A partial `100 Continue` stays unsent until `poll` can write the
+A partial `100 Continue` stays unsent until the wait can write the
 rest, and that socket is not watched for read while the interim is
 short. `sent_100` is set only after the last byte.
 
-`c/host_poll.c` waits with `poll(2)` on macOS and on Linux. The idle
-tick is the poll timeout, armed for the soonest connection deadline.
-An earlier ready socket does not move that deadline. Ready events
-are taken from a rotating cursor, so a wait that fills its event
-cap still visits high-index sockets on the next wait. A write-only
-`POLLHUP` without `POLLOUT` is an error and closes that slot; a
-peer FIN while the host is still reading becomes `evEof`, and a
-request that already arrived can still be answered. The image's
-timer field says whether that phase is waiting. A tick during the
-handler phase or write is not delivered: the book would hold.
-While `muro_http_body_read` is blocked in those phases, the host
-arms this same deadline. `c/test_http11` sends `POST /echo` headers
-with `Content-Length: 20000` and then no body. The stream server
-writes 200 and the socket closes after the idle timeout.
-A socket that has sent only part of a
-header, or only part of a body, stays in the set. The loop keeps
-serving the other sockets. A close that still owes a status writes
-it and returns. That write does not wait for the peer: `EAGAIN`
-returns immediately, so one full send buffer cannot stall the table.
-The peer may miss that last status if its window is already full.
+`c/host_poll.c` waits with kqueue on macOS and epoll on Linux.
+`poll(2)` is compiled on both and is the fallback. `--wait poll`
+or `MURO_HTTP_WAIT=poll` selects it. The idle tick is a one-shot
+deadline on every backend, armed for the soonest connection
+deadline. An earlier ready socket does not move that deadline.
+`poll(2)` takes ready events from a rotating cursor, so a wait
+that fills its event cap still visits high-index sockets on the
+next wait. kqueue and epoll return kernel order. They do not keep
+that cursor. A level-triggered fd that did not fit in the batch
+stays ready for a later wait. A write-only hangup without
+writability is an error and closes that slot; a peer FIN while the
+host is still reading becomes `evEof`, and a request that already
+arrived can still be answered. The image's timer field says whether
+that phase is waiting. A tick during the handler phase or write is
+not delivered: the book would hold. While `muro_http_body_read` is
+blocked in those phases, the host arms this same deadline.
+`c/test_http11` sends `POST /echo` headers with
+`Content-Length: 20000` and then no body. The stream server writes
+200 and the socket closes after the idle timeout. A socket that
+has sent only part of a header, or only part of a body, stays in
+the set. The loop keeps serving the other sockets. A close that
+still owes a status writes it and returns. That write does not
+wait for the peer: `EAGAIN` returns immediately, so one full send
+buffer cannot stall the table. The peer may miss that last status
+if its window is already full.
+
+The default is one worker. That path does not fork and does not
+set `SO_REUSEPORT`. The books, the shim arena, and this loop are
+single-threaded, so extra workers are processes, not threads.
+Each has its own event loop, connection table, and arena.
+`max_conn` is per worker. On Linux each worker binds the same
+address with `SO_REUSEPORT` and accepts on it. macOS
+`SO_REUSEPORT` does not spread accepted TCP connections, so there
+the parent binds once, accepts with `poll(2)`, and passes each
+socket to a worker with `SCM_RIGHTS`, round-robin. The workers
+still use the selected wait. A count that cannot be set up
+returns -1. The parent is not an HTTP worker.
 
 Each accepted socket is one `Conn` and one session. Bytes, peer FIN,
 write progress, write done, write error, and the idle tick go through
@@ -555,7 +581,9 @@ then `SQLITE_PATH`, then `:memory:`. An empty `--db`, `MURO_HTTP_DB`,
 or `SQLITE_PATH` exits 2. Tables are
 `posts(id INTEGER PRIMARY KEY AUTOINCREMENT, text TEXT NOT NULL)` and
 `likes(post_id INTEGER NOT NULL, sub TEXT NOT NULL, PRIMARY KEY(post_id, sub))`.
-One connection, `SQLITE_OPEN_NOMUTEX`. Create and like render the row
+One connection, `SQLITE_OPEN_NOMUTEX`. Each worker process opens
+its own connection. `:memory:` is not shared across workers. A WAL
+file is. Create and like render the row
 inside the write transaction and commit only when that row fits. If
 it does not fit, the store rolls back and the host passes `db-down`,
 so `decide` answers 500. A path that cannot be opened leaves the
@@ -602,13 +630,15 @@ Like is `{"id":N,"likes":M}`. The same subject twice is `like-new`
 the body `ok`. An error act is the plain token.
 
 Flags `--bind`, `--port`, `--idle-ms`, `--max-connections`,
-`--max-body`, `--drain-ms`, and `--jwt-key` override `MURO_HTTP_BIND`,
-`MURO_HTTP_PORT`, `MURO_HTTP_IDLE_MS`, `MURO_HTTP_MAX_CONNECTIONS`,
-`MURO_HTTP_MAX_BODY`, `MURO_HTTP_DRAIN_MS`, and `MURO_HTTP_JWT_KEY`. The database path is `--db`, then `MURO_HTTP_DB`,
+`--max-body`, `--drain-ms`, `--workers`, `--wait`, and `--jwt-key`
+override `MURO_HTTP_BIND`, `MURO_HTTP_PORT`, `MURO_HTTP_IDLE_MS`,
+`MURO_HTTP_MAX_CONNECTIONS`, `MURO_HTTP_MAX_BODY`,
+`MURO_HTTP_DRAIN_MS`, `MURO_HTTP_WORKERS`, `MURO_HTTP_WAIT`, and
+`MURO_HTTP_JWT_KEY`. The database path is `--db`, then `MURO_HTTP_DB`,
 then `SQLITE_PATH`, then `:memory:`. The defaults are `127.0.0.1`,
-port 8080, 5000 ms, 128 connections, `:memory:`, and no key. Every
-successful listen prints `listening <host> <port>`, including port 0.
-SIGINT and SIGTERM drain and exit 0.
+port 8080, 5000 ms, 128 connections, one worker, `:memory:`, and no
+key. Every successful listen prints `listening <host> <port>`,
+including port 0. SIGINT and SIGTERM drain and exit 0.
 
 ## The hello example
 
@@ -806,6 +836,14 @@ book linked beside it must not import that book. `decide.muro` and
 - The core binds one IPv4 address. The default is `127.0.0.1`.
   `--bind` and `MURO_HTTP_BIND` select it. The stored host is at
   most 15 characters.
+- The wait is kqueue on macOS, epoll on Linux, and `poll(2)`
+  otherwise. `--wait` and `MURO_HTTP_WAIT` select `poll`, `kqueue`,
+  or `epoll` when that backend is compiled. Past eight nested
+  `muro_http_body_read` calls, the wait on that socket is `poll(2)`.
+- Workers are 1 through 64 processes. The default is 1 and does
+  not fork. More than one worker needs a fixed port. `max_conn` is
+  per worker. Linux workers share the port with `SO_REUSEPORT`.
+  Other systems pass accepted sockets from one listener.
 - `addCap` still wraps a `U64`. The driver reports a delta of 8.
 - `bc-empty`, `bc-off-empty`, `bc-len-empty`, and `bc-long` reduce.
   They return before `jbScan`. A refl that walks the scanner does not

@@ -2,6 +2,28 @@
 
 ## 0.1.0-dev — unreleased
 
+- The wait is kqueue on macOS and epoll on Linux. `poll(2)` stays
+  compiled and is selected with `--wait poll` or `MURO_HTTP_WAIT=poll`.
+  The default is the native backend. The contract stays
+  level-triggered: a one-shot deadline, `ms == 0` disarms, a ready
+  socket does not move the deadline, and a wait returns at most 64
+  events. `poll(2)` still scans from a rotating cursor. kqueue and
+  epoll return kernel order and do not invent that cursor.
+  `c/test_poll` runs the timer, empty-set, hangup, and scan checks
+  on the default backend and on `poll`. Linux `check` and `asan`
+  exercise epoll. The macOS job exercises kqueue. Past eight nested
+  `muro_http_body_read` calls the wait on that socket is still
+  `poll(2)`.
+- `MuroHttpConfig.workers` is 1 through 64. The default is 1.
+  `--workers` and `MURO_HTTP_WORKERS` set it. `max_conn` stays per
+  worker. One worker is the single process and does not set
+  `SO_REUSEPORT`. Above that, Linux workers each bind with
+  `SO_REUSEPORT`. Other systems bind once in the parent and pass
+  accepted sockets with `SCM_RIGHTS`. macOS `SO_REUSEPORT` does not
+  load-balance TCP. SIGINT and SIGTERM stop the workers. Each
+  worker drains itself. `c/test_workers` checks one worker, two
+  workers, the poll fallback, a refused count, and SIGTERM. The
+  pin stays 0.22.14. The library version stays `0.1.0-dev`.
 - HTTP/1.1 methods. `GET`, `HEAD`, `POST`, `PUT`, `DELETE`, `OPTIONS`,
   and `PATCH` reach the handler. `OPTIONS *` is in that set. Any other
   method with target `*` is 400. A well-formed method outside the set
