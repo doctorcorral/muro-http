@@ -1,0 +1,1791 @@
+make: `bench/loadgen' is up to date.
+GIT b7d8bc23661cec6b4fcada9d65120a24cd843582
+Sun Nov 22 15:27:52 CST 2026
+Darwin 192.168.0.129 24.6.0 Darwin Kernel Version 24.6.0: Mon Jan 19 22:01:58 PST 2026; root:xnu-11417.140.69.708.3~1/RELEASE_ARM64_T6041 arm64
+Mac16,11
+12
+25769803776
+16384
+128
+15:27  up 162 days, 18:31, 3 users, load averages: 0.96 1.35 1.80
+Mach Virtual Memory Statistics: (page size of 16384 bytes)
+Pages free:                                4057.
+Pages active:                            303865.
+Pages inactive:                          303107.
+Pages speculative:                          303.
+Pages throttled:                              0.
+Pages wired down:                        200310.
+Pages purgeable:                           2361.
+"Translation faults":              415923143121.
+Pages copy-on-write:                 3690905704.
+Pages zero filled:                  57716211240.
+Pages reactivated:                 123199253835.
+Pages purged:                        3108269921.
+File-backed pages:                       177155.
+Anonymous pages:                         430120.
+Pages stored in compressor:             2641166.
+Pages occupied by compressor:            725640.
+Decompressions:                    204462210367.
+Compressions:                      220416223867.
+Pageins:                            28554878167.
+Pageouts:                              51230614.
+Swapins:                             1373854790.
+Swapouts:                            1468787627.
+ulimit_n 1048575
+docker:
+muro-mac-2 Up 5 days
+muro-mac-1 Up 5 days
+binary_mtime Nov 22 15:21:52 2026
+loadgen_mtime Nov 22 14:47:51 2026
+===== CONFIG poll1 wait=poll workers=1 =====
+Sun Nov 22 15:27:52 CST 2026
+15:27  up 162 days, 18:31, 3 users, load averages: 0.96 1.35 1.80
+Mach Virtual Memory Statistics: (page size of 16384 bytes)
+Pages free:                                4577.
+--- server log at listen ---
+muro-hello: wait poll
+listening 127.0.0.1 18180
+--- warmup poll1 wait=poll workers=1 keepalive c=1 ---
+requests 62864
+errors 0
+err_connect 0
+err_write 0
+err_read 0
+err_parse 0
+non2xx 0
+overflow 0
+elapsed_ms 2000
+rps 31432.00
+p50_us 32
+p99_us 52
+--- run 1 poll1 wait=poll workers=1 keepalive c=1 ---
+requests 161143
+errors 0
+err_connect 0
+err_write 0
+err_read 0
+err_parse 0
+non2xx 0
+overflow 0
+elapsed_ms 5000
+rps 32228.60
+p50_us 31
+p99_us 43
+--- run 2 poll1 wait=poll workers=1 keepalive c=1 ---
+requests 159081
+errors 0
+err_connect 0
+err_write 0
+err_read 0
+err_parse 0
+non2xx 0
+overflow 0
+elapsed_ms 5000
+rps 31816.20
+p50_us 32
+p99_us 43
+--- run 3 poll1 wait=poll workers=1 keepalive c=1 ---
+requests 162396
+errors 0
+err_connect 0
+err_write 0
+err_read 0
+err_parse 0
+non2xx 0
+overflow 0
+elapsed_ms 5000
+rps 32479.20
+p50_us 31
+p99_us 43
+--- warmup poll1 wait=poll workers=1 keepalive c=8 ---
+requests 115324
+errors 0
+err_connect 0
+err_write 0
+err_read 0
+err_parse 0
+non2xx 0
+overflow 0
+elapsed_ms 2000
+rps 57662.00
+p50_us 121
+p99_us 258
+--- run 1 poll1 wait=poll workers=1 keepalive c=8 ---
+requests 287215
+errors 0
+err_connect 0
+err_write 0
+err_read 0
+err_parse 0
+non2xx 0
+overflow 0
+elapsed_ms 5000
+rps 57443.00
+p50_us 122
+p99_us 260
+--- run 2 poll1 wait=poll workers=1 keepalive c=8 ---
+requests 288242
+errors 0
+err_connect 0
+err_write 0
+err_read 0
+err_parse 0
+non2xx 0
+overflow 0
+elapsed_ms 5000
+rps 57648.40
+p50_us 122
+p99_us 260
+--- run 3 poll1 wait=poll workers=1 keepalive c=8 ---
+requests 288647
+errors 0
+err_connect 0
+err_write 0
+err_read 0
+err_parse 0
+non2xx 0
+overflow 0
+elapsed_ms 5000
+rps 57729.40
+p50_us 121
+p99_us 258
+--- warmup poll1 wait=poll workers=1 keepalive c=32 ---
+requests 115876
+errors 0
+err_connect 0
+err_write 0
+err_read 0
+err_parse 0
+non2xx 0
+overflow 0
+elapsed_ms 2000
+rps 57938.00
+p50_us 539
+p99_us 1088
+--- run 1 poll1 wait=poll workers=1 keepalive c=32 ---
+requests 289287
+errors 0
+err_connect 0
+err_write 0
+err_read 0
+err_parse 0
+non2xx 0
+overflow 0
+elapsed_ms 5000
+rps 57857.40
+p50_us 534
+p99_us 1080
+--- run 2 poll1 wait=poll workers=1 keepalive c=32 ---
+requests 287591
+errors 0
+err_connect 0
+err_write 0
+err_read 0
+err_parse 0
+non2xx 0
+overflow 0
+elapsed_ms 5000
+rps 57518.20
+p50_us 538
+p99_us 1086
+--- run 3 poll1 wait=poll workers=1 keepalive c=32 ---
+requests 289321
+errors 0
+err_connect 0
+err_write 0
+err_read 0
+err_parse 0
+non2xx 0
+overflow 0
+elapsed_ms 5000
+rps 57864.20
+p50_us 536
+p99_us 1084
+--- warmup poll1 wait=poll workers=1 keepalive c=128 ---
+requests 112632
+errors 0
+err_connect 0
+err_write 0
+err_read 0
+err_parse 0
+non2xx 0
+overflow 0
+elapsed_ms 2002
+rps 56259.74
+p50_us 2290
+p99_us 2487
+--- run 1 poll1 wait=poll workers=1 keepalive c=128 ---
+requests 279051
+errors 0
+err_connect 0
+err_write 0
+err_read 0
+err_parse 0
+non2xx 0
+overflow 0
+elapsed_ms 5002
+rps 55787.88
+p50_us 2296
+p99_us 2514
+--- run 2 poll1 wait=poll workers=1 keepalive c=128 ---
+requests 280688
+errors 0
+err_connect 0
+err_write 0
+err_read 0
+err_parse 0
+non2xx 0
+overflow 0
+elapsed_ms 5002
+rps 56115.15
+p50_us 2284
+p99_us 2497
+--- run 3 poll1 wait=poll workers=1 keepalive c=128 ---
+requests 279004
+errors 0
+err_connect 0
+err_write 0
+err_read 0
+err_parse 0
+non2xx 0
+overflow 0
+elapsed_ms 5002
+rps 55778.49
+p50_us 2295
+p99_us 2506
+--- warmup poll1 wait=poll workers=1 close c=1 ---
+requests 30338
+errors 0
+err_connect 0
+err_write 0
+err_read 0
+err_parse 0
+non2xx 0
+overflow 0
+elapsed_ms 2000
+rps 15169.00
+p50_us 33
+p99_us 51
+--- run 1 poll1 wait=poll workers=1 close c=1 ---
+requests 77265
+errors 0
+err_connect 0
+err_write 0
+err_read 0
+err_parse 0
+non2xx 0
+overflow 0
+elapsed_ms 5000
+rps 15453.00
+p50_us 32
+p99_us 49
+--- run 2 poll1 wait=poll workers=1 close c=1 ---
+requests 77018
+errors 0
+err_connect 0
+err_write 0
+err_read 0
+err_parse 0
+non2xx 0
+overflow 0
+elapsed_ms 5000
+rps 15403.60
+p50_us 32
+p99_us 47
+--- run 3 poll1 wait=poll workers=1 close c=1 ---
+requests 77868
+errors 0
+err_connect 0
+err_write 0
+err_read 0
+err_parse 0
+non2xx 0
+overflow 0
+elapsed_ms 5000
+rps 15573.60
+p50_us 32
+p99_us 48
+--- warmup poll1 wait=poll workers=1 close c=8 ---
+requests 77501
+errors 0
+err_connect 0
+err_write 0
+err_read 0
+err_parse 0
+non2xx 0
+overflow 0
+elapsed_ms 2000
+rps 38750.50
+p50_us 104
+p99_us 211
+--- run 1 poll1 wait=poll workers=1 close c=8 ---
+requests 191054
+errors 0
+err_connect 0
+err_write 0
+err_read 0
+err_parse 0
+non2xx 0
+overflow 0
+elapsed_ms 5000
+rps 38210.80
+p50_us 103
+p99_us 202
+--- run 2 poll1 wait=poll workers=1 close c=8 ---
+requests 208780
+errors 0
+err_connect 0
+err_write 0
+err_read 0
+err_parse 0
+non2xx 0
+overflow 0
+elapsed_ms 5000
+rps 41756.00
+p50_us 101
+p99_us 195
+--- run 3 poll1 wait=poll workers=1 close c=8 ---
+requests 202137
+errors 0
+err_connect 0
+err_write 0
+err_read 0
+err_parse 0
+non2xx 0
+overflow 0
+elapsed_ms 5000
+rps 40427.40
+p50_us 101
+p99_us 196
+--- warmup poll1 wait=poll workers=1 close c=32 ---
+requests 85095
+errors 0
+err_connect 0
+err_write 0
+err_read 0
+err_parse 0
+non2xx 0
+overflow 0
+elapsed_ms 2000
+rps 42547.50
+p50_us 381
+p99_us 754
+--- run 1 poll1 wait=poll workers=1 close c=32 ---
+requests 198026
+errors 0
+err_connect 0
+err_write 0
+err_read 0
+err_parse 0
+non2xx 0
+overflow 0
+elapsed_ms 5000
+rps 39605.20
+p50_us 390
+p99_us 740
+--- run 2 poll1 wait=poll workers=1 close c=32 ---
+requests 206741
+errors 0
+err_connect 0
+err_write 0
+err_read 0
+err_parse 0
+non2xx 0
+overflow 0
+elapsed_ms 5000
+rps 41348.20
+p50_us 399
+p99_us 754
+--- run 3 poll1 wait=poll workers=1 close c=32 ---
+requests 209721
+errors 0
+err_connect 0
+err_write 0
+err_read 0
+err_parse 0
+non2xx 0
+overflow 0
+elapsed_ms 5000
+rps 41944.20
+p50_us 403
+p99_us 769
+--- warmup poll1 wait=poll workers=1 close c=128 ---
+requests 77665
+errors 0
+err_connect 0
+err_write 0
+err_read 0
+err_parse 0
+non2xx 0
+overflow 0
+elapsed_ms 2002
+rps 38793.71
+p50_us 1523
+p99_us 2928
+--- run 1 poll1 wait=poll workers=1 close c=128 ---
+requests 197696
+errors 0
+err_connect 0
+err_write 0
+err_read 0
+err_parse 0
+non2xx 0
+overflow 0
+elapsed_ms 5002
+rps 39523.39
+p50_us 1624
+p99_us 3984
+--- run 2 poll1 wait=poll workers=1 close c=128 ---
+requests 189069
+errors 0
+err_connect 0
+err_write 0
+err_read 0
+err_parse 0
+non2xx 0
+overflow 0
+elapsed_ms 5002
+rps 37798.68
+p50_us 1676
+p99_us 3859
+--- run 3 poll1 wait=poll workers=1 close c=128 ---
+requests 192329
+errors 0
+err_connect 0
+err_write 0
+err_read 0
+err_parse 0
+non2xx 0
+overflow 0
+elapsed_ms 5002
+rps 38450.42
+p50_us 1670
+p99_us 3957
+--- server log at exit ---
+muro-hello: wait poll
+listening 127.0.0.1 18180
+--- pages after poll1 wait=poll workers=1 ---
+Pages free:                               11934.
+===== CONFIG kqueue1 wait=kqueue workers=1 =====
+Sun Nov 22 15:30:09 CST 2026
+15:30  up 162 days, 18:33, 3 users, load averages: 3.71 2.17 2.04
+Mach Virtual Memory Statistics: (page size of 16384 bytes)
+Pages free:                               11769.
+--- server log at listen ---
+muro-hello: wait kqueue
+listening 127.0.0.1 18180
+--- warmup kqueue1 wait=kqueue workers=1 keepalive c=1 ---
+requests 63983
+errors 0
+err_connect 0
+err_write 0
+err_read 0
+err_parse 0
+non2xx 0
+overflow 0
+elapsed_ms 2000
+rps 31991.50
+p50_us 30
+p99_us 46
+--- run 1 kqueue1 wait=kqueue workers=1 keepalive c=1 ---
+requests 161815
+errors 0
+err_connect 0
+err_write 0
+err_read 0
+err_parse 0
+non2xx 0
+overflow 0
+elapsed_ms 5000
+rps 32363.00
+p50_us 30
+p99_us 42
+--- run 2 kqueue1 wait=kqueue workers=1 keepalive c=1 ---
+requests 161277
+errors 0
+err_connect 0
+err_write 0
+err_read 0
+err_parse 0
+non2xx 0
+overflow 0
+elapsed_ms 5000
+rps 32255.40
+p50_us 31
+p99_us 42
+--- run 3 kqueue1 wait=kqueue workers=1 keepalive c=1 ---
+requests 161727
+errors 0
+err_connect 0
+err_write 0
+err_read 0
+err_parse 0
+non2xx 0
+overflow 0
+elapsed_ms 5000
+rps 32345.40
+p50_us 31
+p99_us 42
+--- warmup kqueue1 wait=kqueue workers=1 keepalive c=8 ---
+requests 119374
+errors 0
+err_connect 0
+err_write 0
+err_read 0
+err_parse 0
+non2xx 0
+overflow 0
+elapsed_ms 2000
+rps 59687.00
+p50_us 117
+p99_us 246
+--- run 1 kqueue1 wait=kqueue workers=1 keepalive c=8 ---
+requests 297793
+errors 0
+err_connect 0
+err_write 0
+err_read 0
+err_parse 0
+non2xx 0
+overflow 0
+elapsed_ms 5000
+rps 59558.60
+p50_us 117
+p99_us 249
+--- run 2 kqueue1 wait=kqueue workers=1 keepalive c=8 ---
+requests 298150
+errors 0
+err_connect 0
+err_write 0
+err_read 0
+err_parse 0
+non2xx 0
+overflow 0
+elapsed_ms 5000
+rps 59630.00
+p50_us 117
+p99_us 247
+--- run 3 kqueue1 wait=kqueue workers=1 keepalive c=8 ---
+requests 298083
+errors 0
+err_connect 0
+err_write 0
+err_read 0
+err_parse 0
+non2xx 0
+overflow 0
+elapsed_ms 5000
+rps 59616.60
+p50_us 117
+p99_us 249
+--- warmup kqueue1 wait=kqueue workers=1 keepalive c=32 ---
+requests 120388
+errors 0
+err_connect 0
+err_write 0
+err_read 0
+err_parse 0
+non2xx 0
+overflow 0
+elapsed_ms 2000
+rps 60194.00
+p50_us 513
+p99_us 1036
+--- run 1 kqueue1 wait=kqueue workers=1 keepalive c=32 ---
+requests 300653
+errors 0
+err_connect 0
+err_write 0
+err_read 0
+err_parse 0
+non2xx 0
+overflow 0
+elapsed_ms 5000
+rps 60130.60
+p50_us 513
+p99_us 1039
+--- run 2 kqueue1 wait=kqueue workers=1 keepalive c=32 ---
+requests 300612
+errors 0
+err_connect 0
+err_write 0
+err_read 0
+err_parse 0
+non2xx 0
+overflow 0
+elapsed_ms 5000
+rps 60122.40
+p50_us 513
+p99_us 1037
+--- run 3 kqueue1 wait=kqueue workers=1 keepalive c=32 ---
+requests 301179
+errors 0
+err_connect 0
+err_write 0
+err_read 0
+err_parse 0
+non2xx 0
+overflow 0
+elapsed_ms 5000
+rps 60235.80
+p50_us 512
+p99_us 1034
+--- warmup kqueue1 wait=kqueue workers=1 keepalive c=128 ---
+requests 119062
+errors 0
+err_connect 0
+err_write 0
+err_read 0
+err_parse 0
+non2xx 0
+overflow 0
+elapsed_ms 2002
+rps 59471.53
+p50_us 2134
+p99_us 2313
+--- run 1 kqueue1 wait=kqueue workers=1 keepalive c=128 ---
+requests 298809
+errors 0
+err_connect 0
+err_write 0
+err_read 0
+err_parse 0
+non2xx 0
+overflow 0
+elapsed_ms 5002
+rps 59737.90
+p50_us 2134
+p99_us 2309
+--- run 2 kqueue1 wait=kqueue workers=1 keepalive c=128 ---
+requests 298586
+errors 0
+err_connect 0
+err_write 0
+err_read 0
+err_parse 0
+non2xx 0
+overflow 0
+elapsed_ms 5002
+rps 59693.32
+p50_us 2132
+p99_us 2307
+--- run 3 kqueue1 wait=kqueue workers=1 keepalive c=128 ---
+requests 299164
+errors 0
+err_connect 0
+err_write 0
+err_read 0
+err_parse 0
+non2xx 0
+overflow 0
+elapsed_ms 5002
+rps 59808.88
+p50_us 2132
+p99_us 2286
+--- warmup kqueue1 wait=kqueue workers=1 close c=1 ---
+requests 29644
+errors 0
+err_connect 0
+err_write 0
+err_read 0
+err_parse 0
+non2xx 0
+overflow 0
+elapsed_ms 2000
+rps 14822.00
+p50_us 34
+p99_us 52
+--- run 1 kqueue1 wait=kqueue workers=1 close c=1 ---
+requests 72846
+errors 0
+err_connect 0
+err_write 0
+err_read 0
+err_parse 0
+non2xx 0
+overflow 0
+elapsed_ms 5000
+rps 14569.20
+p50_us 34
+p99_us 47
+--- run 2 kqueue1 wait=kqueue workers=1 close c=1 ---
+requests 73046
+errors 0
+err_connect 0
+err_write 0
+err_read 0
+err_parse 0
+non2xx 0
+overflow 0
+elapsed_ms 5000
+rps 14609.20
+p50_us 34
+p99_us 48
+--- run 3 kqueue1 wait=kqueue workers=1 close c=1 ---
+requests 73772
+errors 0
+err_connect 0
+err_write 0
+err_read 0
+err_parse 0
+non2xx 0
+overflow 0
+elapsed_ms 5000
+rps 14754.40
+p50_us 34
+p99_us 46
+--- warmup kqueue1 wait=kqueue workers=1 close c=8 ---
+requests 77211
+errors 0
+err_connect 0
+err_write 0
+err_read 0
+err_parse 0
+non2xx 0
+overflow 0
+elapsed_ms 2000
+rps 38605.50
+p50_us 111
+p99_us 238
+--- run 1 kqueue1 wait=kqueue workers=1 close c=8 ---
+requests 192236
+errors 0
+err_connect 0
+err_write 0
+err_read 0
+err_parse 0
+non2xx 0
+overflow 0
+elapsed_ms 5000
+rps 38447.20
+p50_us 111
+p99_us 235
+--- run 2 kqueue1 wait=kqueue workers=1 close c=8 ---
+requests 197739
+errors 0
+err_connect 0
+err_write 0
+err_read 0
+err_parse 0
+non2xx 0
+overflow 0
+elapsed_ms 5000
+rps 39547.80
+p50_us 115
+p99_us 243
+--- run 3 kqueue1 wait=kqueue workers=1 close c=8 ---
+requests 198626
+errors 0
+err_connect 0
+err_write 0
+err_read 0
+err_parse 0
+non2xx 0
+overflow 0
+elapsed_ms 5000
+rps 39725.20
+p50_us 113
+p99_us 245
+--- warmup kqueue1 wait=kqueue workers=1 close c=32 ---
+requests 80893
+errors 0
+err_connect 0
+err_write 0
+err_read 0
+err_parse 0
+non2xx 0
+overflow 0
+elapsed_ms 2000
+rps 40446.50
+p50_us 476
+p99_us 1062
+--- run 1 kqueue1 wait=kqueue workers=1 close c=32 ---
+requests 200357
+errors 0
+err_connect 0
+err_write 0
+err_read 0
+err_parse 0
+non2xx 0
+overflow 0
+elapsed_ms 5000
+rps 40071.40
+p50_us 469
+p99_us 1055
+--- run 2 kqueue1 wait=kqueue workers=1 close c=32 ---
+requests 201019
+errors 0
+err_connect 0
+err_write 0
+err_read 0
+err_parse 0
+non2xx 0
+overflow 0
+elapsed_ms 5000
+rps 40203.80
+p50_us 457
+p99_us 1021
+--- run 3 kqueue1 wait=kqueue workers=1 close c=32 ---
+requests 203304
+errors 0
+err_connect 0
+err_write 0
+err_read 0
+err_parse 0
+non2xx 0
+overflow 0
+elapsed_ms 5000
+rps 40660.80
+p50_us 463
+p99_us 1050
+--- warmup kqueue1 wait=kqueue workers=1 close c=128 ---
+requests 69479
+errors 0
+err_connect 0
+err_write 0
+err_read 0
+err_parse 0
+non2xx 0
+overflow 0
+elapsed_ms 2002
+rps 34704.80
+p50_us 1722
+p99_us 4730
+--- run 1 kqueue1 wait=kqueue workers=1 close c=128 ---
+requests 190453
+errors 0
+err_connect 0
+err_write 0
+err_read 0
+err_parse 0
+non2xx 0
+overflow 0
+elapsed_ms 5124
+rps 37168.81
+p50_us 1754
+p99_us 4434
+--- run 2 kqueue1 wait=kqueue workers=1 close c=128 ---
+requests 189677
+errors 0
+err_connect 0
+err_write 0
+err_read 0
+err_parse 0
+non2xx 0
+overflow 0
+elapsed_ms 5002
+rps 37920.23
+p50_us 1737
+p99_us 3801
+--- run 3 kqueue1 wait=kqueue workers=1 close c=128 ---
+requests 185045
+errors 0
+err_connect 0
+err_write 0
+err_read 0
+err_parse 0
+non2xx 0
+overflow 0
+elapsed_ms 5002
+rps 36994.20
+p50_us 1776
+p99_us 4786
+--- server log at exit ---
+muro-hello: wait kqueue
+listening 127.0.0.1 18180
+--- pages after kqueue1 wait=kqueue workers=1 ---
+Pages free:                               11268.
+===== CONFIG kqueue4 wait=kqueue workers=4 =====
+Sun Nov 22 15:32:26 CST 2026
+15:32  up 162 days, 18:35, 3 users, load averages: 4.06 2.65 2.24
+Mach Virtual Memory Statistics: (page size of 16384 bytes)
+Pages free:                               10788.
+--- server log at listen ---
+muro-hello: wait kqueue
+muro-hello: wait kqueue
+muro-hello: wait kqueue
+muro-hello: workers 4 handoff
+listening 127.0.0.1 18180
+muro-hello: wait kqueue
+--- warmup kqueue4 wait=kqueue workers=4 keepalive c=1 ---
+requests 64749
+errors 0
+err_connect 0
+err_write 0
+err_read 0
+err_parse 0
+non2xx 0
+overflow 0
+elapsed_ms 2000
+rps 32374.50
+p50_us 30
+p99_us 57
+--- run 1 kqueue4 wait=kqueue workers=4 keepalive c=1 ---
+requests 166103
+errors 0
+err_connect 0
+err_write 0
+err_read 0
+err_parse 0
+non2xx 0
+overflow 0
+elapsed_ms 5000
+rps 33220.60
+p50_us 30
+p99_us 40
+--- run 2 kqueue4 wait=kqueue workers=4 keepalive c=1 ---
+requests 165965
+errors 0
+err_connect 0
+err_write 0
+err_read 0
+err_parse 0
+non2xx 0
+overflow 0
+elapsed_ms 5000
+rps 33193.00
+p50_us 30
+p99_us 41
+--- run 3 kqueue4 wait=kqueue workers=4 keepalive c=1 ---
+requests 165946
+errors 0
+err_connect 0
+err_write 0
+err_read 0
+err_parse 0
+non2xx 0
+overflow 0
+elapsed_ms 5000
+rps 33189.20
+p50_us 30
+p99_us 41
+--- warmup kqueue4 wait=kqueue workers=4 keepalive c=8 ---
+requests 325991
+errors 0
+err_connect 0
+err_write 0
+err_read 0
+err_parse 0
+non2xx 0
+overflow 0
+elapsed_ms 2000
+rps 162995.50
+p50_us 48
+p99_us 72
+--- run 1 kqueue4 wait=kqueue workers=4 keepalive c=8 ---
+requests 813082
+errors 0
+err_connect 0
+err_write 0
+err_read 0
+err_parse 0
+non2xx 0
+overflow 0
+elapsed_ms 5000
+rps 162616.40
+p50_us 48
+p99_us 73
+--- run 2 kqueue4 wait=kqueue workers=4 keepalive c=8 ---
+requests 811139
+errors 0
+err_connect 0
+err_write 0
+err_read 0
+err_parse 0
+non2xx 0
+overflow 0
+elapsed_ms 5000
+rps 162227.80
+p50_us 48
+p99_us 73
+--- run 3 kqueue4 wait=kqueue workers=4 keepalive c=8 ---
+requests 809655
+errors 0
+err_connect 0
+err_write 0
+err_read 0
+err_parse 0
+non2xx 0
+overflow 0
+elapsed_ms 5000
+rps 161931.00
+p50_us 48
+p99_us 75
+--- warmup kqueue4 wait=kqueue workers=4 keepalive c=32 ---
+requests 368208
+errors 0
+err_connect 0
+err_write 0
+err_read 0
+err_parse 0
+non2xx 0
+overflow 0
+elapsed_ms 2000
+rps 184104.00
+p50_us 165
+p99_us 311
+--- run 1 kqueue4 wait=kqueue workers=4 keepalive c=32 ---
+requests 918454
+errors 0
+err_connect 0
+err_write 0
+err_read 0
+err_parse 0
+non2xx 0
+overflow 0
+elapsed_ms 5000
+rps 183690.80
+p50_us 165
+p99_us 314
+--- run 2 kqueue4 wait=kqueue workers=4 keepalive c=32 ---
+requests 921648
+errors 0
+err_connect 0
+err_write 0
+err_read 0
+err_parse 0
+non2xx 0
+overflow 0
+elapsed_ms 5000
+rps 184329.60
+p50_us 165
+p99_us 311
+--- run 3 kqueue4 wait=kqueue workers=4 keepalive c=32 ---
+requests 918160
+errors 0
+err_connect 0
+err_write 0
+err_read 0
+err_parse 0
+non2xx 0
+overflow 0
+elapsed_ms 5000
+rps 183632.00
+p50_us 166
+p99_us 313
+--- warmup kqueue4 wait=kqueue workers=4 keepalive c=128 ---
+requests 369685
+errors 0
+err_connect 0
+err_write 0
+err_read 0
+err_parse 0
+non2xx 0
+overflow 0
+elapsed_ms 2001
+rps 184750.12
+p50_us 672
+p99_us 1304
+--- run 1 kqueue4 wait=kqueue workers=4 keepalive c=128 ---
+requests 922808
+errors 0
+err_connect 0
+err_write 0
+err_read 0
+err_parse 0
+non2xx 0
+overflow 0
+elapsed_ms 5001
+rps 184524.70
+p50_us 674
+p99_us 1311
+--- run 2 kqueue4 wait=kqueue workers=4 keepalive c=128 ---
+requests 923705
+errors 0
+err_connect 0
+err_write 0
+err_read 0
+err_parse 0
+non2xx 0
+overflow 0
+elapsed_ms 5001
+rps 184704.06
+p50_us 676
+p99_us 1298
+--- run 3 kqueue4 wait=kqueue workers=4 keepalive c=128 ---
+requests 920975
+errors 0
+err_connect 0
+err_write 0
+err_read 0
+err_parse 0
+non2xx 0
+overflow 0
+elapsed_ms 5001
+rps 184158.17
+p50_us 674
+p99_us 1314
+--- warmup kqueue4 wait=kqueue workers=4 close c=1 ---
+requests 28741
+errors 0
+err_connect 0
+err_write 0
+err_read 0
+err_parse 0
+non2xx 0
+overflow 0
+elapsed_ms 2008
+rps 14313.25
+p50_us 36
+p99_us 52
+--- run 1 kqueue4 wait=kqueue workers=4 close c=1 ---
+requests 72081
+errors 0
+err_connect 0
+err_write 0
+err_read 0
+err_parse 0
+non2xx 0
+overflow 0
+elapsed_ms 5000
+rps 14416.20
+p50_us 36
+p99_us 52
+--- run 2 kqueue4 wait=kqueue workers=4 close c=1 ---
+requests 71617
+errors 0
+err_connect 0
+err_write 0
+err_read 0
+err_parse 0
+non2xx 0
+overflow 0
+elapsed_ms 5000
+rps 14323.40
+p50_us 36
+p99_us 54
+--- run 3 kqueue4 wait=kqueue workers=4 close c=1 ---
+requests 72070
+errors 0
+err_connect 0
+err_write 0
+err_read 0
+err_parse 0
+non2xx 0
+overflow 0
+elapsed_ms 5000
+rps 14414.00
+p50_us 36
+p99_us 52
+--- warmup kqueue4 wait=kqueue workers=4 close c=8 ---
+requests 74600
+errors 0
+err_connect 0
+err_write 0
+err_read 0
+err_parse 0
+non2xx 0
+overflow 0
+elapsed_ms 2000
+rps 37300.00
+p50_us 84
+p99_us 142
+--- run 1 kqueue4 wait=kqueue workers=4 close c=8 ---
+requests 177729
+errors 0
+err_connect 0
+err_write 0
+err_read 0
+err_parse 0
+non2xx 0
+overflow 0
+elapsed_ms 5000
+rps 35545.80
+p50_us 84
+p99_us 141
+--- run 2 kqueue4 wait=kqueue workers=4 close c=8 ---
+requests 186341
+errors 0
+err_connect 0
+err_write 0
+err_read 0
+err_parse 0
+non2xx 0
+overflow 0
+elapsed_ms 5000
+rps 37268.20
+p50_us 83
+p99_us 139
+--- run 3 kqueue4 wait=kqueue workers=4 close c=8 ---
+requests 179758
+errors 0
+err_connect 0
+err_write 0
+err_read 0
+err_parse 0
+non2xx 0
+overflow 0
+elapsed_ms 5000
+rps 35951.60
+p50_us 83
+p99_us 141
+--- warmup kqueue4 wait=kqueue workers=4 close c=32 ---
+requests 70813
+errors 0
+err_connect 0
+err_write 0
+err_read 0
+err_parse 0
+non2xx 0
+overflow 0
+elapsed_ms 2000
+rps 35406.50
+p50_us 351
+p99_us 529
+--- run 1 kqueue4 wait=kqueue workers=4 close c=32 ---
+requests 183018
+errors 0
+err_connect 0
+err_write 0
+err_read 0
+err_parse 0
+non2xx 0
+overflow 0
+elapsed_ms 5000
+rps 36603.60
+p50_us 355
+p99_us 529
+--- run 2 kqueue4 wait=kqueue workers=4 close c=32 ---
+requests 180564
+errors 0
+err_connect 0
+err_write 0
+err_read 0
+err_parse 0
+non2xx 0
+overflow 0
+elapsed_ms 5000
+rps 36112.80
+p50_us 356
+p99_us 534
+--- run 3 kqueue4 wait=kqueue workers=4 close c=32 ---
+requests 182669
+errors 0
+err_connect 0
+err_write 0
+err_read 0
+err_parse 0
+non2xx 0
+overflow 0
+elapsed_ms 5000
+rps 36533.80
+p50_us 354
+p99_us 533
+--- warmup kqueue4 wait=kqueue workers=4 close c=128 ---
+requests 71357
+errors 0
+err_connect 0
+err_write 0
+err_read 0
+err_parse 0
+non2xx 0
+overflow 0
+elapsed_ms 2001
+rps 35660.67
+p50_us 1482
+p99_us 2219
+--- run 1 kqueue4 wait=kqueue workers=4 close c=128 ---
+requests 167212
+errors 0
+err_connect 0
+err_write 0
+err_read 0
+err_parse 0
+non2xx 0
+overflow 0
+elapsed_ms 5002
+rps 33429.03
+p50_us 1549
+p99_us 2485
+--- run 2 kqueue4 wait=kqueue workers=4 close c=128 ---
+requests 183583
+errors 0
+err_connect 0
+err_write 0
+err_read 0
+err_parse 0
+non2xx 0
+overflow 0
+elapsed_ms 5001
+rps 36709.26
+p50_us 1479
+p99_us 2116
+--- run 3 kqueue4 wait=kqueue workers=4 close c=128 ---
+requests 182889
+errors 0
+err_connect 0
+err_write 0
+err_read 0
+err_parse 0
+non2xx 0
+overflow 0
+elapsed_ms 5002
+rps 36563.17
+p50_us 1467
+p99_us 2139
+--- server log at exit ---
+muro-hello: wait kqueue
+muro-hello: wait kqueue
+muro-hello: wait kqueue
+muro-hello: workers 4 handoff
+listening 127.0.0.1 18180
+muro-hello: wait kqueue
+muro-hello: handoff drops 0
+--- pages after kqueue4 wait=kqueue workers=4 ---
+Pages free:                               12264.
+===== CONFIG kqueue12 wait=kqueue workers=12 =====
+Sun Nov 22 15:34:42 CST 2026
+15:34  up 162 days, 18:37, 3 users, load averages: 4.58 3.55 2.67
+Mach Virtual Memory Statistics: (page size of 16384 bytes)
+Pages free:                               12051.
+--- server log at listen ---
+muro-hello: wait kqueue
+muro-hello: wait kqueue
+muro-hello: wait kqueue
+muro-hello: wait kqueue
+muro-hello: wait kqueue
+muro-hello: wait kqueue
+muro-hello: wait kqueue
+muro-hello: wait kqueue
+muro-hello: wait kqueue
+muro-hello: workers 12 handoff
+listening 127.0.0.1 18180
+muro-hello: wait kqueue
+muro-hello: wait kqueue
+muro-hello: wait kqueue
+--- warmup kqueue12 wait=kqueue workers=12 keepalive c=1 ---
+requests 67491
+errors 0
+err_connect 0
+err_write 0
+err_read 0
+err_parse 0
+non2xx 0
+overflow 0
+elapsed_ms 2000
+rps 33745.50
+p50_us 29
+p99_us 35
+--- run 1 kqueue12 wait=kqueue workers=12 keepalive c=1 ---
+requests 169248
+errors 0
+err_connect 0
+err_write 0
+err_read 0
+err_parse 0
+non2xx 0
+overflow 0
+elapsed_ms 5000
+rps 33849.60
+p50_us 29
+p99_us 35
+--- run 2 kqueue12 wait=kqueue workers=12 keepalive c=1 ---
+requests 169457
+errors 0
+err_connect 0
+err_write 0
+err_read 0
+err_parse 0
+non2xx 0
+overflow 0
+elapsed_ms 5000
+rps 33891.40
+p50_us 29
+p99_us 35
+--- run 3 kqueue12 wait=kqueue workers=12 keepalive c=1 ---
+requests 170364
+errors 0
+err_connect 0
+err_write 0
+err_read 0
+err_parse 0
+non2xx 0
+overflow 0
+elapsed_ms 5000
+rps 34072.80
+p50_us 29
+p99_us 35
+--- warmup kqueue12 wait=kqueue workers=12 keepalive c=8 ---
+requests 309963
+errors 0
+err_connect 0
+err_write 0
+err_read 0
+err_parse 0
+non2xx 0
+overflow 0
+elapsed_ms 2000
+rps 154981.50
+p50_us 50
+p99_us 73
+--- run 1 kqueue12 wait=kqueue workers=12 keepalive c=8 ---
+requests 774556
+errors 0
+err_connect 0
+err_write 0
+err_read 0
+err_parse 0
+non2xx 0
+overflow 0
+elapsed_ms 5000
+rps 154911.20
+p50_us 51
+p99_us 73
+--- run 2 kqueue12 wait=kqueue workers=12 keepalive c=8 ---
+requests 774306
+errors 0
+err_connect 0
+err_write 0
+err_read 0
+err_parse 0
+non2xx 0
+overflow 0
+elapsed_ms 5000
+rps 154861.20
+p50_us 51
+p99_us 72
+--- run 3 kqueue12 wait=kqueue workers=12 keepalive c=8 ---
+requests 774692
+errors 0
+err_connect 0
+err_write 0
+err_read 0
+err_parse 0
+non2xx 0
+overflow 0
+elapsed_ms 5000
+rps 154938.40
+p50_us 51
+p99_us 73
+--- warmup kqueue12 wait=kqueue workers=12 keepalive c=32 ---
+requests 334010
+errors 0
+err_connect 0
+err_write 0
+err_read 0
+err_parse 0
+non2xx 0
+overflow 0
+elapsed_ms 2000
+rps 167005.00
+p50_us 189
+p99_us 230
+--- run 1 kqueue12 wait=kqueue workers=12 keepalive c=32 ---
+requests 831220
+errors 0
+err_connect 0
+err_write 0
+err_read 0
+err_parse 0
+non2xx 0
+overflow 0
+elapsed_ms 5000
+rps 166244.00
+p50_us 190
+p99_us 231
+--- run 2 kqueue12 wait=kqueue workers=12 keepalive c=32 ---
+requests 826870
+errors 0
+err_connect 0
+err_write 0
+err_read 0
+err_parse 0
+non2xx 0
+overflow 0
+elapsed_ms 5000
+rps 165374.00
+p50_us 191
+p99_us 233
+--- run 3 kqueue12 wait=kqueue workers=12 keepalive c=32 ---
+requests 823968
+errors 0
+err_connect 0
+err_write 0
+err_read 0
+err_parse 0
+non2xx 0
+overflow 0
+elapsed_ms 5000
+rps 164793.60
+p50_us 192
+p99_us 233
+--- warmup kqueue12 wait=kqueue workers=12 keepalive c=128 ---
+requests 332398
+errors 0
+err_connect 0
+err_write 0
+err_read 0
+err_parse 0
+non2xx 0
+overflow 0
+elapsed_ms 2001
+rps 166115.94
+p50_us 768
+p99_us 835
+--- run 1 kqueue12 wait=kqueue workers=12 keepalive c=128 ---
+requests 830616
+errors 0
+err_connect 0
+err_write 0
+err_read 0
+err_parse 0
+non2xx 0
+overflow 0
+elapsed_ms 5001
+rps 166089.98
+p50_us 768
+p99_us 840
+--- run 2 kqueue12 wait=kqueue workers=12 keepalive c=128 ---
+requests 812241
+errors 0
+err_connect 0
+err_write 0
+err_read 0
+err_parse 0
+non2xx 0
+overflow 0
+elapsed_ms 5001
+rps 162415.72
+p50_us 783
+p99_us 879
+--- run 3 kqueue12 wait=kqueue workers=12 keepalive c=128 ---
+requests 827628
+errors 0
+err_connect 0
+err_write 0
+err_read 0
+err_parse 0
+non2xx 0
+overflow 0
+elapsed_ms 5001
+rps 165492.50
+p50_us 770
+p99_us 859
+--- warmup kqueue12 wait=kqueue workers=12 close c=1 ---
+requests 28504
+errors 0
+err_connect 0
+err_write 0
+err_read 0
+err_parse 0
+non2xx 0
+overflow 0
+elapsed_ms 2000
+rps 14252.00
+p50_us 40
+p99_us 47
+--- run 1 kqueue12 wait=kqueue workers=12 close c=1 ---
+requests 70958
+errors 0
+err_connect 0
+err_write 0
+err_read 0
+err_parse 0
+non2xx 0
+overflow 0
+elapsed_ms 5000
+rps 14191.60
+p50_us 40
+p99_us 47
+--- run 2 kqueue12 wait=kqueue workers=12 close c=1 ---
+requests 70971
+errors 0
+err_connect 0
+err_write 0
+err_read 0
+err_parse 0
+non2xx 0
+overflow 0
+elapsed_ms 5000
+rps 14194.20
+p50_us 40
+p99_us 47
+--- run 3 kqueue12 wait=kqueue workers=12 close c=1 ---
+requests 70951
+errors 0
+err_connect 0
+err_write 0
+err_read 0
+err_parse 0
+non2xx 0
+overflow 0
+elapsed_ms 5000
+rps 14190.20
+p50_us 40
+p99_us 47
+--- warmup kqueue12 wait=kqueue workers=12 close c=8 ---
+requests 73062
+errors 0
+err_connect 0
+err_write 0
+err_read 0
+err_parse 0
+non2xx 0
+overflow 0
+elapsed_ms 2000
+rps 36531.00
+p50_us 94
+p99_us 155
+--- run 1 kqueue12 wait=kqueue workers=12 close c=8 ---
+requests 177949
+errors 0
+err_connect 0
+err_write 0
+err_read 0
+err_parse 0
+non2xx 0
+overflow 0
+elapsed_ms 5000
+rps 35589.80
+p50_us 94
+p99_us 151
+--- run 2 kqueue12 wait=kqueue workers=12 close c=8 ---
+requests 172257
+errors 0
+err_connect 0
+err_write 0
+err_read 0
+err_parse 0
+non2xx 0
+overflow 0
+elapsed_ms 5000
+rps 34451.40
+p50_us 94
+p99_us 158
+--- run 3 kqueue12 wait=kqueue workers=12 close c=8 ---
+requests 181611
+errors 0
+err_connect 0
+err_write 0
+err_read 0
+err_parse 0
+non2xx 0
+overflow 0
+elapsed_ms 5000
+rps 36322.20
+p50_us 93
+p99_us 146
+--- warmup kqueue12 wait=kqueue workers=12 close c=32 ---
+requests 76386
+errors 0
+err_connect 0
+err_write 0
+err_read 0
+err_parse 0
+non2xx 0
+overflow 0
+elapsed_ms 2000
+rps 38193.00
+p50_us 364
+p99_us 515
+--- run 1 kqueue12 wait=kqueue workers=12 close c=32 ---
+requests 189986
+errors 0
+err_connect 0
+err_write 0
+err_read 0
+err_parse 0
+non2xx 0
+overflow 0
+elapsed_ms 5000
+rps 37997.20
+p50_us 364
+p99_us 512
+--- run 2 kqueue12 wait=kqueue workers=12 close c=32 ---
+requests 176788
+errors 0
+err_connect 0
+err_write 0
+err_read 0
+err_parse 0
+non2xx 0
+overflow 0
+elapsed_ms 5000
+rps 35357.60
+p50_us 375
+p99_us 568
+--- run 3 kqueue12 wait=kqueue workers=12 close c=32 ---
+requests 186393
+errors 0
+err_connect 0
+err_write 0
+err_read 0
+err_parse 0
+non2xx 0
+overflow 0
+elapsed_ms 5000
+rps 37278.60
+p50_us 369
+p99_us 546
+--- warmup kqueue12 wait=kqueue workers=12 close c=128 ---
+requests 72039
+errors 0
+err_connect 0
+err_write 0
+err_read 0
+err_parse 0
+non2xx 0
+overflow 0
+elapsed_ms 2002
+rps 35983.52
+p50_us 1520
+p99_us 2151
+--- run 1 kqueue12 wait=kqueue workers=12 close c=128 ---
+requests 173910
+errors 0
+err_connect 0
+err_write 0
+err_read 0
+err_parse 0
+non2xx 0
+overflow 0
+elapsed_ms 5002
+rps 34768.09
+p50_us 1547
+p99_us 2390
+--- run 2 kqueue12 wait=kqueue workers=12 close c=128 ---
+requests 178656
+errors 0
+err_connect 0
+err_write 0
+err_read 0
+err_parse 0
+non2xx 0
+overflow 0
+elapsed_ms 5002
+rps 35716.91
+p50_us 1527
+p99_us 2164
+--- run 3 kqueue12 wait=kqueue workers=12 close c=128 ---
+requests 173944
+errors 0
+err_connect 0
+err_write 0
+err_read 0
+err_parse 0
+non2xx 0
+overflow 0
+elapsed_ms 5002
+rps 34774.89
+p50_us 1558
+p99_us 2379
+--- server log at exit ---
+muro-hello: wait kqueue
+muro-hello: wait kqueue
+muro-hello: wait kqueue
+muro-hello: wait kqueue
+muro-hello: wait kqueue
+muro-hello: wait kqueue
+muro-hello: wait kqueue
+muro-hello: wait kqueue
+muro-hello: wait kqueue
+muro-hello: workers 12 handoff
+listening 127.0.0.1 18180
+muro-hello: wait kqueue
+muro-hello: wait kqueue
+muro-hello: wait kqueue
+muro-hello: handoff drops 0
+--- pages after kqueue12 wait=kqueue workers=12 ---
+Pages free:                                9857.
+Sun Nov 22 15:36:59 CST 2026
+BENCH_DONE
