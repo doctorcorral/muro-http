@@ -433,7 +433,9 @@ Each has its own event loop, connection table, and arena.
 address with `SO_REUSEPORT` and accepts on it. macOS
 `SO_REUSEPORT` does not spread accepted TCP connections, so there
 the parent binds once, accepts with `poll(2)`, and passes each
-socket to a worker with `SCM_RIGHTS`, round-robin. The workers
+socket to a worker with `SCM_RIGHTS`, round-robin. If no worker
+can take the socket, the parent polls 20 ms for room and tries
+once more. If it still cannot, it closes that socket. The workers
 still use the selected wait. A count that cannot be set up
 returns -1. The parent is not an HTTP worker.
 
