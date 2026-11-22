@@ -64,8 +64,10 @@ SHOULD for a compression coding. `chunked;q=1`, `chunked ; q=1`,
 `gzip;q=1`, `chu;nked`, and `chu;n=1` are all 400. Accepting the
 parameter, or stripping it, would let a proxy disagree about where
 the body ends. `chunked` has to be the final coding (RFC 9112 6.1):
-`chunked, gzip` is `status-malformed`. `chunked;q=1, gzip` is
-malformed because of the parameter.
+`chunked, gzip` is `status-malformed`. `chunked;q=1, gzip`,
+`chunked;q=1, chunked`, and `gzip;q=1, chunked` are malformed
+because of the parameter. A later `chunked` does not make
+`gzip;q=1, chunked` unimplemented.
 `Transfer-Encoding` together
 with `Content-Length` is `status-malformed` (RFC 9112 6.3). Chunked
 on HTTP/1.0 is `status-malformed`. A chunk size that does not fit in
@@ -182,8 +184,12 @@ tick during the handler phase or write holds in the book, and the
 host does not deliver one there. A streamed body blocked in
 `muro_http_body_read` still closes when that same idle deadline
 passes. The wait is the host clock. It is not an image tick. The
-echo pull reads the body while the image is in write, and a handler
-that reads the body does it while the image is in decide.
+echo pull reads the body while the image is in write.
+`c/test_http11` `check_body_idle` sees 200 and then a close. A
+handler that reads the body does it while the image is in decide.
+`examples/hello` returns 400 when that read fails. `host_in_after`
+sees the read error and copies `httpMalformed`. `c/test_hello`
+`check_decide_idle` sees 400, body `malformed`, and a close.
 `conn.muro` imports
 `request.muro` and calls `classify`. It does not import `decide.muro`.
 
@@ -294,8 +300,21 @@ written.
 when the socket has nothing queued. That wait accepts and serves
 other connections. It also arms the idle deadline while the image
 is in decide or write, where the book timer is off. No body byte
-before the deadline closes the connection after the read returns.
-A byte of the body starts a new window. A nested read does not
+before the deadline makes that read return. The caller then closes.
+A byte of the body starts a new window. The echo pull is the write
+phase: the 200 headers are already written, and
+`c/test_http11` `check_body_idle` sees 200 and then a close. A
+handler read is the decide phase, before any status byte.
+`examples/hello` maps a failed `muro_http_body_read` to 400 with
+body `bad\n`. `host_in_after` sees error 400 and copies
+`httpMalformed` instead of that handler body, then closes.
+`c/test_hello` `check_decide_idle` stalls `Content-Length: 20000`
+and sees 400, body `malformed`, and a close. A tick for a socket
+already inside that read does not step the image. In read and
+idle, as in decide and write, it sets `body_idle` and clears the
+deadline, so the next wait cannot arm a fresh window. The wire
+tests cover decide and write. A read-phase body wait is not a
+path these servers take. A nested read does not
 watch a socket that is already inside a read, so those bytes stay
 in the kernel until the inner read returns. Past eight nested
 reads, the wait is this socket alone, and the same deadline still
@@ -345,8 +364,9 @@ from 0 through 86400000. A negative max body or drain time makes
 `muro_http_serve` return -1. The flag is noticed between polls and
 inside `muro_http_body_read`. That arms the drain at once, on that
 same turn: the listen socket closes, idle connections close, and
-the body read keeps going until the body ends or `drain_ms` passes.
-The process then exits 0.
+the body read keeps going until the body ends, `drain_ms` passes,
+or the idle deadline passes with no further body byte. The process
+then exits 0.
 
 `c/host.c` owns the sockets, the buffers, the connection table, the
 clock, and `poll`. `make c-check` compiles it with
@@ -666,10 +686,14 @@ form is a machine term. The request names are `crlf-end`, `lf-end`,
 `post-framed-short`, `post-take-short`, `ck-framed`,
 `ck-framed-hdr`, `ck-take-hdr`, `stream-take-hi`, `stream-end-hi`,
 `stream-take-edge`, `stream-end-edge`, and `stream-take-lf`.
-`te-param-quote`, `te-param-empty-q`, `te-param-junk`,
-`te-param-twice`, and `te-gzip-param-final` are C checks in
-`c/test_classify`, not book equations. The quote cases need a `"`
-inside the header, and the book byte strings have none. `te-cut-st`
+`te-param-quote` and `te-param-empty-q` are C checks in
+`c/test_classify` and `c/test_http11`, not book equations. They
+need a `"` inside the header, and the book byte strings have none.
+`te-param-junk`, `te-param-twice`, and `te-gzip-param-final` are
+`statusOf` equations. Each reduces to `status-malformed`, and
+`mix test` runs them. `c/test_classify` also checks `teCode` of
+those three buffers (code 3). `c/test_http11` checks the 400.
+`te-cut-st`
 and `te-unknown-st` are `statusOf` equations for `chu;nked` and
 `chu;n=1`. Both are `status-malformed`. `c/test_classify` also
 checks `teCode` of those two buffers (`te-param-cut`,
@@ -682,7 +706,7 @@ machine term: `route-verb-get`, `route-verb-post`,
 `route-id`, `route-like`, `route-tail`, `route-id-42`,
 `route-idn-42`, `route-id-zero`, `route-id-abc`, `route-id-lead`,
 `route-like-id`, and `route-health-id`. `c/test_route` checks
-those results. `stream-take-hi` and `stream-take-edge`
+those results. Its names drop the `route-` prefix. `stream-take-hi` and `stream-take-edge`
 are the header-only buffers. `stream-cl` and `cap-cl` are C checks
 in `c/test_classify`, not book equations. They name the
 classify status of those same buffers, not a body of that size.

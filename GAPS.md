@@ -480,8 +480,10 @@ codes, `crlf-end`, `lf-end`, `hdr-prefers-crlf`, `header-count`,
 `route-posts`, `route-id`, `route-like`, `route-tail`,
 `route-id-42`, `route-idn-42`, `route-id-zero`, `route-id-abc`,
 `route-id-lead`, `route-like-id`, and `route-health-id`.
-`c/test_route` checks those results. `c/test_classify` checks each of those results,
-and the failure name is the equation name. `stream-take-hi` and
+`c/test_route` checks those results. Its names drop the `route-`
+prefix (`verb-get` through `health-id`). `c/test_classify` checks
+the thirty-four skipped `request.muro` results, and the failure
+name is the equation name. `stream-take-hi` and
 `stream-take-edge` are header-only buffers. `stream-cl` and
 `cap-cl` are C checks in `c/test_classify`, not book equations.
 They name the classify status of those buffers, not a body of

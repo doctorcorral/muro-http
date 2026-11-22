@@ -19,9 +19,16 @@
   `chunked;q=1`, `chunked ; q=1`, `gzip;q=1`, `chu;nked`, and
   `chu;n=1` are all 400. Accepting the parameter, or stripping it,
   would let a proxy disagree about where the body ends. A bare
-  `chunked;` or `chunked;@@@` is the same 400. Quote cases stay C
-  checks in `c/test_classify` and `c/test_http11` because the book
-  byte strings have no `"`.
+  `chunked;` (`te-param-empty`) or `chunked;@@@` (`te-param-junk`)
+  is the same 400. `chunked;q=1, chunked` (`te-param-twice`) and
+  `gzip;q=1, chunked` (`te-gzip-param-final`) are
+  `status-malformed` as well. The parameter is bad framing, so a
+  later `chunked` does not make the coding unimplemented. `mix test`
+  reduces those `statusOf` equations. `c/test_classify` checks
+  `teCode` 3 for the same buffers. `c/test_http11` checks the 400.
+  `te-param-quote` and `te-param-empty-q` stay C checks in
+  `c/test_classify` and `c/test_http11`. They need a `"` inside the
+  header, and the book byte strings have none.
   A chunk size that
   does not fit in a `U64` is 400. `Transfer-Encoding`
   together with `Content-Length` is 400 (RFC 9112 6.3). `chunked`
@@ -81,20 +88,48 @@
   deadline passes with no further body byte. A stalled streamed
   body closes after the idle timeout. That deadline is armed while
   the image is in decide or write, where a book tick would hold.
-  `c/test_http11` covers the stream echo: headers with
-  `Content-Length: 20000`, then silence, then 200 and a close.
+  A tick for a socket already inside that read does not step the
+  image. In read and idle, as in decide and write, it sets
+  `body_idle` and clears the deadline, so the next wait cannot arm
+  a fresh window. The echo pull reads during write, after the 200
+  headers are out. `c/test_http11` `check_body_idle` sends headers
+  with `Content-Length: 20000`, then silence, and sees 200 and a
+  close. A handler that reads during decide has not sent a status
+  yet. `examples/hello` returns 400 with body `bad\n` when
+  `muro_http_body_read` fails. `host_in_after` sees that read error
+  and copies `httpMalformed` instead of the handler body, then
+  closes. `c/test_hello` `check_decide_idle` uses the same stalled
+  `Content-Length: 20000` and sees 400, body `malformed`, and a
+  close.
   While that read waits, the server poll accepts and serves other
   connections. A nested read does not watch a socket already inside
   a read. Past eight nested reads, the wait is that socket alone.
 - `examples/stream` serves a known-length pull, a chunked pull, and
   an echo of the request body. `c/test_http11` drives it.
-- `mix test` reduces the new `Status` equations in `request.muro`:
-  `OPTIONS *`, `GET *`, an empty chunked body, `Transfer-Encoding`
-  with `Content-Length`, chunked on HTTP/1.0, `chunked;q=1`
-  (`te-param-st`), `gzip;q=1` (`te-gzip-param-st`), a bare
-  `chunked;` (`te-param-empty`), `chu;nked` (`te-cut-st`), and
-  `chu;n=1` (`te-unknown-st`). Each of those is
-  `status-malformed`. ExUnit skips a
+- `mix test` reduces these `statusOf` equations in `request.muro`.
+  `opt-star` (`OPTIONS *`) is `status-ok`. `c/test_http11` `options`
+  sees 200. `meth-star` is the skipped `methodCode` equation (0),
+  and `c/test_classify` checks that code. `get-star` (`GET *`) is
+  `status-malformed`. `c/test_http11` `get-star` sees 400.
+  `meth-get-star` is the skipped `methodCode` equation (2), checked
+  by `c/test_classify`. `te-ok` (an empty chunked body, `0\r\n\r\n`)
+  is `status-ok`. `ck-empty` is the skipped `ckDone` equation for
+  that body. `mix test` does not reduce it. `c/test_classify`
+  checks `ck-empty`. `te-cl-bad` (`Transfer-Encoding` with
+  `Content-Length`) is `status-malformed`. `c/test_http11` `te-cl`
+  and `cl-te` see 400. `te-http10` (chunked on HTTP/1.0) is
+  `status-malformed`. `c/test_http11` `te-http10` sees 400.
+  `te-param-st` (`chunked;q=1`), `te-gzip-param-st` (`gzip;q=1`),
+  `te-param-empty` (a bare `chunked;`), `te-cut-st` (`chu;nked`),
+  `te-unknown-st` (`chu;n=1`), `te-param-junk` (`chunked;@@@`),
+  `te-param-twice` (`chunked;q=1, chunked`), and
+  `te-gzip-param-final` (`gzip;q=1, chunked`) are
+  `status-malformed`. `c/test_http11` sees 400 for those buffers
+  (`te-param`, `te-param-gzip`, `te-param-empty`, `te-param-cut`,
+  `te-param-unknown`, `te-param-junk`, `te-param-twice`,
+  `te-gzip-param-final`). The `teCode` equations `te-chunk-param`,
+  `te-chunk-ows`, `te-gzip-param`, and `te-param-not-final` are
+  skipped. `c/test_classify` checks those codes. ExUnit skips a
   closed equation whose result or argument normal form is a machine
   term. `test/request_test.exs` skips these 34: `crlf-end`,
   `lf-end`, `hdr-prefers-crlf`, `meth-head`, `meth-put`,
@@ -112,8 +147,10 @@
   `route-id`, `route-like`, `route-tail`, `route-id-42`,
   `route-idn-42`, `route-id-zero`, `route-id-abc`, `route-id-lead`,
   `route-like-id`, and `route-health-id`. `c/test_route` checks
-  those results. `c/test_classify` checks each of those results,
-  and the failure name is the equation name. `stream-take-hi` and
+  those results. Its names drop the `route-` prefix (`verb-get`
+  through `health-id`). `c/test_classify` checks the 34 skipped
+  `request.muro` results, and the failure name is the equation
+  name. `stream-take-hi` and
   `stream-take-edge` are header-only buffers. `stream-cl` and
   `cap-cl` are C checks in `c/test_classify`, not book equations.
   They name the classify status of those buffers, not a body of

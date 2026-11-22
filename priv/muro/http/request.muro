@@ -1671,6 +1671,12 @@ def te-cut-st : evidence {statusOf b"POST /p HTTP/1.1\r\nHost: t\r\nTransfer-Enc
 
 def te-unknown-st : evidence {statusOf b"POST /p HTTP/1.1\r\nHost: t\r\nTransfer-Encoding: chu;n=1\r\n\r\n" ≡ status-malformed : Status} := refl
 
+def te-param-junk : evidence {statusOf b"POST /p HTTP/1.1\r\nHost: t\r\nTransfer-Encoding: chunked;@@@\r\n\r\n" ≡ status-malformed : Status} := refl
+
+def te-param-twice : evidence {statusOf b"POST /p HTTP/1.1\r\nHost: t\r\nTransfer-Encoding: chunked;q=1, chunked\r\n\r\n" ≡ status-malformed : Status} := refl
+
+def te-gzip-param-final : evidence {statusOf b"POST /p HTTP/1.1\r\nHost: t\r\nTransfer-Encoding: gzip;q=1, chunked\r\n\r\n" ≡ status-malformed : Status} := refl
+
 def keep-enclose : evidence {keepOf b"GET /health HTTP/1.1\r\nHost: t\r\nConnection: enclose\r\n\r\n" ≡ keep-yes : Keep} := refl
 
 def keep-close-foo : evidence {keepOf b"GET /health HTTP/1.1\r\nHost: t\r\nConnection: close, foo\r\n\r\n" ≡ keep-no : Keep} := refl
