@@ -7,10 +7,53 @@ on:
 permissions:
   contents: read
 
+# The check job used to run `mix muro.gen --check` in one process.
+# That type-checks each unique book, one after another. On #17 it
+# took 1h12m (pull_request run 45173431644) and 1h43m (push run
+# 45173424180). deps and _build were already cached; the books
+# step was the whole wait. conn.muro imports request.muro, so the
+# request evidence is reduced twice, serially.
+#
+# This workflow type-checks the unique books as a matrix, one book
+# per GitHub-hosted runner, then `mix muro.gen --check --skip-check`
+# compares the committed files. A cache keyed on mix.lock, muro.exs,
+# and priv/muro/ skips the matrix when those inputs have not
+# changed. The typecheck still runs on a miss. The byte comparison
+# always runs. Jobs stay on GitHub-hosted runners.
+
 jobs:
-  check:
-    name: check
+  plan:
+    name: plan
     runs-on: ubuntu-latest
+    outputs:
+      hit: ${{ steps.books-cache.outputs.cache-hit }}
+      books: ${{ steps.list.outputs.books }}
+      fuel: ${{ steps.list.outputs.fuel }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/cache@v4
+        id: books-cache
+        with:
+          path: .muro-books-ok
+          key: muro-http-books-v1-${{ hashFiles('mix.lock', 'muro.exs', 'priv/muro/**') }}
+          lookup-only: true
+
+      - id: list
+        name: List unique books and fuel
+        run: |
+          echo "books=$(python3 scripts/muro_books.py json)" >> "$GITHUB_OUTPUT"
+          echo "fuel=$(python3 scripts/muro_books.py fuel)" >> "$GITHUB_OUTPUT"
+
+  books:
+    name: books
+    needs: plan
+    if: needs.plan.outputs.hit != 'true'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        book: ${{ fromJSON(needs.plan.outputs.books) }}
     steps:
       - uses: actions/checkout@v5
 
@@ -31,11 +74,65 @@ jobs:
       - name: Fetch dependencies
         run: mix deps.get
 
+      - name: Type-check ${{ matrix.book }}
+        run: mix muro.check --fuel ${{ needs.plan.outputs.fuel }} ${{ matrix.book }}
+
+  check:
+    name: check
+    runs-on: ubuntu-latest
+    needs: [plan, books]
+    if: always() && !cancelled() && (needs.plan.outputs.hit == 'true' || needs.books.result == 'success')
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: erlef/setup-beam@v1
+        with:
+          elixir-version: "1.20.4"
+          otp-version: "29.1"
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            deps
+            _build
+          key: ${{ runner.os }}-otp-29.1-elixir-1.20.4-mix-${{ hashFiles('mix.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-otp-29.1-elixir-1.20.4-mix-
+
+      - uses: actions/cache@v4
+        id: books-cache
+        with:
+          path: .muro-books-ok
+          key: muro-http-books-v1-${{ hashFiles('mix.lock', 'muro.exs', 'priv/muro/**') }}
+
+      - name: Fetch dependencies
+        run: mix deps.get
+
       - name: Check formatting
         run: mix format --check-formatted
 
+      # On a cache hit, the books were type-checked in a previous
+      # run with the same mix.lock, muro.exs, and priv/muro/. On a
+      # miss, the books matrix in this run type-checked them. If
+      # the cache was evicted between plan and here, type-check
+      # again in this job. --skip-check still compares every
+      # committed target.
       - name: Check books and generated modules
-        run: mix muro.gen --check
+        run: |
+          if [ "${{ steps.books-cache.outputs.cache-hit }}" = "true" ]; then
+            echo "Book typecheck cache hit; comparing generated files."
+            mix muro.gen --check --skip-check
+          elif [ "${{ needs.books.result }}" = "success" ]; then
+            echo "Books type-checked in this run; comparing generated files."
+            mix muro.gen --check --skip-check
+            mkdir -p .muro-books-ok
+            date -u +"%Y-%m-%dT%H:%M:%SZ" > .muro-books-ok/ok
+          else
+            echo "No cache and no books matrix; type-checking here."
+            make books-check
+            mkdir -p .muro-books-ok
+            date -u +"%Y-%m-%dT%H:%M:%SZ" > .muro-books-ok/ok
+          fi
 
       - name: Test
         run: mix test
@@ -49,6 +146,9 @@ jobs:
       # bench/loadgen and does not run it.
       - name: Build and run the C drivers and muro-httpd
         run: make c-check
+
+      - name: HTTP/1.1 conformance on epoll
+        run: make c-conformance
 
   sanitize:
     name: asan
@@ -64,6 +164,11 @@ jobs:
       - name: C drivers and muro-httpd under ASan and UBSan
         run: make c-sanitize
 
+      # c-sanitize leaves c/muro-hello built with the sanitizers.
+      # make c-conformance does not rebuild it when it is current.
+      - name: HTTP/1.1 conformance on epoll under ASan and UBSan
+        run: make c-conformance
+
   # doctorcorral/muro-http is public. Standard macos-latest is not
   # billed. Larger macOS runners are billed, so this job does not use
   # them. Self-hosted muro-mac-1 and muro-mac-2 are not used.
@@ -72,6 +177,8 @@ jobs:
   # c/test_workers floods close-mode with workers > 1. This job
   # stays on macos-latest. It does not run ASan. kqueue/handoff
   # ASan is run on a maintainer Mac and recorded in the PR body.
+  # c/test_conformance.py starts the hello server with --wait epoll,
+  # so this job does not run it.
   macos:
     name: macos
     runs-on: macos-latest
@@ -80,3 +187,17 @@ jobs:
 
       - name: C drivers and muro-httpd with kqueue
         run: make c-check
+
+  fuzz:
+    name: fuzz
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install clang
+        run: sudo apt-get update && sudo apt-get install -y clang
+
+      # libFuzzer + ASan + UBSan on muro_http_step. Replays the
+      # seed corpus, then fuzzes for 45 seconds.
+      - name: libFuzzer smoke
+        run: make fuzz-smoke

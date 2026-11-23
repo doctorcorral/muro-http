@@ -703,6 +703,14 @@ def run_exchange(srv):
         b"ping",
         False,
     )
+    case(
+        "post-slash",
+        "200 keep-alive, hello not the body",
+        b"POST / HTTP/1.1\r\nHost: t\r\nContent-Length: 4\r\n\r\nping",
+        200,
+        HELLO,
+        False,
+    )
     return fails
 
 
@@ -850,6 +858,20 @@ def run_pipeline(srv):
         finally:
             c.close()
 
+    def post_slash_then_get():
+        c = Conn(srv.port)
+        try:
+            c.send(
+                b"POST / HTTP/1.1\r\nHost: t\r\nContent-Length: 4\r\n\r\n"
+                b"pingGET / HTTP/1.1\r\nHost: t\r\n\r\n"
+            )
+            a = c.read_response()
+            b = c.read_response()
+            expect_status(a, 200, HELLO, False)
+            expect_status(b, 200, HELLO, False)
+        finally:
+            c.close()
+
     def three():
         c = Conn(srv.port)
         try:
@@ -880,6 +902,7 @@ def run_pipeline(srv):
 
     fails += check("pipeline-two-get", "200 then 200, bodies in order", two_get)
     fails += check("pipeline-post-get", "200 abc then 200 hello", post_then_get)
+    fails += check("pipeline-post-slash-get", "200 hello then 200 hello", post_slash_then_get)
     fails += check("pipeline-three", "three 200s in order", three)
     fails += check("pipeline-close-first", "one 200 then close", close_first)
     return fails

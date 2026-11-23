@@ -605,9 +605,9 @@ static void on_readable(Server *sv, Slot *s, int hangup) {
       len += (size_t)n;
       muro_http_step_set_in_len(&s->step, len);
       got = 1;
-      /* A short read drained the socket. Level-triggered epoll
-         reports bytes that arrive later. Keep reading only when
-         this call filled the buffer. */
+      /* A short read drained the socket. Level-triggered wait
+         (epoll or kqueue) reports bytes that arrive later. Keep
+         reading only when this call filled the buffer. */
       if ((size_t)n < want) break;
       continue;
     }

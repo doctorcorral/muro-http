@@ -484,6 +484,111 @@ static void check_stream_echo(const char *host, int port) {
   free(buf);
 }
 
+static void check_stream_hello(void) {
+  const char *host = "127.0.0.1";
+  pid_t pid;
+  int port = -1;
+  int fd;
+  char head[128];
+  char ready[96];
+  char *payload = NULL;
+  char buf[1024];
+  int hn;
+  size_t n = 0;
+  int status = 0;
+  int conn_close = 0;
+  int content_length = -1;
+  if (snprintf(ready, sizeof ready, "/tmp/muro-hello-stream-slash-%ld", (long)getpid()) < 0) {
+    fail("stream-hello", "path");
+    return;
+  }
+  unlink(ready);
+  setenv("MURO_TEST_STREAM_READY", ready, 1);
+  pid = start_hello("nope", host, &port, NULL, NULL);
+  unsetenv("MURO_TEST_STREAM_READY");
+  if (pid < 0) {
+    unlink(ready);
+    fail("stream-hello", "start");
+    return;
+  }
+  fd = dial(host, port);
+  hn = snprintf(head, sizeof head, "POST / HTTP/1.1\r\nHost: t\r\nContent-Length: 20000\r\n\r\n");
+  payload = malloc(20000);
+  if (fd < 0 || hn < 0 || !payload) {
+    fail("stream-hello", "setup");
+    if (fd >= 0) close(fd);
+    free(payload);
+    stop_server(pid);
+    unlink(ready);
+    return;
+  }
+  memset(payload, 'z', 20000);
+  if (send_n(fd, head, (size_t)hn) < 0) {
+    fail("stream-hello", "send");
+    close(fd);
+    free(payload);
+    stop_server(pid);
+    unlink(ready);
+    return;
+  }
+  if (wait_file(ready, 5000) < 0) {
+    fail("stream-hello", "body-read");
+    close(fd);
+    free(payload);
+    stop_server(pid);
+    unlink(ready);
+    return;
+  }
+  if (send_n(fd, payload, 20000) < 0) {
+    fail("stream-hello", "body");
+    close(fd);
+    free(payload);
+    stop_server(pid);
+    unlink(ready);
+    return;
+  }
+  while (n < sizeof buf - 1) {
+    ssize_t r = read(fd, buf + n, sizeof buf - 1 - n);
+    if (r < 0 && errno == EINTR) continue;
+    if (r <= 0) break;
+    n += (size_t)r;
+    if (memmem(buf, n, "\r\n\r\n", 4)) {
+      int hend = -1;
+      size_t k;
+      for (k = 0; k + 3 < n; k++) {
+        if (buf[k] == '\r' && buf[k + 1] == '\n' && buf[k + 2] == '\r' && buf[k + 3] == '\n') {
+          hend = (int)k;
+          break;
+        }
+      }
+      if (hend >= 0 && find_cl(buf, hend, &content_length) == 0 &&
+          n >= (size_t)hend + 4 + (size_t)content_length)
+        break;
+    }
+  }
+  buf[n] = 0;
+  if (sscanf(buf, "HTTP/1.1 %d", &status) != 1 || status != 200) {
+    fprintf(stderr, "FAIL stream-hello: status %d\n", status);
+    failures += 1;
+  }
+  conn_close = memmem(buf, n, "Connection: close", 17) != NULL;
+  if (conn_close) fail("stream-hello", "closed");
+  {
+    char *eoh = memmem(buf, n, "\r\n\r\n", 4);
+    if (!eoh) {
+      fail("stream-hello", "headers");
+    } else if (find_cl(buf, (int)(eoh - buf), &content_length) != 0 || content_length != 6) {
+      fail("stream-hello", "content-length");
+    } else if (n < (size_t)(eoh - buf) + 4 + 6 || memcmp(eoh + 4, "hello\n", 6) != 0) {
+      fail("stream-hello", "body");
+    }
+  }
+  close(fd);
+  free(payload);
+  stop_server(pid);
+  unlink(ready);
+}
+
 static void check_drain_before_status(void) {
   pid_t pid;
   int port = -1;
@@ -664,6 +769,8 @@ int main(int argc, char **argv) {
              0);
   expect_one(host, port, "echo", "POST /echo HTTP/1.1\r\nHost: t\r\nContent-Length: 4\r\n\r\nping", 200,
              "ping", 0);
+  expect_one(host, port, "post-slash", "POST / HTTP/1.1\r\nHost: t\r\nContent-Length: 4\r\n\r\nping", 200,
+             "hello\n", 0);
   expect_one(host, port, "method", "PUT / HTTP/1.1\r\nHost: t\r\n\r\n", 405, "method\n", 1);
   expect_one(host, port, "no-host", "GET / HTTP/1.1\r\n\r\n", 400, "malformed", 1);
   fd = dial(host, port);
@@ -682,9 +789,26 @@ int main(int argc, char **argv) {
   } else {
     close(fd);
   }
+  fd = dial(host, port);
+  if (fd < 0) {
+    fail("pipeline-post-slash", "connect");
+  } else if (send_all(fd, "POST / HTTP/1.1\r\nHost: t\r\nContent-Length: 4\r\n\r\nping"
+                          "GET / HTTP/1.1\r\nHost: t\r\n\r\n") < 0 ||
+             read_response(fd, &status, &conn_close, body, sizeof body, &body_n) < 0 ||
+             status != 200 || strcmp(body, "hello\n") != 0 || conn_close) {
+    fail("pipeline-post-slash", "first");
+    close(fd);
+  } else if (read_response(fd, &status, &conn_close, body, sizeof body, &body_n) < 0 ||
+             status != 200 || strcmp(body, "hello\n") != 0 || conn_close) {
+    fail("pipeline-post-slash", "second");
+    close(fd);
+  } else {
+    close(fd);
+  }
   check_stream_echo(host, port);
   unlink(stream_ready);
   stop_server(pid);
+  check_stream_hello();
   check_drain_before_status();
   if (failures != 0) {
     fprintf(stderr, "%d failures\n", failures);

@@ -2,6 +2,23 @@
 
 ## 0.1.0-dev — unreleased
 
+- Closing an epoll connection always drops the cached interest for
+  that fd, even when `EPOLL_CTL_DEL` fails. A reused fd with the
+  same interest then gets a real `ADD` instead of a silent stall.
+  The library version stays `0.1.0-dev`. The pin stays muro
+  `0.22.14`.
+
+- CI type-checks the unique books as a matrix of GitHub-hosted
+  jobs, then `mix muro.gen --check --skip-check` compares the
+  committed files. A cache keyed on `mix.lock`, `muro.exs`, and
+  `priv/muro/` skips the matrix when those inputs have not
+  changed. The `check` job also runs `make c-conformance`. The
+  `asan` job, already epoll under ASan and UBSan, runs
+  `make c-conformance` on the sanitized `c/muro-hello`. A `fuzz`
+  job runs `make fuzz-smoke` (45 seconds). `make books-check` is
+  the local form of the typecheck plus the byte comparison.
+  The library version stays `0.1.0-dev`. The pin stays muro
+  `0.22.14`.
 - After the step has closed the connection, a later fact returns
   close with no new span. 413, 417, and 501 used to classify the
   same buffer again and write a second response.
