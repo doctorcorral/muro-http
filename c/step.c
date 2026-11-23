@@ -377,7 +377,10 @@ static int park_interim(HttpStep *st, const StepIn *in, StepOut *out) {
   st->pend_kind = PEND_CONT;
   out->bytes = st->cont + st->cont_off;
   out->len = st->cont_len - st->cont_off;
+  /* interim is only the first-byte stall. cont stays set until the
+     last byte of this 100 Continue is accepted. */
   out->interim = st->cont_off == 0;
+  out->cont = 1;
   /* The live read interest stays until the adapter parks. A 100
      Continue that the socket takes in one write must not clear it
      before the handler runs. */
@@ -405,6 +408,7 @@ static void hand_status(HttpStep *st, const StepIn *in, StepOut *out, int which)
   out->status_len = n;
   out->status_now = 1;
   out->close_conn = 1;
+  out->wake_at = 0;
   st->owe = 0;
   st->out_off = 1;
   interests(st, out, 0, 0);
@@ -426,11 +430,18 @@ static int inject_next(HttpStep *st, StepOut *out) {
 }
 
 static void park_out(HttpStep *st, const StepIn *in, StepOut *out) {
+  (void)in;
   st->pend_kind = PEND_OUT;
   out->bytes = st->out + st->out_off;
   out->len = st->out_len - st->out_off;
   out->interim = 0;
-  out->wake_at = in->deadline;
+  out->cont = 0;
+  /* WRITE has the book timer off. The pre-split pump did not arm a
+     deadline on a short response write. A deadline carried in from
+     the previous idle or 100 wait is stale here. The body-wait
+     deadline is armed by the adapter while a pull is on the stack,
+     and this park runs only after that wait has returned. */
+  out->wake_at = 0;
   interests(st, out, 0, 1);
 }
 
@@ -438,6 +449,11 @@ static void close_out(HttpStep *st, StepOut *out) {
   out->close_conn = 1;
   out->bytes = NULL;
   out->len = 0;
+  out->cont = 0;
+  out->interim = 0;
+  /* The call copied in->deadline into wake_at up front. A close
+     must not leave that deadline armed. */
+  out->wake_at = 0;
   interests(st, out, 0, 0);
 }
 
@@ -450,6 +466,17 @@ static int pump(HttpStep *st, const StepIn *in, StepOut *out) {
     uint64_t end_off = field(st->st, 11);
     uint64_t more = field(st->st, 12);
     st->spins += 1;
+    /* A tick that shuts must close even when a 100 is still
+       outstanding. Parking the interim first returns that span with
+       the book timer off, so wake_at is 0 and the peer can sit
+       forever. */
+    if (phase == MURO_STEP_PH_CLOSED || action == ACT_CLOSE) {
+      st->cont_len = 0;
+      st->cont_off = 0;
+      st->pend_kind = PEND_NONE;
+      close_out(st, out);
+      return 0;
+    }
     if (st->cont_len > 0 && !st->sent_100) {
       int w100 = park_interim(st, in, out);
       if (w100 < 0) {
@@ -457,10 +484,6 @@ static int pump(HttpStep *st, const StepIn *in, StepOut *out) {
         return 0;
       }
       if (w100 == 0) return 0;
-    }
-    if (phase == MURO_STEP_PH_CLOSED || action == ACT_CLOSE) {
-      close_out(st, out);
-      return 0;
     }
     if (phase == MURO_STEP_PH_READ || phase == MURO_STEP_PH_IDLE) {
       st->rendered = 0;
@@ -684,6 +707,11 @@ static int take_fact(HttpStep *st, const StepIn *in, StepOut *out) {
     return 0;
   }
   if (in->kind == MURO_STEP_NOW) {
+    /* Drop a half-sent 100 before the image runs. An idle tick shuts,
+       and the next pump must not hand the span out again. */
+    st->cont_len = 0;
+    st->cont_off = 0;
+    st->pend_kind = PEND_NONE;
     if (!step_ev(st, out, evTick())) return -1;
     return 0;
   }
@@ -720,9 +748,10 @@ int muro_http_step(HttpStep *st, const StepIn *in, StepOut *out) {
   if (!st || !in || !out) return -1;
   memset(out, 0, sizeof *out);
   out->wake_at = in->deadline;
-  if (in->kind == MURO_STEP_ACCEPTED || in->kind == MURO_STEP_BYTES ||
-      in->kind == MURO_STEP_PEER_CLOSED || in->kind == MURO_STEP_NOW)
-    st->spins = 0;
+  /* One call is one budget. A large body under a one-byte window is
+     a long run of MURO_STEP_WROTE, and the fuse used to survive
+     those calls. */
+  st->spins = 0;
   took = take_fact(st, in, out);
   if (took < 0) return -1;
   if (took > 0) return 0;

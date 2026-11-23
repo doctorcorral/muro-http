@@ -62,6 +62,7 @@ typedef struct StepOut {
   int read_more;
   int write_more;
   int interim;
+  int cont;
   int close_conn;
   int status_now;
   const uint8_t *status;
@@ -80,9 +81,12 @@ typedef struct StepOut {
 the connection already owns. `read_more` 1 means the step still
 needs request bytes. The adapter turns that into a read interest.
 It is not a readiness event. `write_more` is set while a span is
-outstanding. `interim` 1 means the span is `100 Continue` and no
-byte of it has been written: the adapter does not read, and a short
-write stays on this span. `wake_at` 0 disarms. Otherwise it is an
+outstanding. `interim` 1 means no byte of this `100 Continue` has
+been written yet: the adapter does not read, and it may stall
+before the first byte. `cont` 1 means the span is `100 Continue`
+for its whole life, including after a short write. A hard error
+while `cont` is set closes and is not `MURO_STEP_WRITE_FAILED`.
+`wake_at` 0 disarms. Otherwise it is an
 absolute monotonic millisecond. `close_conn` 1 means close.
 `status_now` 1 means write `status` first, without waiting out a
 full send buffer, then close. That pointer is the close area
@@ -109,7 +113,9 @@ One successful `write` is one `MURO_STEP_WROTE`, then one
 `evProgress`, matching the old pump.
 
 `100 Continue` that fails hard closes without `MURO_STEP_WRITE_FAILED`.
-A response-body write that fails hard is `MURO_STEP_WRITE_FAILED`,
+That is the whole span: `cont` stays 1 after a short write, and the
+adapter closes instead of reporting the failure. A response-body
+write that fails hard is `MURO_STEP_WRITE_FAILED`,
 which the step feeds as `evError`. A read error, a watch failure,
 or a full recv buffer with no progress closes without a fact. If
 the step still owes a status, `muro_http_step_close_status` returns
@@ -148,7 +154,8 @@ Stayed in the adapter (`c/host.c`, `c/host_poll.c`):
 - the listen backlog (`SOMAXCONN`), `SO_REUSEPORT` on Linux
 - signals, drain, and the connection table
 - logging (`fprintf`). The step returns a note code.
-- `MURO_TEST_WRITE_LIMIT`, `MURO_TEST_100_STALL`, `note_write`
+- `MURO_TEST_WRITE_LIMIT`, `MURO_TEST_WRITE_FAIL_AFTER`,
+  `MURO_TEST_100_STALL`, `note_write`
 - the clock. `drive` calls `host_date_fill` and `host_poll_now_ms`
   once per turn, not once per partial write.
 
@@ -162,14 +169,24 @@ Stayed, and not rewritten:
 - `c/host_date.c` (the adapter calls it; the step receives the
   29 bytes)
 
-`c/step.c` and `c/step.h` include no `unistd.h`, `sys/socket.h`,
-`poll.h`, `sys/event.h`, `sys/epoll.h`, `fcntl.h`, `time.h`, or
-`sys/time.h`. `make c-check` runs `sh c/check_step_pure.sh`, which
-rejects those includes and a call to `read`, `write`, `accept`,
-`kqueue`, `epoll_wait`, `poll`, `fork`, `sendmsg`, `recvmsg`,
-`socket`, `close`, `time`, `nanosleep`, `clock_gettime`, and the
-same family. `free` of a pipelined side buffer stays. That free is
-not on the keep-alive path.
+`c/step.c`, `c/step.h`, and the quoted headers they include
+(followed transitively) must not include `unistd.h`,
+`sys/socket.h`, `poll.h`, `sys/event.h`, `sys/epoll.h`, `fcntl.h`,
+`time.h`, `sys/time.h`, `sys/mman.h`, `sys/select.h`, `sys/uio.h`,
+or `sys/ioctl.h`. `make c-check` runs `sh c/check_step_pure.sh`.
+The script rejects those includes and a call, with whitespace
+allowed before `(`, to `read`, `write`, `pread`, `pwrite`,
+`readv`, `writev`, `send`, `recv`, `accept`, `kqueue`,
+`epoll_wait`, `poll`, `ppoll`, `select`, `fork`, `mmap`, `ioctl`,
+`syscall`, `gettimeofday`, `usleep`, `sleep`, and the same family.
+It also rejects an undefined symbol in `c/step.o` that is not
+`memcpy`, `memmove`, `memset`, `memcmp`, `malloc`, `free`,
+`realloc`, `calloc`, `strlen`, or `bzero`, a sanitizer or stack-check
+symbol, or a symbol defined by the books, the admit wall, or the
+render and stream helpers. `inject_next` frees a pipelined side
+buffer after a streamed body. That body can keep the connection,
+so `free` is on that path. A keep-alive `GET /` whose response is
+already in the send buffer does not call `free`.
 
 ## Keep-alive, no second copy
 
@@ -202,7 +219,11 @@ adapter stores it when it parks back to the wait, not after a
 write that completed inside the same turn. `on_readable` clears
 the slot deadline before the step. A one-shot 100 that the socket
 takes immediately does not arm a deadline until the following read
-park, which is what the old `hold_100` did.
+park, which is what the old `hold_100` did. A short response write
+returns `wake_at` 0. The deadline armed for the previous idle or
+`100 Continue` is not copied onto that write. The body-wait
+deadline is the adapter's, armed while a pull is on the stack, and
+the park runs only after that wait has returned.
 
 ## Writing a backend
 
@@ -216,9 +237,9 @@ Bind the two buffers, then loop:
    then close. Do not wait for a full send buffer.
 4. If `bytes` is set, write that span. On a short write, remember
    the pointer and call again later with `MURO_STEP_WROTE` and the
-   count actually taken. On a hard error of a non-interim span,
-   call again with `MURO_STEP_WRITE_FAILED`. An interim hard error
-   closes with no fact.
+   count actually taken. On a hard error while `cont` is set, close
+   and do not report a fact. On any other hard error, call again
+   with `MURO_STEP_WRITE_FAILED`.
 5. Otherwise arm `wake_at` and wait until bytes arrive, the peer
    closes, or the deadline is due. Report `MURO_STEP_BYTES`,
    `MURO_STEP_PEER_CLOSED`, or `MURO_STEP_NOW`. Put new request
@@ -231,10 +252,16 @@ Neither one has kqueue readiness. The step does not grow an
 
 `examples/adapter/mem.c` does this in one process. `make c/test_step`
 links it. The keep-alive check requires `StepOut.bytes` to lie
-inside the caller-owned send buffer. The fixed date
+inside the caller-owned send buffer. A `100 Continue` span points
+at `HttpStep.cont`, including after a short write. The fixed date
 `Sun, 06 Nov 1994 08:49:37 GMT` is injected and must appear in the
 response. A partial request plus `MURO_STEP_PEER_CLOSED` must close
-with 400 and `malformed`.
+with 400 and `malformed`. The same driver checks a one-byte accept,
+`MURO_STEP_WRITE_FAILED` on a response, a hard error after a short
+`100 Continue`, `MURO_STEP_NOW` while that span is pending,
+`status_now` for 413, 417, and 501, two pipelined GETs,
+`empty_before` 0, and a body of 100001 bytes under a one-byte
+window.
 
 The reference server is still `c/muro-hello` through `c/host.c`.
 The memory adapter is not on that path.

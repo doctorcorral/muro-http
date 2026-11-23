@@ -2,6 +2,22 @@
 
 ## 0.1.0-dev — unreleased
 
+- A short write of `100 Continue` keeps a flag for the rest of
+  that span. A later hard error closes the connection and does
+  not report `MURO_STEP_WRITE_FAILED`. An idle tick while that
+  span is still outstanding closes and drops it. `muro_http_step`
+  resets its pump budget on every call, so a one-byte write
+  window on a large body does not trip the fuse. A short response
+  write does not keep the previous idle deadline.
+  `MURO_TEST_100_STALL` still clears when the socket already has
+  bytes queued. `c/check_step_pure.sh` allows whitespace before
+  `(`, rejects a wider set of calls and headers, and checks
+  undefined symbols in `c/step.o`. `examples/adapter/mem.c`
+  covers those paths. `c/test_http11` waits up to 10 seconds for
+  the server to exit, and `c/test_workers` waits up to 10 seconds
+  for SIGTERM. A process that has already exited is reaped on
+  the next poll. The library version stays `0.1.0-dev`. The pin
+  stays muro `0.22.14`.
 - HTTP/1.1 for one connection lives in `c/step.c`
   (`muro_http_step`). The socket loop in `c/host.c` is an adapter:
   it reports accepted, bytes already read, a write of `n` bytes, a

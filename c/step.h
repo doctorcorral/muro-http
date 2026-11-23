@@ -31,9 +31,12 @@
 
    read_more 1 means the step still needs request bytes. The adapter
    turns that into a read interest. It is not a readiness event.
-   write_more is set while a span is outstanding. interim 1 means the
-   span is 100 Continue and no byte of it has been written: do not
-   read, and a short write stays on this span.
+   write_more is set while a span is outstanding. interim 1 means no
+   byte of this 100 Continue has been written yet: do not read, and
+   the adapter may stall before the first byte. cont 1 means the span
+   is 100 Continue for its whole life, including after a short write.
+   A hard error on a cont span closes. It is not
+   MURO_STEP_WRITE_FAILED.
 
    wake_at 0 disarms. Otherwise it is an absolute monotonic millisecond.
    close_conn 1 means the adapter should close. status_now 1 means
@@ -99,6 +102,7 @@ typedef struct StepOut {
   int read_more;
   int write_more;
   int interim;
+  int cont;
   int close_conn;
   int status_now;
   const uint8_t *status;

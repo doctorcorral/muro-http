@@ -77,7 +77,8 @@ typedef struct Slot {
   HttpStep step;
   const uint8_t *pend;
   size_t pend_len;
-  int pend_interim;
+  int pend_interim; /* first byte of a 100 has not been written */
+  int pend_cont; /* the parked span is 100 Continue, partial or not */
 } Slot;
 
 typedef struct Server {
@@ -89,6 +90,8 @@ typedef struct Server {
   int idle_ms;
   int fatal;
   size_t write_limit;
+  int write_fail_after; /* 0 off; else fail hard once this many writes succeeded */
+  int writes_ok;
   const char *write_log;
   size_t in_cap;
   uint64_t armed_deadline;
@@ -234,6 +237,21 @@ static size_t env_write_limit(void) {
   return (size_t)cap;
 }
 
+/* MURO_TEST_WRITE_FAIL_AFTER is how many successful socket writes
+   happen before the next one fails hard. The failure repeats until
+   that connection closes, then writes work again. 0 leaves writes
+   alone. Sampled once at startup, like MURO_TEST_WRITE_LIMIT. */
+static int env_write_fail_after(void) {
+  const char *e = getenv("MURO_TEST_WRITE_FAIL_AFTER");
+  char *end = NULL;
+  unsigned long n;
+  if (!e || !*e) return 0;
+  errno = 0;
+  n = strtoul(e, &end, 10);
+  if (errno || end == e || *end || n == 0 || n > 1000000ul) return 0;
+  return (int)n;
+}
+
 /* MURO_TEST_100_STALL is how many 20ms pauses happen before the
    first interim byte, and only while the socket has no further
    bytes queued. MURO_TEST_100_READY is a path created on the first
@@ -280,6 +298,9 @@ static void sync_watch(Server *sv, Slot *s) {
 
 static void close_slot(Server *sv, Slot *s) {
   if (!s->used) return;
+  /* The forced failure has done its job once this slot closes.
+     A later connection must still be able to write. */
+  if (sv->write_fail_after > 0 && sv->writes_ok >= sv->write_fail_after) sv->write_fail_after = 0;
   status_before_close(sv, s);
   host_poll_watch(sv->pq, s->fd, 0, 0);
   close(s->fd);
@@ -377,22 +398,31 @@ static void log_step(const Server *sv, const StepOut *out) {
   }
 }
 
-/* 1 and *wrote set when the socket took some bytes. 0 when the span
-   stays outstanding (short write, or the interim stall). -1 on a
-   hard write error. A signal retry stays here. */
+/* 1 and *wrote set when the socket accepted one or more bytes, even
+   when that is less than len. The caller reports MURO_STEP_WROTE for
+   that count. 0 when no byte was accepted: EAGAIN, the first-byte
+   stall, or the EINTR cap. The span stays outstanding. -1 on a hard
+   write error. A signal retry stays here. */
 static int emit_span(Server *sv, Slot *s, const uint8_t *p, size_t len, int interim, size_t *wrote) {
   int spins = 0;
-  if (interim && sv->stall_100 > 0 && !sock_pending(s->fd)) {
+  /* Stall only before the first interim byte, and only while the
+     socket has nothing queued. A body already waiting clears the
+     counter so the pause cannot land on a later 100. */
+  if (interim && sv->stall_100 > 0) {
     struct timespec ts;
     note_100_ready();
-    sv->stall_100 -= 1;
-    s->want_read = 0;
-    s->want_write = 1;
-    ts.tv_sec = 0;
-    ts.tv_nsec = 20000000L;
-    while (nanosleep(&ts, &ts) < 0 && errno == EINTR) continue;
-    return 0;
+    if (!sock_pending(s->fd)) {
+      sv->stall_100 -= 1;
+      s->want_read = 0;
+      s->want_write = 1;
+      ts.tv_sec = 0;
+      ts.tv_nsec = 20000000L;
+      while (nanosleep(&ts, &ts) < 0 && errno == EINTR) continue;
+      return 0;
+    }
+    sv->stall_100 = 0;
   }
+  if (sv->write_fail_after > 0 && sv->writes_ok >= sv->write_fail_after) return -1;
   while (spins < 64) {
     size_t chunk = len;
     ssize_t n;
@@ -405,6 +435,7 @@ static int emit_span(Server *sv, Slot *s, const uint8_t *p, size_t len, int inte
     if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) return 0;
     if (n <= 0) return -1;
     *wrote = (size_t)n;
+    sv->writes_ok += 1;
     note_write(sv, (size_t)n);
     return 1;
   }
@@ -451,13 +482,18 @@ static void drive(Server *sv, Slot *s, StepIn *in) {
         s->pend = out.bytes;
         s->pend_len = out.len;
         s->pend_interim = out.interim;
+        s->pend_cont = out.cont;
         return;
       }
       s->pend = NULL;
       s->pend_len = 0;
       s->pend_interim = 0;
+      s->pend_cont = 0;
       if (er < 0) {
-        if (out.interim) {
+        /* Any byte of a 100, including after a short write. The
+           pre-split pump closed on that failure and did not step
+           evError, which would hold in READ and spin. */
+        if (out.cont) {
           close_slot(sv, s);
           return;
         }
@@ -475,6 +511,7 @@ static void drive(Server *sv, Slot *s, StepIn *in) {
     s->pend = NULL;
     s->pend_len = 0;
     s->pend_interim = 0;
+    s->pend_cont = 0;
     return;
   }
   if (s->used) {
@@ -493,7 +530,7 @@ static void resume_write(Server *sv, Slot *s) {
     sync_watch(sv, s);
     return;
   }
-  if (rc < 0 && s->pend_interim) {
+  if (rc < 0 && s->pend_cont) {
     close_slot(sv, s);
     return;
   }
@@ -506,6 +543,7 @@ static void resume_write(Server *sv, Slot *s) {
   s->pend = NULL;
   s->pend_len = 0;
   s->pend_interim = 0;
+  s->pend_cont = 0;
   drive(sv, s, &in);
   if (s->used) sync_watch(sv, s);
 }
@@ -1306,6 +1344,7 @@ static int serve_one(const MuroHttpConfig *cfg, MuroHttpHandler handler, void *u
   sv.channel = channel;
   sv.in_cap = env_in_cap();
   sv.write_limit = env_write_limit();
+  sv.write_fail_after = env_write_fail_after();
   sv.stall_100 = env_stall_100();
   sv.write_log = getenv("MURO_TEST_WRITE_LOG");
   sv.handler = handler;

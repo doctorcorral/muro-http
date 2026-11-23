@@ -21,6 +21,9 @@
 static int failures;
 static const char *bin_path = "c/muro-stream";
 static const char *host_s = "127.0.0.1";
+/* Set before start_stream. The child dup2s this path onto stderr
+   so a test can see "pump fuel exhausted". NULL leaves stderr. */
+static const char *child_err_path;
 
 enum { BLOB = 1024 * 1024 + 1 };
 
@@ -57,6 +60,13 @@ static pid_t start_stream_ms(int *port, const char *max_body, const char *drain_
     char *av[16];
     int argc = 0;
     alarm(0);
+    if (child_err_path && child_err_path[0]) {
+      int ef = open(child_err_path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+      if (ef >= 0) {
+        if (dup2(ef, STDERR_FILENO) < 0) _exit(127);
+        if (ef != STDERR_FILENO) close(ef);
+      }
+    }
     if (dup2(sp[1], STDOUT_FILENO) < 0) _exit(127);
     close(sp[0]);
     close(sp[1]);
@@ -126,7 +136,11 @@ static void stop_server(pid_t pid) {
   int i;
   if (pid <= 0) return;
   kill(pid, SIGTERM);
-  for (i = 0; i < 80; i++) {
+  /* 4s (80 * 50ms) once failed the macOS job with "did not stop"
+     while the process was still exiting. 10s is the cap. A process
+     that has already exited is reaped on the next wait, so a healthy
+     stop does not sit here. */
+  for (i = 0; i < 200; i++) {
     pid_t got = waitpid(pid, &status, WNOHANG);
     if (got == pid) {
       if (!(WIFEXITED(status) && WEXITSTATUS(status) == 0)) fail("shutdown", "status");
@@ -1308,6 +1322,291 @@ static void check_continue_pipe(void) {
   unlink(ready);
 }
 
+static int file_has(const char *path, const char *lit) {
+  FILE *f;
+  char *buf;
+  long n;
+  size_t got;
+  int hit;
+  if (!path || !lit) return 0;
+  f = fopen(path, "rb");
+  if (!f) return 0;
+  if (fseek(f, 0, SEEK_END) != 0) {
+    fclose(f);
+    return 0;
+  }
+  n = ftell(f);
+  if (n < 0 || n > 1000000L) {
+    fclose(f);
+    return 0;
+  }
+  if (fseek(f, 0, SEEK_SET) != 0) {
+    fclose(f);
+    return 0;
+  }
+  buf = malloc((size_t)n + 1);
+  if (!buf) {
+    fclose(f);
+    return 0;
+  }
+  got = fread(buf, 1, (size_t)n, f);
+  fclose(f);
+  buf[got] = 0;
+  hit = strstr(buf, lit) != NULL;
+  free(buf);
+  return hit;
+}
+
+/* Eight bytes of 100 Continue, then a hard error. The slot must
+   close. A WRITE_FAILED fact here used to spin until the pump
+   guard logged "pump fuel exhausted". The next request must still
+   be answered. */
+static void check_continue_hard(void) {
+  int port = -1;
+  pid_t pid;
+  int fd = -1;
+  char err[96];
+  char acc[128];
+  size_t got = 0;
+  int saw_eof = 0;
+  Conn c;
+  Head h;
+  char body[8];
+  size_t body_n = 0;
+  const char *req = "POST /echo HTTP/1.1\r\nHost: h\r\nContent-Length: 4\r\n"
+                    "Expect: 100-continue\r\n\r\n";
+  const char *get = "GET / HTTP/1.1\r\nHost: h\r\nConnection: close\r\n\r\n";
+  snprintf(err, sizeof err, "/tmp/muro-100-fail-%ld", (long)getpid());
+  unlink(err);
+  child_err_path = err;
+  setenv("MURO_TEST_WRITE_LIMIT", "8", 1);
+  setenv("MURO_TEST_WRITE_FAIL_AFTER", "1", 1);
+  pid = start_stream(&port, NULL, NULL);
+  unsetenv("MURO_TEST_WRITE_LIMIT");
+  unsetenv("MURO_TEST_WRITE_FAIL_AFTER");
+  child_err_path = NULL;
+  if (pid < 0) {
+    unlink(err);
+    return;
+  }
+  fd = dial_tv(port, 3);
+  if (fd < 0 || send_str(fd, req) < 0) {
+    fail("continue-hard", "connect");
+    if (fd >= 0) close(fd);
+    stop_server(pid);
+    unlink(err);
+    return;
+  }
+  for (;;) {
+    struct pollfd pfd;
+    ssize_t r;
+    int pr;
+    pfd.fd = fd;
+    pfd.events = POLLIN;
+    pr = poll(&pfd, 1, 2000);
+    if (pr == 0) {
+      fail("continue-hard", "spin");
+      break;
+    }
+    if (pr < 0) {
+      if (errno == EINTR) continue;
+      fail("continue-hard", "poll");
+      break;
+    }
+    if (got + 1 >= sizeof acc) {
+      fail("continue-hard", "too much");
+      break;
+    }
+    r = read(fd, acc + got, sizeof acc - 1 - got);
+    if (r < 0 && errno == EINTR) continue;
+    if (r < 0) {
+      fail("continue-hard", "read");
+      break;
+    }
+    if (r == 0) {
+      saw_eof = 1;
+      break;
+    }
+    got += (size_t)r;
+  }
+  close(fd);
+  if (!saw_eof || got != 8 || memcmp(acc, "HTTP/1.1", 8) != 0) fail("continue-hard", "partial");
+  if (file_has(err, "pump fuel exhausted")) fail("continue-hard", "fuel");
+  if (saw_eof && got == 8 && memcmp(acc, "HTTP/1.1", 8) == 0 &&
+      !file_has(err, "pump fuel exhausted")) {
+    if (open_conn(port, &c) < 0 || send_str(c.fd, get) < 0 || next_head(&c, &h) < 0 ||
+        take_cl(&c, &h, body, sizeof body, &body_n) < 0 || h.status != 200 || body_n != 3 ||
+        memcmp(body, "ok\n", 3) != 0)
+      fail("continue-hard", "next");
+    close_conn(&c);
+  }
+  stop_server(pid);
+  unlink(err);
+}
+
+/* The 100 is held by the stall, so the idle tick is the only way
+   out. A peer that never reads must see the close, not another
+   span with no deadline. */
+static void check_continue_idle(void) {
+  int port = -1;
+  pid_t pid;
+  int fd;
+  char acc[80];
+  size_t got = 0;
+  int saw_eof = 0;
+  const char *req = "POST /echo HTTP/1.1\r\nHost: h\r\nContent-Length: 4\r\n"
+                    "Expect: 100-continue\r\n\r\n";
+  setenv("MURO_TEST_100_STALL", "100", 1);
+  pid = start_stream_ms(&port, NULL, NULL, "200");
+  unsetenv("MURO_TEST_100_STALL");
+  if (pid < 0) return;
+  fd = dial_tv(port, 3);
+  if (fd < 0 || send_str(fd, req) < 0) {
+    fail("continue-idle", "connect");
+    if (fd >= 0) close(fd);
+    stop_server(pid);
+    return;
+  }
+  for (;;) {
+    struct pollfd pfd;
+    ssize_t r;
+    int pr;
+    pfd.fd = fd;
+    pfd.events = POLLIN;
+    pr = poll(&pfd, 1, 3000);
+    if (pr == 0) break;
+    if (pr < 0) {
+      if (errno == EINTR) continue;
+      fail("continue-idle", "poll");
+      break;
+    }
+    if (got >= sizeof acc) {
+      fail("continue-idle", "wrote");
+      break;
+    }
+    r = read(fd, acc + got, sizeof acc - got);
+    if (r < 0 && errno == EINTR) continue;
+    if (r < 0) {
+      fail("continue-idle", "read");
+      break;
+    }
+    if (r == 0) {
+      saw_eof = 1;
+      break;
+    }
+    got += (size_t)r;
+  }
+  if (!saw_eof) fail("continue-idle", "no deadline");
+  else if (got != 0) fail("continue-idle", "bytes");
+  close(fd);
+  stop_server(pid);
+}
+
+/* One-byte writes of a body past the old pump fuse. The fuse used
+   to survive from one MURO_STEP_WROTE to the next. */
+static void check_byte_window(void) {
+  enum { N = 110000 };
+  int port = -1;
+  pid_t pid;
+  int fd = -1;
+  char err[96];
+  char *body = NULL;
+  char hdr[160];
+  char win[2048];
+  size_t win_n = 0;
+  size_t i;
+  size_t eoh = 0;
+  int found = 0;
+  long cl = -1;
+  size_t body_got = 0;
+  int hn;
+  char *clp;
+  snprintf(err, sizeof err, "/tmp/muro-byte-win-%ld", (long)getpid());
+  unlink(err);
+  hn = snprintf(hdr, sizeof hdr, "POST /echo HTTP/1.1\r\nHost: h\r\nContent-Length: %d\r\n\r\n", N);
+  if (hn < 0 || (size_t)hn >= sizeof hdr) {
+    fail("byte-window", "hdr");
+    return;
+  }
+  body = malloc((size_t)N);
+  if (!body) {
+    fail("byte-window", "alloc");
+    return;
+  }
+  memset(body, 'q', (size_t)N);
+  child_err_path = err;
+  setenv("MURO_TEST_WRITE_LIMIT", "1", 1);
+  pid = start_stream_ms(&port, NULL, NULL, "60000");
+  unsetenv("MURO_TEST_WRITE_LIMIT");
+  child_err_path = NULL;
+  if (pid < 0) {
+    free(body);
+    unlink(err);
+    return;
+  }
+  fd = dial_tv(port, 60);
+  if (fd < 0 || send_all(fd, hdr, (size_t)hn) < 0 || send_all(fd, body, (size_t)N) < 0) {
+    fail("byte-window", "send");
+    goto out;
+  }
+  while (!found && win_n + 1 < sizeof win) {
+    ssize_t r = read(fd, win + win_n, sizeof win - 1 - win_n);
+    if (r < 0 && errno == EINTR) continue;
+    if (r <= 0) break;
+    win_n += (size_t)r;
+    for (i = 0; i + 3 < win_n; i++) {
+      if (win[i] == '\r' && win[i + 1] == '\n' && win[i + 2] == '\r' && win[i + 3] == '\n') {
+        eoh = i + 4;
+        found = 1;
+        break;
+      }
+    }
+  }
+  if (win_n < sizeof win) win[win_n] = 0;
+  if (!found) {
+    fail("byte-window", "headers");
+    goto out;
+  }
+  clp = strstr(win, "Content-Length:");
+  if (!clp || clp >= win + eoh || sscanf(clp, "Content-Length: %ld", &cl) != 1 || cl != N ||
+      !memmem(win, eoh, "200", 3)) {
+    fail("byte-window", "length");
+    goto out;
+  }
+  for (i = eoh; i < win_n; i++) {
+    if (win[i] != 'q') {
+      fail("byte-window", "body");
+      goto out;
+    }
+    body_got += 1;
+  }
+  while (body_got < (size_t)N) {
+    char tmp[4096];
+    size_t chunk = (size_t)N - body_got;
+    ssize_t r;
+    if (chunk > sizeof tmp) chunk = sizeof tmp;
+    r = read(fd, tmp, chunk);
+    if (r < 0 && errno == EINTR) continue;
+    if (r <= 0) {
+      fail("byte-window", "short");
+      goto out;
+    }
+    for (i = 0; i < (size_t)r; i++) {
+      if (tmp[i] != 'q') {
+        fail("byte-window", "byte");
+        goto out;
+      }
+    }
+    body_got += (size_t)r;
+  }
+  if (file_has(err, "pump fuel exhausted")) fail("byte-window", "fuel");
+out:
+  if (fd >= 0) close(fd);
+  free(body);
+  stop_server(pid);
+  unlink(err);
+}
+
 static void recv_limit(Conn *c, int sec) {
   struct timeval tv;
   tv.tv_sec = sec;
@@ -1704,6 +2003,9 @@ int main(int argc, char **argv) {
   check_drain_cut();
   check_continue_stall();
   check_continue_pipe();
+  check_continue_hard();
+  check_continue_idle();
+  check_byte_window();
   check_body_idle();
   if (failures != 0) {
     fprintf(stderr, "%d failures\n", failures);

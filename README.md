@@ -465,8 +465,9 @@ as `c/test_conn`. A refusal closes the socket. The image does not
 run. A read error closes the socket and is not `evError`: that
 event holds while the phase is read. A response write error is
 `evError`, and the image shuts. A `100 Continue` write error closes
-with no `evError`. A short write is not a fact. The adapter retries
-the same pointer.
+with no `evError`, including when some of that span was already
+written. That flag stays set until the last byte is accepted. A
+short write is not a fact. The adapter retries the same pointer.
 
 The write range in the image stays length 16. `priv/muro/http/render.muro`
 is `httpRender(status, reason, date, extraHeaders, body, keep, omit)`.

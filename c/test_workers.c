@@ -639,7 +639,10 @@ static void check_term(const char *wait) {
     return;
   }
   if (kill(pid, SIGTERM) < 0) fail("term", "kill");
-  for (i = 0; i < 100; i++) {
+  /* 2s (100 * 20ms) timed out under ASan ("epoll term: timeout")
+     while the worker was still exiting. 10s is the cap. A process
+     that has already exited is reaped on the next wait. */
+  for (i = 0; i < 500; i++) {
     pid_t got = waitpid(pid, &status, WNOHANG);
     if (got == pid) {
       reaped = 1;
