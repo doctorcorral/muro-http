@@ -278,7 +278,13 @@ static int decide(int kind, int fact, const char *buf, uint64_t max_body, uint64
   }
   if (seen) *seen = o;
   if (keep) {
+    /* The step stores pointers into this box. A struct copy leaves
+       those pointers on the donor, which is about to return. */
     *keep = b;
+    keep->st.hin = &keep->hin;
+    keep->st.read_more = &keep->rd;
+    keep->st.write_more = &keep->wr;
+    keep->hin.pub.in = &keep->hin;
     *kept = bk;
     return 0;
   }
