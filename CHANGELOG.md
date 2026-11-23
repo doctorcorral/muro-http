@@ -10,19 +10,53 @@
   two on that slice. After the book closes, a later fact returns
   no span. `priv/muro/http/neg/step_span.muro` claims a span after
   the 413 close. `mix muro.check --fuel 5000000` on that file
-  refuses it. `mix test` does not load it. `hand_status` in
-  `c/step.c` still leaves the image in
-  read, so the handwritten step can emit another span; the driver
-  prints that and does not require it. 100 Continue, chunked
-  bodies, pipelining, pulled bodies, idle `MURO_STEP_NOW`, short
-  writes, keep-alive consume, fuel, and a handler 500 are not in
-  the slice. The library version stays `0.1.0-dev`.
+  refuses it. `mix test` does not load it. After a handwritten
+  `status_now` close, `c/step.c` now also returns close with no
+  new span, and the driver requires both sides to stay quiet.
+  414 and 431, 100 Continue, chunked bodies, pipelining, pulled
+  bodies, idle `MURO_STEP_NOW`, short writes, keep-alive consume,
+  fuel, and a handler 500 are not in the slice. The library
+  version stays `0.1.0-dev`.
 - Pin muro `0.22.19` from Hex (`{:muro, "~> 0.22.19"}` in
   `mix.exs`, `muro: "0.22.19"` in `muro.exs`). The library version
   stays `0.1.0-dev`. There is no path dependency. `mix muro.gen`
   rewrites the committed C and Elixir headers for that pin. The
   books are unchanged. 0.22.15 through 0.22.19 do not change the C
   emitter this tree uses.
+- CI type-checks the unique books as a matrix of GitHub-hosted
+  jobs, then `mix muro.gen --check --skip-check` compares the
+  committed files. A cache keyed on `mix.lock`, `muro.exs`, and
+  `priv/muro/` skips the matrix when those inputs have not
+  changed. The `check` job also runs `make c-conformance`. The
+  `asan` job, already epoll under ASan and UBSan, runs
+  `make c-conformance` on the sanitized `c/muro-hello`. A `fuzz`
+  job runs `make fuzz-smoke` (45 seconds). `make books-check` is
+  the local form of the typecheck plus the byte comparison.
+  The library version stays `0.1.0-dev`. The pin stays muro
+  `0.22.14`.
+- After the step has closed the connection, a later fact returns
+  close with no new span. 413, 417, and 501 used to classify the
+  same buffer again and write a second response.
+  `examples/adapter/mem.c` checks those paths. The library version
+  stays `0.1.0-dev`. The pin stays muro `0.22.14`.
+- `make fuzz` builds `fuzz/step_fuzz` with clang, ASan, UBSan,
+  and libFuzzer. It drives `muro_http_step` with fact scripts
+  seeded from the adapter and protocol tests. It does not change
+  `CC` or `c-check`. The library version stays `0.1.0-dev`. The
+  pin stays muro `0.22.14`.
+- SIGINT and SIGTERM write a self-pipe. A wait that already
+  passed the stop-flag check still wakes, and the parent reaps
+  on that pipe plus SIGCHLD instead of a blocking `waitpid`
+  that can miss the signal. The library version stays
+  `0.1.0-dev`. The pin stays muro `0.22.14`.
+- `make c-conformance` runs `c/test_conformance.py` against
+  `c/muro-hello` on epoll. The library version stays
+  `0.1.0-dev`. The pin stays muro `0.22.14`.
+- A header block past 16384 bytes is 414 when the request line
+  itself passes that cap, and 431 otherwise. A shorter malformed
+  request stays 400. `examples/adapter/mem.c` checks the two
+  statuses. The library version stays `0.1.0-dev`. The pin stays
+  muro `0.22.14`.
 - A short write of `100 Continue` keeps a flag for the rest of
   that span. A later hard error closes the connection and does
   not report `MURO_STEP_WRITE_FAILED`. An idle tick while that

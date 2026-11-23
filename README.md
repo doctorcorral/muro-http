@@ -887,8 +887,9 @@ calls the books. It does not replace them.
 as `c/generated/step_slice.c` (`http_step_stepFact`). The host does
 not call it. `c/test_step_slice` feeds the same bytes to both on
 the request line, the headers, a Content-Length body, and the
-close while still reading. After that close the book ignores a
-later fact. `priv/muro/http/neg/step_span.muro` claims a span
+close while still reading. After that close the book and the
+handwritten step both ignore a later fact.
+`priv/muro/http/neg/step_span.muro` claims a span
 after the 413 close; `mix muro.check` refuses it, and `mix test`
 does not load that file. `docs/protocol-backend.md` lists what
 the slice leaves out. The adapter stays.
@@ -944,7 +945,8 @@ book linked beside it must not import that book. `decide.muro` and
 - A JWT claim name longer than 32 bytes is rejected. Header and
   payload JSON are decoded into a 4096-byte buffer.
 - The receive buffer is 65536 bytes and the write buffer is 69632.
-  A header block past 16384 is 400. A body past 16384 is streamed,
+  A header block past 16384 is 414 when the request line itself
+  passes that cap, and 431 otherwise. A body past 16384 is streamed,
   up to the max body (default 8 MiB). A known `Content-Length` over
   that max is 413 at the headers, including one of at most 16384.
   The host does not read that body to the end first. A
@@ -975,14 +977,32 @@ book linked beside it must not import that book. `decide.muro` and
 mise exec -- mix deps.get
 mise exec -- mix muro.gen --check
 mise exec -- mix test
+make c-check
+make c-conformance
+make fuzz-smoke
 ```
 
-`mix muro.gen --check` type-checks each book once, then checks that
-the committed C, Elixir, and ExUnit files still match a fresh emit
-from that copy. It writes nothing.
+`mix muro.gen --check` type-checks each unique book once, then checks
+that the committed C, Elixir, and ExUnit files still match a fresh
+emit from that copy. It writes nothing. `make books-check` is the same
+pair of steps, with one typecheck process per book.
 
 `muro.exs` sets fuel to 5000000. The closed evidence walks the header
-scanner, and the default fuel of 2000 is not enough.
+scanner, and the default fuel of 2000 is not enough. `conn.muro`
+imports `request.muro`, so a serial `mix muro.gen --check` reduces
+that evidence twice.
+
+On GitHub-hosted runners, the `check` job type-checks those books as
+a matrix, or restores a cache keyed on `mix.lock`, `muro.exs`, and
+`priv/muro/` when those inputs have not changed, then compares the
+committed files, runs `mix test`, `make c-check`, and
+`make c-conformance`. The `asan` job runs `make c-sanitize` (epoll
+under ASan and UBSan) and `make c-conformance` on that sanitized
+binary. The `fuzz` job runs `make fuzz-smoke`, which builds
+`fuzz/step_fuzz` with clang, ASan, UBSan, and libFuzzer, replays the
+seed corpus, and fuzzes for 45 seconds. The macOS job runs
+`make c-check` with kqueue. It does not run the conformance suite,
+which starts the hello server with `--wait epoll`.
 
 ## C driver
 

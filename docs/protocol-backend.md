@@ -141,9 +141,9 @@ closed 4.
 
 Moved into `c/step.c`: the per-connection pump. That is classify
 through `conn.step`, `proto_admit`, the handler call, keep-alive
-consume, pipelined `more`, 100 Continue bytes, 400 / 413 / 417 /
-501 while still reading, the idle-deadline decision, and the choice
-of which buffer a close still owes.
+consume, pipelined `more`, 100 Continue bytes, 400 / 413 / 414 /
+431 / 417 / 501 while still reading, the idle-deadline decision,
+and the choice of which buffer a close still owes.
 
 Stayed in the adapter (`c/host.c`, `c/host_poll.c`):
 
@@ -152,7 +152,10 @@ Stayed in the adapter (`c/host.c`, `c/host_poll.c`):
 - `read`, `write`, `accept`, `close`, `listen`, `bind`, `fork`
 - `sendmsg` / `recvmsg` and the `SCM_RIGHTS` handoff
 - the listen backlog (`SOMAXCONN`), `SO_REUSEPORT` on Linux
-- signals, drain, and the connection table
+- signals, drain, and the connection table. SIGINT and SIGTERM
+  also write a self-pipe, so a wait that already passed the flag
+  check still wakes. The parent reaps on that pipe and on
+  SIGCHLD.
 - logging (`fprintf`). The step returns a note code.
 - `MURO_TEST_WRITE_LIMIT`, `MURO_TEST_WRITE_FAIL_AFTER`,
   `MURO_TEST_100_STALL`, `note_write`
@@ -297,13 +300,13 @@ on that file refuses `span-after-close`. `mix test` does not load
 it: the load checks `step.muro`, then checks the flattened book
 again, and that second pass does not finish inside the suite.
 `c/test_step_slice` feeds the same buffer to both functions
-on that slice. On the `status_now` close, `hand_status` in
-`c/step.c` leaves the image in read, so a later fact can still
-emit a span. The driver prints that line and requires the book to
-stay quiet.
+on that slice. After a `status_now` close, a later fact on
+`c/step.c` used to emit another span. The handwritten step now
+marks the connection shut, and the driver requires both the book
+and `muro_http_step` to stay quiet.
 
-Not in this slice: 100 Continue, chunked bodies, pipelining, a
-pulled body, an idle `MURO_STEP_NOW`, a short write,
+Not in this slice: 414 and 431, 100 Continue, chunked bodies,
+pipelining, a pulled body, an idle `MURO_STEP_NOW`, a short write,
 `WRITE_FAILED` of a handler response, keep-alive consume, fuel,
 and a handler 500. Chunked is outside the book even when the
 method would otherwise be 501.

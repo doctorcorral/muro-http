@@ -20,8 +20,9 @@ size_t host_copy_response(uint8_t *dst, size_t cap, uint64_t status, const uint8
                           uint64_t omit, size_t *got);
 
 /* which: 0 malformed, 1 internal, 2 not implemented, 3 too large,
-   4 expectation failed, 5 100 Continue. omit 1 is HEAD: same
-   headers, no body. 100 Continue ignores omit. */
+   4 expectation failed, 5 100 Continue, 6 URI too long,
+   7 header fields too large. omit 1 is HEAD: same headers, no
+   body. 100 Continue ignores omit. */
 size_t host_copy_literal(uint8_t *dst, size_t cap, int which, const uint8_t *date, size_t date_n,
                          uint64_t omit, size_t *got);
 

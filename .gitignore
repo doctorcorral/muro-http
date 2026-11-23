@@ -27,3 +27,7 @@ c/muro-hello
 c/muro-stream
 /bench/loadgen
 *.o
+fuzz/step_fuzz
+fuzz/work/
+
+.muro-books-ok/

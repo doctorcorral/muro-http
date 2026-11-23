@@ -143,6 +143,14 @@ size_t host_copy_response(uint8_t *dst, size_t cap, uint64_t status, const uint8
 static muro__slice literal_of(int which, muro__slice date, uint64_t omit) {
   static const uint8_t type[] = "Content-Type: text/plain; charset=utf-8\r\n";
   muro__slice extra = muro__slice_of(type, sizeof type - 1);
+  /* 414 and 431 are not book literals. httpRender prints the code. */
+  if (which == 6 || which == 7) {
+    const char *reason = which == 6 ? "URI Too Long" : "Request Header Fields Too Large";
+    const char *body = which == 6 ? "uri too long" : "header fields";
+    uint64_t status = which == 6 ? 414 : 431;
+    return httpRender(status, muro__slice_of((const uint8_t *)reason, strlen(reason)), date, extra,
+                      muro__slice_of((const uint8_t *)body, strlen(body)), 1, omit == 1 ? 1 : 0);
+  }
   if (omit == 1 && which != 5) {
     uint64_t status = 400;
     muro__slice reason = muro__slice_of((const uint8_t *)"Bad Request", 11);

@@ -7,10 +7,9 @@
    in the host. Those bytes must lie in the caller send buffer.
    The status text is not compared field for field.
 
-   After a 413, 417, or 501 status_now close, the book must stay
-   quiet. The handwritten step at this base still has hand_status
-   leave the image in read, so a later fact can emit another span.
-   That line is printed. It does not fail the driver. */
+   After a 413, 417, or 501 status_now close, both the book and
+   the handwritten step must stay quiet. c/step.c now marks the
+   connection shut, so a later fact returns close with no span. */
 
 #include "step.h"
 #include "host_stream.h"
@@ -320,12 +319,18 @@ static int later_fact(const char *req, uint64_t max_body, uint64_t code, int fac
     return -1;
   }
   if (rc < 0) {
-    printf("handwritten-after-close %s span=err close=err read=err\n", name);
-  } else {
-    span = ((o.bytes && o.len) || (o.status_now && o.status && o.status_len)) ? 1 : 0;
-    if (span) after_spans += 1;
-    printf("handwritten-after-close %s span=%d close=%d read=%d\n", name, span, o.close_conn,
-           o.read_more);
+    fprintf(stderr, "%s: handwritten-after-close step failed\n", name);
+    box_free(&b);
+    return -1;
+  }
+  span = ((o.bytes && o.len) || (o.status_now && o.status && o.status_len)) ? 1 : 0;
+  if (span) after_spans += 1;
+  printf("handwritten-after-close %s span=%d close=%d read=%d\n", name, span, o.close_conn,
+         o.read_more);
+  if (span || !o.close_conn || o.read_more || o.write_more) {
+    fprintf(stderr, "%s: handwritten after close must stay quiet\n", name);
+    box_free(&b);
+    return -1;
   }
   box_free(&b);
   return 0;
@@ -510,6 +515,7 @@ int main(void) {
   if (owe_failed(BAD, 10, 400, "malformed", "400-failed") < 0) return 1;
 
   printf("handwritten-after-close-spans %d\n", after_spans);
+  if (after_spans != 0) return 1;
   printf("OK\n");
   return 0;
 }

@@ -50,15 +50,54 @@ int host_io_should_stop(void) {
 /* sa_flags stays 0 on these handlers. SA_RESTART would hide the
    EINTR that lets an accept loop or a wait notice the flag.
    kevent changes, sendmsg, and the handoff poll retry EINTR
-   themselves. */
+   themselves.
+
+   The flag alone is not enough. The handler can run after the
+   loop has read the flag and before poll, epoll, or kevent
+   blocks with no timer. The write makes that wait return. A
+   full pipe already has a byte, so EAGAIN is fine. */
+static volatile sig_atomic_t stop_wake = -1;
+static volatile sig_atomic_t parent_wake = -1;
+
+static void poke_fd(int fd) {
+  int saved = errno;
+  char b = 1;
+  if (fd < 0) {
+    errno = saved;
+    return;
+  }
+  for (;;) {
+    if (write(fd, &b, 1) < 0 && errno == EINTR) continue;
+    break;
+  }
+  errno = saved;
+}
+
+static void drain_wake(int fd) {
+  char buf[64];
+  if (fd < 0) return;
+  for (;;) {
+    ssize_t n = read(fd, buf, sizeof buf);
+    if (n < 0 && errno == EINTR) continue;
+    if (n <= 0) return;
+  }
+}
+
 static void on_signal(int sig) {
   (void)sig;
   stop_flag = 1;
+  poke_fd((int)stop_wake);
 }
 
 static void parent_on_signal(int sig) {
   (void)sig;
   parent_stop = 1;
+  poke_fd((int)parent_wake);
+}
+
+static void on_sigchld(int sig) {
+  (void)sig;
+  poke_fd((int)parent_wake);
 }
 
 static const char *cfg_name(const MuroHttpConfig *cfg) {
@@ -106,6 +145,7 @@ typedef struct Server {
   int stall_100;
   int channel; /* listen_fd carries SCM_RIGHTS, it is not a TCP listener */
   int ack_owed; /* SCM_RIGHTS receipts not yet acked to the parent */
+  int wake_r; /* self-pipe. SIGINT/SIGTERM write the other end. */
 } Server;
 
 /* The body reader re-enters this loop. NULL outside muro_http_serve. */
@@ -1286,6 +1326,10 @@ int host_io_once(int watch_fd) {
       continue;
     }
     if (fd_skipped(evs[i].fd)) continue;
+    if (evs[i].fd == sv->wake_r) {
+      drain_wake(sv->wake_r);
+      continue;
+    }
     if (sv->listen_fd >= 0 && evs[i].fd == sv->listen_fd) {
       accept_some(sv);
       continue;
@@ -1333,10 +1377,12 @@ static int serve_one(const MuroHttpConfig *cfg, MuroHttpHandler handler, void *u
   stop_flag = 0;
   draining_flag = 0;
   drain_deadline_ms = 0;
+  stop_wake = -1;
   io_depth = 0;
   live_sv = NULL;
   memset(&sv, 0, sizeof sv);
   sv.listen_fd = -1;
+  sv.wake_r = -1;
   sv.idle_ms = cfg->idle_ms;
   sv.max_conn = cfg->max_conn;
   sv.max_body = (uint64_t)cfg->max_body;
@@ -1400,6 +1446,19 @@ static int serve_one(const MuroHttpConfig *cfg, MuroHttpHandler handler, void *u
       goto out;
     }
   }
+  {
+    int sp[2] = {-1, -1};
+    if (pipe(sp) < 0 || set_nb_cloexec(sp[0]) < 0 || set_nb_cloexec(sp[1]) < 0 ||
+        host_poll_watch(sv.pq, sp[0], 1, 0) < 0) {
+      fprintf(stderr, "%s: wake: %s\n", sv.name, strerror(errno));
+      if (sp[0] >= 0) close(sp[0]);
+      if (sp[1] >= 0) close(sp[1]);
+      rc = -1;
+      goto out;
+    }
+    sv.wake_r = sp[0];
+    stop_wake = sp[1];
+  }
   memset(&sa, 0, sizeof sa);
   sa.sa_handler = on_signal;
   sigemptyset(&sa.sa_mask);
@@ -1451,6 +1510,10 @@ static int serve_one(const MuroHttpConfig *cfg, MuroHttpHandler handler, void *u
         for (k = 0; k < sv.max_conn; k++) on_tick(&sv, &sv.slots[k], now);
         continue;
       }
+      if (evs[i].fd == sv.wake_r) {
+        drain_wake(sv.wake_r);
+        continue;
+      }
       if (sv.listen_fd >= 0 && evs[i].fd == sv.listen_fd) {
         accept_some(&sv);
         continue;
@@ -1480,6 +1543,17 @@ static int serve_one(const MuroHttpConfig *cfg, MuroHttpHandler handler, void *u
   if (sv.fatal) rc = -1;
   live_sv = NULL;
 out:
+  {
+    int wr = (int)stop_wake;
+    stop_wake = -1;
+    if (sv.wake_r >= 0) {
+      int rd = sv.wake_r;
+      sv.wake_r = -1;
+      if (sv.pq) (void)host_poll_watch(sv.pq, rd, 0, 0);
+      close(rd);
+    }
+    if (wr >= 0) close(wr);
+  }
   if (sv.listen_fd >= 0) {
     int lfd = sv.listen_fd;
     sv.listen_fd = -1;
@@ -1504,13 +1578,37 @@ static void signal_pids(pid_t *pids, int n, int sig) {
   }
 }
 
+/* Blocking waitpid misses SIGTERM that arrives after the flag
+   check and before the wait. The pipe is written from the
+   SIGTERM handler and from SIGCHLD, so the parent wakes for
+   either. Without the pipe, fall back to the blocking wait. */
 static int reap_children(pid_t *pids, int n) {
+  int sp[2] = {-1, -1};
+  struct sigaction sa;
+  struct sigaction old_chld;
   int left = 0;
   int i;
   int failed = 0;
   int signaled = 0;
+  int have_wake = 0;
+  memset(&old_chld, 0, sizeof old_chld);
   for (i = 0; i < n; i++) {
     if (pids[i] > 0) left += 1;
+  }
+  if (pipe(sp) == 0 && set_nb_cloexec(sp[0]) == 0 && set_nb_cloexec(sp[1]) == 0) {
+    parent_wake = sp[1];
+    memset(&sa, 0, sizeof sa);
+    sa.sa_handler = on_sigchld;
+    sigemptyset(&sa.sa_mask);
+    sa.sa_flags = 0;
+    if (sigaction(SIGCHLD, &sa, &old_chld) == 0) have_wake = 1;
+  }
+  if (!have_wake) {
+    parent_wake = -1;
+    if (sp[0] >= 0) close(sp[0]);
+    if (sp[1] >= 0) close(sp[1]);
+    sp[0] = -1;
+    sp[1] = -1;
   }
   while (left > 0) {
     int status = 0;
@@ -1519,10 +1617,22 @@ static int reap_children(pid_t *pids, int n) {
       signal_pids(pids, n, SIGTERM);
       signaled = 1;
     }
-    pid = waitpid(-1, &status, 0);
+    pid = waitpid(-1, &status, have_wake ? WNOHANG : 0);
     if (pid < 0) {
       if (errno == EINTR) continue;
-      return -1;
+      failed = 1;
+      break;
+    }
+    if (pid == 0) {
+      struct pollfd pfd;
+      pfd.fd = sp[0];
+      pfd.events = POLLIN;
+      if (poll(&pfd, 1, -1) < 0 && errno != EINTR) {
+        failed = 1;
+        break;
+      }
+      drain_wake(sp[0]);
+      continue;
     }
     left -= 1;
     if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) {
@@ -1533,6 +1643,10 @@ static int reap_children(pid_t *pids, int n) {
       }
     }
   }
+  parent_wake = -1;
+  if (have_wake) (void)sigaction(SIGCHLD, &old_chld, NULL);
+  if (sp[0] >= 0) close(sp[0]);
+  if (sp[1] >= 0) close(sp[1]);
   return failed ? -1 : 0;
 }
 
