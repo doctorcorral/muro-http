@@ -32,3 +32,5 @@ __pycache__/
 c/conn.patched.c
 fuzz/step_fuzz
 fuzz/work/
+
+.muro-books-ok/

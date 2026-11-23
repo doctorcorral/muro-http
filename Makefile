@@ -5,7 +5,7 @@ CFLAGS ?= -Wall -Wextra -Werror -std=c11 $(OPT) -D_GNU_SOURCE -I c -I c/generate
 LDFLAGS ?=
 CHALLENGE_INC = -I examples/challenge
 
-.PHONY: all c-check c-sanitize c-conformance clean fuzz
+.PHONY: all c-check c-sanitize c-conformance clean fuzz fuzz-smoke books-check
 
 bench/loadgen: bench/loadgen.c
 	$(CC) -Wall -Wextra -Werror -std=c11 -O2 -o $@ bench/loadgen.c -pthread
@@ -190,3 +190,14 @@ fuzz/step_fuzz: $(FUZZ_SRCS) c/step.h c/shim.h c/host_stream.h c/host_render.h
 	$(FUZZ_CC) $(FUZZ_CFLAGS) -o $@ $(FUZZ_SRCS)
 
 fuzz: fuzz/step_fuzz
+
+# Replay the seed corpus and fuzz for 45 seconds. Writes any
+# artifact under fuzz/work/, which is gitignored.
+fuzz-smoke: fuzz/step_fuzz
+	mkdir -p fuzz/work
+	./fuzz/step_fuzz -max_total_time=45 -timeout=5 -dict=fuzz/http.dict -artifact_prefix=fuzz/work/ fuzz/corpus
+
+# Type-check each unique book in muro.exs, then compare committed
+# targets. Same checks as `mix muro.gen --check`.
+books-check:
+	sh scripts/check-books.sh

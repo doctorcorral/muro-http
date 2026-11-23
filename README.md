@@ -967,14 +967,32 @@ book linked beside it must not import that book. `decide.muro` and
 mise exec -- mix deps.get
 mise exec -- mix muro.gen --check
 mise exec -- mix test
+make c-check
+make c-conformance
+make fuzz-smoke
 ```
 
-`mix muro.gen --check` type-checks each book once, then checks that
-the committed C, Elixir, and ExUnit files still match a fresh emit
-from that copy. It writes nothing.
+`mix muro.gen --check` type-checks each unique book once, then checks
+that the committed C, Elixir, and ExUnit files still match a fresh
+emit from that copy. It writes nothing. `make books-check` is the same
+pair of steps, with one typecheck process per book.
 
 `muro.exs` sets fuel to 5000000. The closed evidence walks the header
-scanner, and the default fuel of 2000 is not enough.
+scanner, and the default fuel of 2000 is not enough. `conn.muro`
+imports `request.muro`, so a serial `mix muro.gen --check` reduces
+that evidence twice.
+
+On GitHub-hosted runners, the `check` job type-checks those books as
+a matrix, or restores a cache keyed on `mix.lock`, `muro.exs`, and
+`priv/muro/` when those inputs have not changed, then compares the
+committed files, runs `mix test`, `make c-check`, and
+`make c-conformance`. The `asan` job runs `make c-sanitize` (epoll
+under ASan and UBSan) and `make c-conformance` on that sanitized
+binary. The `fuzz` job runs `make fuzz-smoke`, which builds
+`fuzz/step_fuzz` with clang, ASan, UBSan, and libFuzzer, replays the
+seed corpus, and fuzzes for 45 seconds. The macOS job runs
+`make c-check` with kqueue. It does not run the conformance suite,
+which starts the hello server with `--wait epoll`.
 
 ## C driver
 
