@@ -1,6 +1,7 @@
 /* A second server on the HTTP/1.1 core. GET answers hello.
-   POST echoes the body. Any other method is 405. No SQLite, no JWT,
-   and no challenge route. */
+   POST / answers the same static hello, so a bench can compare that
+   body with other servers. Any other POST still echoes the body.
+   Any other method is 405. No SQLite, no JWT, and no challenge route. */
 
 #include "muro_http.h"
 
@@ -65,6 +66,33 @@ static int on_req(const MuroHttpRequest *req, MuroHttpResponse *resp, void *user
     return 0;
   }
   if (req->method.n == 4 && memcmp(req->method.p, "POST", 4) == 0) {
+    /* POST / is the bench route: the same static body as GET.
+       A buffered body is already consumed. A streamed body is
+       discarded so the next request on the connection stays framed.
+       POST /echo and every other path still echo, for the tests. */
+    if (req->path.n == 1 && req->path.p && req->path.p[0] == '/') {
+      if (!(req->body.n > 0 && req->body.p) && req->body_in) {
+        uint8_t dump[512];
+        for (;;) {
+          int r = muro_http_body_read(req->body_in, dump, sizeof dump);
+          if (r < 0) {
+            resp->status = 400;
+            resp->reason = "Bad Request";
+            resp->reason_len = 11;
+            resp->body = (const uint8_t *)"bad\n";
+            resp->body_len = 4;
+            return 0;
+          }
+          if (r == 0) break;
+        }
+      }
+      resp->status = 200;
+      resp->reason = "OK";
+      resp->reason_len = 2;
+      resp->body = (const uint8_t *)"hello\n";
+      resp->body_len = 6;
+      return 0;
+    }
     if (slurp_body(req, &body, &body_n) < 0) {
       resp->status = 400;
       resp->reason = "Bad Request";

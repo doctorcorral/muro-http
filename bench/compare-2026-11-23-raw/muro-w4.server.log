@@ -1,0 +1,14 @@
+loadavg 1.52 2.13 2.72 1/777 854796
+start taskset -c 0-3 /home/rcc/Research/muro-http-bench/c/muro-hello --bind 127.0.0.1 --port 18180 --max-connections 1024 --idle-ms 60000 --workers 4 --wait epoll
+muro-hello: workers 4 reuseport
+muro-hello: wait epoll
+muro-hello: wait epoll
+listening 127.0.0.1 18180
+listening 127.0.0.1 18180
+muro-hello: wait epoll
+listening 127.0.0.1 18180
+muro-hello: wait epoll
+listening 127.0.0.1 18180
+preflight muro GET 200 'text/plain' b'hello\n'
+preflight muro POST 200 'text/plain' b'hello\n'
+stopped loadavg 6.63 4.36 3.48 3/773 866520

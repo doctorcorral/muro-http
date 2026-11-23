@@ -23,6 +23,11 @@
   rewrites the committed C and Elixir headers for that pin. The
   books are unchanged. 0.22.15 through 0.22.19 do not change the C
   emitter this tree uses.
+- Closing an epoll connection always drops the cached interest for
+  that fd, even when `EPOLL_CTL_DEL` fails. A reused fd with the
+  same interest then gets a real `ADD` instead of a silent stall.
+  The library version stays `0.1.0-dev`.
+
 - CI type-checks the unique books as a matrix of GitHub-hosted
   jobs, then `mix muro.gen --check --skip-check` compares the
   committed files. A cache keyed on `mix.lock`, `muro.exs`, and
