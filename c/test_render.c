@@ -115,6 +115,29 @@ static void expect_copy(const char *name, uint64_t status, const char *reason, c
   if (keep == 1 && !has_lit(dst, n, "Connection: close")) bad(name);
 }
 
+static void expect_same(const char *name, uint64_t status, const char *reason, const char *extra,
+                        const char *body, uint64_t keep, uint64_t omit) {
+  uint8_t book[4096];
+  uint8_t host[4096];
+  size_t got = 0;
+  muro__slice s = httpRender(status, of(reason), of(DATE), of(extra), of(body), keep, omit);
+  size_t n;
+  if (s.n > sizeof book) {
+    bad(name);
+    muro_http_reset();
+    return;
+  }
+  memcpy(book, s.p, s.n);
+  muro_http_reset();
+  n = host_copy_response(host, sizeof host, status, (const uint8_t *)reason, reason ? strlen(reason) : 0,
+                         (const uint8_t *)DATE, 29, (const uint8_t *)extra, extra ? strlen(extra) : 0,
+                         (const uint8_t *)body, body ? strlen(body) : 0, keep, omit, &got);
+  if (n != s.n || got != s.n || memcmp(host, book, s.n) != 0) {
+    fprintf(stderr, "FAIL %s: host %zu book %zu\n", name, n, s.n);
+    failures += 1;
+  }
+}
+
 static void expect_render(const char *name, uint64_t status, const char *reason, const char *extra,
                           const char *body, uint64_t keep, const char *lit) {
   muro__slice s = httpRender(status, of(reason), of(DATE), of(extra), of(body), keep, 0);
@@ -203,6 +226,29 @@ int main(void) {
               "ab", 0, 1);
   expect_copy("extra-good", 200, "OK", "X-Trace: 1\r\n", "ab", 0, 1);
   expect_copy("extra-bare", 200, "OK", "X-Trace: 1", "ab", 0, 1);
+  expect_same("hello-keep", 200, "OK", "Content-Type: text/plain\r\n", "hello\n", 0, 0);
+  expect_same("hello-close", 200, "OK", "Content-Type: text/plain\r\n", "hello\n", 1, 0);
+  expect_same("hello-head", 200, "OK", "Content-Type: text/plain\r\n", "hello\n", 0, 1);
+  expect_same("empty-body", 204, "No Content", "", "", 0, 0);
+  expect_same("json-same", 201, "Created", json, "1234567890", 0, 0);
+  expect_same("odd-code", 418, "I'm a teapot", type, "no", 1, 0);
+  expect_same("zero-keep", 200, "OK", "", "", 0, 0);
+  {
+    uint8_t a[512], b[512];
+    size_t na, nb;
+    const char *d2 = "Mon, 01 Jan 2000 00:00:00 GMT";
+    const char *plain = "Content-Type: text/plain\r\n";
+    na = host_copy_response(a, sizeof a, 200, (const uint8_t *)"OK", 2, (const uint8_t *)DATE, 29,
+                            (const uint8_t *)plain, strlen(plain), (const uint8_t *)"hello\n", 6, 0, 0,
+                            NULL);
+    nb = host_copy_response(b, sizeof b, 200, (const uint8_t *)"OK", 2, (const uint8_t *)d2, 29,
+                            (const uint8_t *)plain, strlen(plain), (const uint8_t *)"hello\n", 6, 0, 0,
+                            NULL);
+    if (na != 131 || nb != 131 || memcmp(a, b, na) == 0 || !has_lit(a, na, DATE) || !has_lit(b, nb, d2))
+      bad("date-not-cached");
+    if (!has_lit(a, na, "Connection: keep-alive") || has_lit(a, na, "Connection: close"))
+      bad("hello-keep-bytes");
+  }
   if (failures != 0) {
     fprintf(stderr, "%d failures\n", failures);
     return 1;
