@@ -8,8 +8,9 @@
    The checks pin short writes, a hard write error, 100 Continue
    (including a short write then a hard error), MURO_STEP_NOW and
    wake_at, status_now for 413, 417, and 501, 414 and 431 for a
-   header block past 16384, pipelining, empty_before 0, and a
-   one-byte window on a large body.
+   header block past 16384, pipelining, empty_before 0, a
+   one-byte window on a large body, and that a closed 413, 417,
+   or 501 does not answer a later fact.
 
    Build: make c/test_step
    The reference server is still c/host.c. This file is the pattern,
@@ -502,6 +503,109 @@ static int check_status(uint64_t max_body, const char *req, const char *code, co
   return 0;
 }
 
+/* fuzz/crashes/trace-then-peer.bin: TRACE with a body is 501 and
+   close_conn, then an empty PEER_CLOSED used to classify that buffer
+   again and emit a second response. 413 and 417 share hand_status. */
+static int quiet_after(Box *b, const Conn *snap, int phase, size_t in_len, int live, int done,
+                       const char *where, const char *what) {
+  StepOut o;
+  char now[160];
+  if (call(b, &o) < 0) {
+    fail(b->err ? b->err : what);
+    return -1;
+  }
+  if (o.bytes || o.len || o.status || o.status_len || o.status_now || !o.close_conn) {
+    fail(what);
+    return -1;
+  }
+  proto_where(b->st.proto, now, sizeof now);
+  if (memcmp(&b->st.st, snap, sizeof *snap) != 0 || muro_http_step_phase(&b->st) != phase ||
+      muro_http_step_in_len(&b->st) != in_len || proto_live(b->st.proto) != live ||
+      proto_done(b->st.proto) != done || strcmp(now, where) != 0) {
+    fail(what);
+    return -1;
+  }
+  return 0;
+}
+
+static int check_closed_quiet(uint64_t max_body, const char *req, const char *code) {
+  Box b;
+  StepOut o;
+  Conn snap;
+  char where[160];
+  int phase;
+  int live;
+  int done;
+  size_t in_len;
+  size_t n;
+  const char *again = "GET / HTTP/1.1\r\nHost: h\r\n\r\n";
+  if (box_open(&b, max_body) < 0) return fail(b.err ? b.err : "closed alloc");
+  if (feed(&b, req, 1, 1000, 0) < 0 || call(&b, &o) < 0) {
+    fail(b.err ? b.err : "closed step");
+    box_close(&b);
+    return 1;
+  }
+  if (!o.close_conn || !o.status || !o.status_len ||
+      !memmem(o.status, o.status_len, code, strlen(code))) {
+    fail(code);
+    box_close(&b);
+    return 1;
+  }
+  snap = b.st.st;
+  phase = muro_http_step_phase(&b.st);
+  in_len = muro_http_step_in_len(&b.st);
+  live = proto_live(b.st.proto);
+  done = proto_done(b.st.proto);
+  proto_where(b.st.proto, where, sizeof where);
+
+  set_fact(&b, MURO_STEP_PEER_CLOSED, 0);
+  b.in.empty_before = 1;
+  if (quiet_after(&b, &snap, phase, in_len, live, done, where, "peer after close") < 0) {
+    box_close(&b);
+    return 1;
+  }
+
+  n = strlen(again);
+  if (in_len + n > IN_CAP) {
+    fail("closed feed");
+    box_close(&b);
+    return 1;
+  }
+  memcpy(b.inb + in_len, again, n);
+  muro_http_step_set_in_len(&b.st, in_len + n);
+  in_len += n;
+  memset(&b.in, 0, sizeof b.in);
+  b.in.kind = MURO_STEP_BYTES;
+  b.in.empty_before = 0;
+  b.in.now_ms = 1000;
+  b.in.date = (const uint8_t *)DATE;
+  b.in.date_n = 29;
+  if (quiet_after(&b, &snap, phase, in_len, live, done, where, "bytes after close") < 0) {
+    box_close(&b);
+    return 1;
+  }
+
+  set_fact(&b, MURO_STEP_WROTE, 1);
+  if (quiet_after(&b, &snap, phase, in_len, live, done, where, "wrote after close") < 0) {
+    box_close(&b);
+    return 1;
+  }
+  b.in.now_ms = 70000;
+  b.in.deadline = 0;
+  set_fact(&b, MURO_STEP_NOW, 0);
+  if (quiet_after(&b, &snap, phase, in_len, live, done, where, "now after close") < 0) {
+    box_close(&b);
+    return 1;
+  }
+  set_fact(&b, MURO_STEP_WRITE_FAILED, 0);
+  if (quiet_after(&b, &snap, phase, in_len, live, done, where, "fail after close") < 0) {
+    box_close(&b);
+    return 1;
+  }
+  box_close(&b);
+  return 0;
+}
+
 static int check_pipe_and_short(void) {
   Box b;
   const char *two = "GET / HTTP/1.1\r\nHost: h\r\n\r\nGET / HTTP/1.1\r\nHost: h\r\n\r\n";
@@ -664,6 +768,14 @@ int main(void) {
     return 1;
   if (check_status(8388608, "TRACE / HTTP/1.1\r\nHost: h\r\nContent-Length: 4\r\n\r\n", "501",
                    "unimplemented"))
+    return 1;
+  if (check_closed_quiet(10, "POST / HTTP/1.1\r\nHost: h\r\nContent-Length: 100\r\n\r\n", "413"))
+    return 1;
+  if (check_closed_quiet(8388608,
+                         "POST / HTTP/1.1\r\nHost: h\r\nExpect: foo\r\nContent-Length: 4\r\n\r\n",
+                         "417"))
+    return 1;
+  if (check_closed_quiet(8388608, "TRACE / HTTP/1.1\r\nHost: h\r\nContent-Length: 4\r\n\r\n", "501"))
     return 1;
   if (check_pipe_and_short()) return 1;
   if (check_deadline_and_fail()) return 1;

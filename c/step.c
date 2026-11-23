@@ -32,6 +32,8 @@ enum {
   PEND_NONE = 0,
   PEND_CONT = 1,
   PEND_OUT = 2,
+  /* close_conn, phase closed, or -1. Later facts must not run. */
+  PEND_SHUT = 3,
   PUMP_FUSE = 100000,
   /* Same cap as gt16384 in the request book. which 6 is 414.
      which 7 is 431. */
@@ -773,19 +775,35 @@ void muro_http_step_shutdown(HttpStep *st) {
   st->proto = NULL;
 }
 
+static void mark_shut(HttpStep *st) { st->pend_kind = PEND_SHUT; }
+
 int muro_http_step(HttpStep *st, const StepIn *in, StepOut *out) {
   int took;
+  int rc;
   if (!st || !in || !out) return -1;
   memset(out, 0, sizeof *out);
+  /* 413, 417, and 501 return close_conn from hand_status while the
+     image is still in read. A later fact classified that buffer
+     again and wrote a second response. -1 and phase closed end the
+     same way. The adapter has already been told to close. */
+  if (st->pend_kind == PEND_SHUT) {
+    out->close_conn = 1;
+    return 0;
+  }
   out->wake_at = in->deadline;
   /* One call is one budget. A large body under a one-byte window is
      a long run of MURO_STEP_WROTE, and the fuse used to survive
      those calls. */
   st->spins = 0;
   took = take_fact(st, in, out);
-  if (took < 0) return -1;
+  if (took < 0) {
+    mark_shut(st);
+    return -1;
+  }
   if (took > 0) return 0;
-  return pump(st, in, out);
+  rc = pump(st, in, out);
+  if (rc < 0 || out->close_conn || (int)field(st->st, 0) == MURO_STEP_PH_CLOSED) mark_shut(st);
+  return rc;
 }
 
 int muro_http_step_phase(const HttpStep *st) {
