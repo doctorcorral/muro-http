@@ -260,15 +260,12 @@ static int decide(int kind, int fact, const char *buf, uint64_t max_body, uint64
     set_fact(&b, fact, 0);
   }
   memset(&o, 0, sizeof o);
-  if (kind != DEC_OUT && muro_http_step(&b.st, &b.in, &o) < 0) {
+  /* DEC_OUT still runs the host so a crash or a host error fails
+     the driver. The output fields are not a field of this slice. */
+  if (muro_http_step(&b.st, &b.in, &o) < 0) {
     box_free(&b);
     fprintf(stderr, "%s: host step failed\n", name);
     return -1;
-  }
-  if (kind == DEC_OUT) {
-    /* Still run the host. A crash fails the driver. The result is
-       not a field of this slice. */
-    muro_http_step(&b.st, &b.in, &o);
   }
   bk = http_step_stepFact(http_step_readSt(), (uint64_t)fact, sl_of(buf), max_body);
   if (check_shape(kind, &o, bk, &b, code, word, name) < 0) {
@@ -408,9 +405,9 @@ static int owe_then(const char *req, uint64_t max_body, uint64_t code, const cha
     return -1;
   }
   if (rc < 0) {
-    printf("handwritten-after-wrote %s span=err close=err read=err\n", name);
+    fprintf(stderr, "%s: handwritten-after-wrote step failed\n", name);
     box_free(&b);
-    return 0;
+    return -1;
   }
   if ((o.bytes && o.len) || (o.status_now && o.status && o.status_len) || !o.close_conn ||
       o.read_more || o.write_more) {
@@ -443,9 +440,9 @@ static int owe_failed(const char *req, uint64_t max_body, uint64_t code, const c
     return -1;
   }
   if (rc < 0) {
-    printf("handwritten-owe-failed %s=err\n", name);
+    fprintf(stderr, "%s: handwritten-owe-failed step failed\n", name);
     box_free(&b);
-    return 0;
+    return -1;
   }
   if (check_shape(DEC_QUIET, &o, bk, &b, code, NULL, name) < 0) {
     box_free(&b);
