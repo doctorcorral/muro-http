@@ -26,9 +26,11 @@ c/test_jwt.o c/test_body.o c/tag_pin.o c/test_store.o c/test_json.o c/test_e2e.o
 # The generated text stays as muro wrote it.
 c/conn.patched.c: c/generated/conn.c
 	sed -e 's/^HSt scan(/HSt scan_uncached(/' \
-	    -e 's/^uint64_t crlfEnd(/uint64_t crlfEnd_uncached(/' $< > $@
+	    -e 's/^uint64_t crlfEnd(/uint64_t crlfEnd_uncached(/' \
+	    -e 's/^Conn step(/Conn step_uncached(/' $< > $@
 	grep -q '^HSt scan_uncached(muro__slice s)' $@
 	grep -q '^uint64_t crlfEnd_uncached(muro__slice s)' $@
+	grep -q '^Conn step_uncached(Conn st, Ev ev_2)' $@
 
 c/conn.o: c/conn.patched.c c/shim.h
 	$(CC) $(CFLAGS) -c -o $@ c/conn.patched.c
@@ -84,7 +86,7 @@ c/mem_adapter.o: examples/adapter/mem.c
 c/stream.o: examples/stream/stream.c
 	$(CC) $(CFLAGS) -c -o $@ examples/stream/stream.c
 
-CORE = c/shim.o c/proto.o c/admit_glue.o c/session.o c/admit.o c/conn.o c/scan_cache.o
+CORE = c/shim.o c/proto.o c/admit_glue.o c/session.o c/admit.o c/conn.o c/scan_cache.o c/step_memo.o
 HOST = c/host.o c/step.o c/host_poll.o c/host_render.o c/host_date.o c/host_stream.o c/render.o $(CORE)
 
 c/test_classify: c/test_classify.o c/request.o c/shim.o

@@ -72,9 +72,12 @@ static void want(const char *name, Conn st, int i, uint64_t expect) {
   }
 }
 
+void step_memo_reset(void);
+
 static int restart(Conn *st, Proto **proto) {
   proto_free(*proto);
   *proto = NULL;
+  step_memo_reset();
   *st = begin();
   *proto = proto_begin();
   if (!*proto) {
@@ -85,7 +88,11 @@ static int restart(Conn *st, Proto **proto) {
 }
 
 static Proto *open_proto(const char *name) {
-  Proto *p = proto_begin();
+  Proto *p;
+  /* A repeated pure step does not classify again. Start each scenario
+     cold so the first bytes event still shows that one allocation. */
+  step_memo_reset();
+  p = proto_begin();
   if (!p) bad(name, "session init");
   return p;
 }
@@ -218,6 +225,14 @@ static void check_keepalive(void) {
   want("health", st, 4, ACT_DECIDE);
   want("health", st, 11, 33);
   want("health", st, 12, 0);
+  /* The same bytes and the same fields skip the book. The result matches. */
+  {
+    Conn hit;
+    muro_http_reset();
+    hit = step(begin(), evBytes(of(health)));
+    if (muro_http_allocs() != 0) bad("health", "repeat allocs");
+    if (!same(hit, st)) bad("health", "repeat result");
+  }
   n = take("reply-allocs", &st, proto, evReply(0));
   if (n != 0) bad("reply", "allocs");
   want("db", st, 0, PH_WRITE);
