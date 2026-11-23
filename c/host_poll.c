@@ -515,6 +515,11 @@ static int ep_apply(HostPoll *p, int fd, int existed, uint32_t bits) {
 static int ep_watch(HostPoll *p, int fd, int read, int write) {
   int i = find_w(p, fd);
   uint32_t bits = ep_bits(read, write);
+  /* Steady keep-alive calls this after every request with the same
+     read interest. The stored bits match the last successful ctl,
+     so a repeat is not a new registration. */
+  if (bits && i >= 0 && p->w[i].read == read && p->w[i].write == write)
+    return 0;
   if (bits && i < 0 && p->wn == p->wcap && grow_w(p) < 0) return -1;
   if (ep_apply(p, fd, i >= 0, bits) < 0) return -1;
   if (!read && !write) {
