@@ -21,8 +21,17 @@ c/%.o: c/%.c
 c/test_jwt.o c/test_body.o c/tag_pin.o c/test_store.o c/test_json.o c/test_e2e.o: c/%.o: c/%.c
 	$(CC) $(CFLAGS) $(CHALLENGE_INC) -c -o $@ $<
 
-c/conn.o: c/generated/conn.c c/shim.h
-	$(CC) $(CFLAGS) -c -o $@ c/generated/conn.c
+# The book defines scan and crlfEnd. Rename those definitions so every
+# call, including the ones in this file, goes through c/scan_cache.c.
+# The generated text stays as muro wrote it.
+c/conn.patched.c: c/generated/conn.c
+	sed -e 's/^HSt scan(/HSt scan_uncached(/' \
+	    -e 's/^uint64_t crlfEnd(/uint64_t crlfEnd_uncached(/' $< > $@
+	grep -q '^HSt scan_uncached(muro__slice s)' $@
+	grep -q '^uint64_t crlfEnd_uncached(muro__slice s)' $@
+
+c/conn.o: c/conn.patched.c c/shim.h
+	$(CC) $(CFLAGS) -c -o $@ c/conn.patched.c
 
 c/session.o: c/generated/session.c c/shim.h
 	$(CC) $(CFLAGS) -c -o $@ c/generated/session.c
@@ -75,7 +84,7 @@ c/mem_adapter.o: examples/adapter/mem.c
 c/stream.o: examples/stream/stream.c
 	$(CC) $(CFLAGS) -c -o $@ examples/stream/stream.c
 
-CORE = c/shim.o c/proto.o c/admit_glue.o c/session.o c/admit.o c/conn.o
+CORE = c/shim.o c/proto.o c/admit_glue.o c/session.o c/admit.o c/conn.o c/scan_cache.o
 HOST = c/host.o c/step.o c/host_poll.o c/host_render.o c/host_date.o c/host_stream.o c/render.o $(CORE)
 
 c/test_classify: c/test_classify.o c/request.o c/shim.o
@@ -166,7 +175,7 @@ c-sanitize:
 	$(MAKE) c-check CFLAGS="$(SAN_CFLAGS)" LDFLAGS="$(SAN_LDFLAGS)"
 
 clean:
-	rm -f c/*.o c/muro-httpd c/muro-hello c/muro-stream c/test_classify c/test_conn c/test_sess c/test_render c/test_e2e c/test_admit c/test_body c/test_jwt c/test_json c/test_store c/test_poll c/test_route c/test_tags c/test_hello c/test_serve c/test_workers c/test_http11 c/test_step bench/loadgen fuzz/step_fuzz
+	rm -f c/*.o c/conn.patched.c c/muro-httpd c/muro-hello c/muro-stream c/test_classify c/test_conn c/test_sess c/test_render c/test_e2e c/test_admit c/test_body c/test_jwt c/test_json c/test_store c/test_poll c/test_route c/test_tags c/test_hello c/test_serve c/test_workers c/test_http11 c/test_step bench/loadgen fuzz/step_fuzz
 
 # libFuzzer + ASan + UBSan. clang is fixed here so CC, c-check, and
 # c-sanitize keep using $(CC). Objects are not written into c/.

@@ -29,5 +29,6 @@ c/muro-stream
 /bench/h2o-hello/h2o-hello
 __pycache__/
 *.o
+c/conn.patched.c
 fuzz/step_fuzz
 fuzz/work/
