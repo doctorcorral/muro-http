@@ -1,0 +1,443 @@
+-- Read slice of one HTTP/1.1 connection.
+--
+-- c/step.c is still the step the host calls. This book is the slice
+-- mix muro.check can see: the request line, the headers, a
+-- Content-Length body, and the close that c/step.c takes while it is
+-- still reading. It does not call the kernel or the clock. It does
+-- not render bytes. The handler, the admit wall, and
+-- host_copy_response stay in C.
+--
+-- `--backend c` emits this file as c/generated/step_slice.c with
+-- c_prefix http_step_. The host does not link that object.
+-- c/test_step_slice feeds the same fact and the same buffer to
+-- http_step_stepFact and to muro_http_step and compares the fields
+-- this slice decides.
+--
+-- Fact numbers are c/step.h: 1 accepted, 2 bytes, 3 peer closed,
+-- 4 wrote, 5 write failed, 6 now. `n` on a wrote fact is not an
+-- argument. A wrote while an error span is outstanding closes.
+-- A short write is not this slice.
+--
+-- phase 0 is still reading. phase 1 owes a write span (400, or a
+-- 413/417/501 that classify already finished). phase 2 has closed.
+-- A closed step ignores every later fact: no read, no write, no
+-- status span, no body span. That is the rule the handwritten step
+-- misses when hand_status answers 413, 417, or 501 without moving
+-- the image to phase 4.
+--
+-- span 0 is nothing, 1 is the close status (status_now), 2 is a
+-- write span. cover 1 means this buffer is outside the slice
+-- (chunked, 100 Continue, a tick or a write while still reading,
+-- a finished request that arrived on a peer close). Those are not
+-- decisions this book claims.
+--
+-- Not covered, and not given a matching equation: pipelining, a
+-- pulled body, idle MURO_STEP_NOW, a short write, WRITE_FAILED of a
+-- handler response, keep-alive consume, fuel, and a handler 500.
+import "request.muro"
+
+unboxed data St : Type where
+  st : Π (+ phase : U64) → Π (+ code : U64) → St
+
+unboxed data Out : Type where
+  out : Π (+ phase : U64) → Π (+ code : U64) → Π (+ close : U64) → Π (+ statusNow : U64) → Π (+ readMore : U64) → Π (+ writeMore : U64) → Π (+ span : U64) → Π (+ cover : U64) → Out
+
+def factAccepted : run U64 :=
+  toU64 1
+
+def factBytes : run U64 :=
+  toU64 2
+
+def factPeer : run U64 :=
+  toU64 3
+
+def factWrote : run U64 :=
+  toU64 4
+
+def factFailed : run U64 :=
+  toU64 5
+
+def factNow : run U64 :=
+  toU64 6
+
+def readSt : run St :=
+  st (toU64 0) (toU64 0)
+
+def more : run Out :=
+  out (toU64 0) (toU64 0) (toU64 0) (toU64 0) (toU64 1) (toU64 0) (toU64 0) (toU64 0)
+
+def framed : run Out :=
+  out (toU64 0) (toU64 0) (toU64 0) (toU64 0) (toU64 0) (toU64 0) (toU64 0) (toU64 0)
+
+def outside : run Out :=
+  out (toU64 0) (toU64 0) (toU64 0) (toU64 0) (toU64 0) (toU64 0) (toU64 0) (toU64 1)
+
+def quiet : run Π (+ code : U64) → Out :=
+  λ (+ code : U64) →
+    out (toU64 2) code (toU64 1) (toU64 0) (toU64 0) (toU64 0) (toU64 0) (toU64 0)
+
+def statusNow : run Π (+ code : U64) → Out :=
+  λ (+ code : U64) →
+    out (toU64 2) code (toU64 1) (toU64 1) (toU64 0) (toU64 0) (toU64 1) (toU64 0)
+
+def owe : run Π (+ code : U64) → Out :=
+  λ (+ code : U64) →
+    out (toU64 1) code (toU64 0) (toU64 0) (toU64 0) (toU64 1) (toU64 2) (toU64 0)
+
+def take : run Π (+ o : Out) → St :=
+  λ (+ o : Out) →
+    match o motive (λ _ → St)
+      | out phase code _close _statusNow _readMore _writeMore _span _cover =>
+          st phase code
+
+def spanOf : run Π (+ o : Out) → U64 :=
+  λ (+ o : Out) →
+    match o motive (λ _ → U64)
+      | out _phase _code _close _statusNow _readMore _writeMore span _cover => span
+
+def coverOf : run Π (+ o : Out) → U64 :=
+  λ (+ o : Out) →
+    match o motive (λ _ → U64)
+      | out _phase _code _close _statusNow _readMore _writeMore _span cover => cover
+
+def chunked : run Π (+ s : Slice) → Bool :=
+  λ (+ s : Slice) → u64eq (teCode s) (toU64 1)
+
+def methodUnimpl : run Π (+ s : Slice) → Bool :=
+  λ (+ s : Slice) → u64eq (methodCode s) (toU64 1)
+
+def tooLong : run Π (+ s : Slice) → Π (+ max : U64) → Bool :=
+  λ (+ s : Slice) → λ (+ max : U64) →
+    match (sawCL s) motive (λ _ → Bool)
+      | true => u64lt max (contentLength s)
+      | false => false
+
+def ver11 : run Π (+ s : Slice) → Bool :=
+  λ (+ s : Slice) → spanEq (versionView s) b"HTTP/1.1"
+
+def expectIs : run Π (+ s : Slice) → Π (+ n : U64) → Bool :=
+  λ (+ s : Slice) → λ (+ n : U64) → u64eq (expectCode s) n
+
+-- Chunked is outside this slice, before the status order, so a
+-- chunked TRACE is not claimed as 501. The rest matches
+-- host_in_policy: method code 1 is 501, then Content-Length over
+-- max is 413, then an HTTP/1.1 Expect other than 100-continue is
+-- 417, then 100-continue with a short body is outside.
+-- 9 is outside the slice. 0 is no policy status.
+def policy : run Π (+ s : Slice) → Π (+ max : U64) → U64 :=
+  λ (+ s : Slice) → λ (+ max : U64) →
+    match (chunked s) motive (λ _ → U64)
+      | true => toU64 9
+      | false =>
+          (match (methodUnimpl s) motive (λ _ → U64)
+            | true => toU64 501
+            | false =>
+                (match (tooLong s max) motive (λ _ → U64)
+                  | true => toU64 413
+                  | false =>
+                      (match (and (ver11 s) (expectIs s (toU64 2))) motive (λ _ → U64)
+                        | true => toU64 417
+                        | false =>
+                            (match (and (ver11 s) (and (expectIs s (toU64 1)) (bodyShort s))) motive (λ _ → U64)
+                              | true => toU64 9
+                              | false => toU64 0))))
+
+def isPol : run Π (+ n : U64) → Π (+ c : U64) → Bool :=
+  λ (+ n : U64) → λ (+ c : U64) → u64eq n c
+
+-- reading 1: classify still wants bytes, so a policy status is
+-- status_now and the step closes. reading 0: classify finished, so
+-- the handwritten step answers through the write span.
+def usePol : run Π (+ code : U64) → Π (+ reading : U64) → Out :=
+  λ (+ code : U64) → λ (+ reading : U64) →
+    match (isPol code (toU64 9)) motive (λ _ → Out)
+      | true => outside
+      | false =>
+          (match (isPol code (toU64 0)) motive (λ _ → Out)
+            | true =>
+                (match (u64eq reading (toU64 1)) motive (λ _ → Out)
+                  | true => more
+                  | false => framed)
+            | false =>
+                (match (u64eq reading (toU64 1)) motive (λ _ → Out)
+                  | true => statusNow code
+                  | false => owe code))
+
+-- A finished request on a peer close still goes to the handler.
+-- That half-close is not this slice, unless policy already chose
+-- 413, 417, or 501.
+def finOk : run Π (+ code : U64) → Out :=
+  λ (+ code : U64) →
+    match (isPol code (toU64 0)) motive (λ _ → Out)
+      | true => outside
+      | false =>
+          (match (isPol code (toU64 9)) motive (λ _ → Out)
+            | true => outside
+            | false => owe code)
+
+def onStatus : run Π (+ st : Status) → Π (+ fin : U64) → Π (+ s : Slice) → Π (+ max : U64) → Out :=
+  λ (+ st : Status) → λ (+ fin : U64) → λ (+ s : Slice) → λ (+ max : U64) →
+    match st motive (λ _ → Out)
+      | status-malformed => owe (toU64 400)
+      | status-unimplemented => owe (toU64 501)
+      | status-need-more =>
+          (match (u64eq fin (toU64 1)) motive (λ _ → Out)
+            | true => owe (toU64 400)
+            | false =>
+                (match (headersDone s) motive (λ _ → Out)
+                  | true => usePol (policy s max) (toU64 1)
+                  | false => more))
+      | status-ok =>
+          (match (u64eq fin (toU64 1)) motive (λ _ → Out)
+            | true => finOk (policy s max)
+            | false => usePol (policy s max) (toU64 0))
+
+def onBuf : run Π (+ fin : U64) → Π (+ s : Slice) → Π (+ max : U64) → Out :=
+  λ (+ fin : U64) → λ (+ s : Slice) → λ (+ max : U64) →
+    match (classify s) motive (λ _ → Out)
+      | classified st _keep => onStatus st fin s max
+
+def oweFact : run Π (+ code : U64) → Π (+ fact : U64) → Out :=
+  λ (+ code : U64) → λ (+ fact : U64) →
+    match (u64eq fact factWrote) motive (λ _ → Out)
+      | true => quiet code
+      | false =>
+          (match (u64eq fact factFailed) motive (λ _ → Out)
+            | true => quiet code
+            | false =>
+                (match (u64eq fact factPeer) motive (λ _ → Out)
+                  | true => owe code
+                  | false => outside))
+
+def readFact : run Π (+ fact : U64) → Π (+ s : Slice) → Π (+ max : U64) → Out :=
+  λ (+ fact : U64) → λ (+ s : Slice) → λ (+ max : U64) →
+    match (u64eq fact factAccepted) motive (λ _ → Out)
+      | true => more
+      | false =>
+          (match (u64eq fact factBytes) motive (λ _ → Out)
+            | true => onBuf (toU64 0) s max
+            | false =>
+                (match (u64eq fact factPeer) motive (λ _ → Out)
+                  | true =>
+                      (match (u64eq (sliceLen s) (toU64 0)) motive (λ _ → Out)
+                        | true => quiet (toU64 0)
+                        | false => onBuf (toU64 1) s max)
+                  | false => outside))
+
+def stepFact : run Π (+ st : St) → Π (+ fact : U64) → Π (+ buf : Slice) → Π (+ max : U64) → Out :=
+  λ (+ st : St) → λ (+ fact : U64) → λ (+ buf : Slice) → λ (+ max : U64) →
+    match st motive (λ _ → Out)
+      | st phase code =>
+          (match (u64eq phase (toU64 2)) motive (λ _ → Out)
+            | true => quiet code
+            | false =>
+                (match (u64eq phase (toU64 1)) motive (λ _ → Out)
+                  | true => oweFact code fact
+                  | false => readFact fact buf max))
+
+def lineBuf : run Slice :=
+  b"GET / HT"
+
+def hdrBuf : run Slice :=
+  b"GET / HTTP/1.1\r\nHost: h\r\n"
+
+def getBuf : run Slice :=
+  b"GET / HTTP/1.1\r\nHost: h\r\n\r\n"
+
+def postShort : run Slice :=
+  b"POST / HTTP/1.1\r\nHost: h\r\nContent-Length: 4\r\n\r\n"
+
+def postBody : run Slice :=
+  b"POST / HTTP/1.1\r\nHost: h\r\nContent-Length: 4\r\n\r\nabcd"
+
+def tooBig : run Slice :=
+  b"POST / HTTP/1.1\r\nHost: h\r\nContent-Length: 100\r\n\r\n"
+
+def expectBuf : run Slice :=
+  b"POST / HTTP/1.1\r\nHost: h\r\nExpect: foo\r\nContent-Length: 4\r\n\r\n"
+
+def expectDone : run Slice :=
+  b"POST / HTTP/1.1\r\nHost: h\r\nExpect: foo\r\nContent-Length: 0\r\n\r\n"
+
+def traceBuf : run Slice :=
+  b"TRACE / HTTP/1.1\r\nHost: h\r\nContent-Length: 4\r\n\r\n"
+
+def traceDone : run Slice :=
+  b"TRACE / HTTP/1.1\r\nHost: h\r\n\r\n"
+
+def gzipBuf : run Slice :=
+  b"GET / HTTP/1.1\r\nHost: h\r\nTransfer-Encoding: gzip\r\n\r\n"
+
+def badBuf : run Slice :=
+  b"GET/feed HTTP/1.1\r\n\r\n"
+
+def noHost : run Slice :=
+  b"GET / HTTP/1.1\r\n\r\n"
+
+def chunkBuf : run Slice :=
+  b"POST / HTTP/1.1\r\nHost: h\r\nTransfer-Encoding: chunked\r\n\r\n"
+
+def contBuf : run Slice :=
+  b"POST / HTTP/1.1\r\nHost: h\r\nExpect: 100-continue\r\nContent-Length: 4\r\n\r\n"
+
+def max10 : run U64 :=
+  toU64 10
+
+def maxBig : run U64 :=
+  toU64 8388608
+
+def sawLine : run Out :=
+  stepFact readSt factBytes lineBuf max10
+
+def sawHdr : run Out :=
+  stepFact readSt factBytes hdrBuf max10
+
+def sawGet : run Out :=
+  stepFact readSt factBytes getBuf max10
+
+def sawShort : run Out :=
+  stepFact readSt factBytes postShort max10
+
+def sawBody : run Out :=
+  stepFact readSt factBytes postBody max10
+
+def saw413 : run Out :=
+  stepFact readSt factBytes tooBig max10
+
+def saw413Body : run Out :=
+  stepFact readSt factBytes postBody (toU64 0)
+
+def saw417 : run Out :=
+  stepFact readSt factBytes expectBuf maxBig
+
+def saw417Done : run Out :=
+  stepFact readSt factBytes expectDone maxBig
+
+def saw501 : run Out :=
+  stepFact readSt factBytes traceBuf maxBig
+
+def saw501Done : run Out :=
+  stepFact readSt factBytes traceDone maxBig
+
+def sawGzip : run Out :=
+  stepFact readSt factBytes gzipBuf max10
+
+def sawBad : run Out :=
+  stepFact readSt factBytes badBuf max10
+
+def sawNoHost : run Out :=
+  stepFact readSt factBytes noHost max10
+
+def sawAccept : run Out :=
+  stepFact readSt factAccepted b"" max10
+
+def sawFinEmpty : run Out :=
+  stepFact readSt factPeer b"" max10
+
+def sawFinPartial : run Out :=
+  stepFact readSt factPeer lineBuf max10
+
+def sawFinOver : run Out :=
+  stepFact readSt factPeer tooBig max10
+
+def sawChunk : run Out :=
+  stepFact readSt factBytes chunkBuf max10
+
+def sawCont : run Out :=
+  stepFact readSt factBytes contBuf max10
+
+def sawNow : run Out :=
+  stepFact readSt factNow getBuf max10
+
+def sawWroteRead : run Out :=
+  stepFact readSt factWrote getBuf max10
+
+def closed413 : run St :=
+  take saw413
+
+def closed417 : run St :=
+  take saw417
+
+def closed501 : run St :=
+  take saw501
+
+def closed400 : run St :=
+  take (stepFact (take sawBad) factWrote badBuf max10)
+
+def line-more : evidence {sawLine ≡ more : Out} := refl
+
+def headers-more : evidence {sawHdr ≡ more : Out} := refl
+
+def get-framed : evidence {sawGet ≡ framed : Out} := refl
+
+def cl-short : evidence {sawShort ≡ more : Out} := refl
+
+def cl-body : evidence {sawBody ≡ framed : Out} := refl
+
+def close-413 : evidence {saw413 ≡ statusNow (toU64 413) : Out} := refl
+
+def owe-413 : evidence {saw413Body ≡ owe (toU64 413) : Out} := refl
+
+def close-417 : evidence {saw417 ≡ statusNow (toU64 417) : Out} := refl
+
+def owe-417 : evidence {saw417Done ≡ owe (toU64 417) : Out} := refl
+
+def close-501 : evidence {saw501 ≡ statusNow (toU64 501) : Out} := refl
+
+def owe-501 : evidence {saw501Done ≡ owe (toU64 501) : Out} := refl
+
+def owe-gzip : evidence {sawGzip ≡ owe (toU64 501) : Out} := refl
+
+def owe-400 : evidence {sawBad ≡ owe (toU64 400) : Out} := refl
+
+def owe-400-host : evidence {sawNoHost ≡ owe (toU64 400) : Out} := refl
+
+def accept-read : evidence {sawAccept ≡ more : Out} := refl
+
+def fin-empty : evidence {sawFinEmpty ≡ quiet (toU64 0) : Out} := refl
+
+def fin-partial : evidence {sawFinPartial ≡ owe (toU64 400) : Out} := refl
+
+def fin-oversize : evidence {sawFinOver ≡ owe (toU64 400) : Out} := refl
+
+def chunk-outside : evidence {coverOf sawChunk ≡ toU64 1 : U64} := refl
+
+def continue-outside : evidence {coverOf sawCont ≡ toU64 1 : U64} := refl
+
+def now-outside : evidence {coverOf sawNow ≡ toU64 1 : U64} := refl
+
+def wrote-outside : evidence {coverOf sawWroteRead ≡ toU64 1 : U64} := refl
+
+def owe-wrote : evidence {stepFact (take sawBad) factWrote badBuf max10 ≡ quiet (toU64 400) : Out} := refl
+
+def owe-failed : evidence {stepFact (take sawBad) factFailed badBuf max10 ≡ quiet (toU64 400) : Out} := refl
+
+def owe-peer : evidence {stepFact (take sawBad) factPeer badBuf max10 ≡ owe (toU64 400) : Out} := refl
+
+def after-413-accept : evidence {stepFact closed413 factAccepted tooBig max10 ≡ quiet (toU64 413) : Out} := refl
+
+def after-413-bytes : evidence {stepFact closed413 factBytes getBuf max10 ≡ quiet (toU64 413) : Out} := refl
+
+def after-413-peer : evidence {stepFact closed413 factPeer tooBig max10 ≡ quiet (toU64 413) : Out} := refl
+
+def after-413-wrote : evidence {stepFact closed413 factWrote tooBig max10 ≡ quiet (toU64 413) : Out} := refl
+
+def after-413-failed : evidence {stepFact closed413 factFailed tooBig max10 ≡ quiet (toU64 413) : Out} := refl
+
+def after-413-now : evidence {stepFact closed413 factNow tooBig max10 ≡ quiet (toU64 413) : Out} := refl
+
+def after-417-peer : evidence {stepFact closed417 factPeer expectBuf maxBig ≡ quiet (toU64 417) : Out} := refl
+
+def after-417-bytes : evidence {stepFact closed417 factBytes getBuf maxBig ≡ quiet (toU64 417) : Out} := refl
+
+def after-417-now : evidence {stepFact closed417 factNow expectBuf maxBig ≡ quiet (toU64 417) : Out} := refl
+
+def after-501-peer : evidence {stepFact closed501 factPeer traceBuf maxBig ≡ quiet (toU64 501) : Out} := refl
+
+def after-501-bytes : evidence {stepFact closed501 factBytes getBuf maxBig ≡ quiet (toU64 501) : Out} := refl
+
+def after-501-now : evidence {stepFact closed501 factNow traceBuf maxBig ≡ quiet (toU64 501) : Out} := refl
+
+def after-400-peer : evidence {stepFact closed400 factPeer badBuf max10 ≡ quiet (toU64 400) : Out} := refl
+
+def after-span : evidence {spanOf (stepFact closed413 factPeer tooBig max10) ≡ toU64 0 : U64} := refl

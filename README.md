@@ -869,7 +869,9 @@ views, `findHeader`), `conn.muro`, `session.muro`, `admit.muro`, and
 `render.muro` (`httpRender`, `httpHead`, `httpChunked`, `httpDelim`,
 `httpChunk`, `httpLastChunk`, `httpMalformed`, `httpInternal`,
 `httpNotImplemented`, `httpTooLarge`, `httpExpect`, `httpContinue`).
-`request.muro` also emits `streamTake` and `framedEnd`. The same
+`request.muro` also emits `streamTake` and `framedEnd`.
+`step.muro` emits `c/generated/step_slice.c`, the read slice
+`c/test_step_slice` compares with `c/step.c`. The same
 backend emits the challenge books `decide.muro`, `route.muro`, and
 `body.muro` (`bodyClass`, `textOff`, `textLen`). `--backend fsm`
 emits `family.muro` as `MuroHttp.FamilyFsm`. That backend is the one
@@ -880,9 +882,14 @@ Hand-written core: `c/muro_http.h`, `c/step.h`, `c/step.c`,
 `c/host.c`, `c/host_poll.c`, `c/host_render.c`, `c/host_date.c`,
 `c/host_stream.c`, `c/proto.c`, `c/admit_glue.c`, `c/shim.c`.
 `examples/adapter/mem.c` is the socket-free backend. `c/step.c`
-calls the books. It does not replace them. A later muro step can
-take the same `StepIn` and return the same `StepOut`. The adapter
-stays.
+calls the books. It does not replace them.
+`priv/muro/http/step.muro` is a checked slice of that step, emitted
+as `c/generated/step_slice.c` (`http_step_stepFact`). The host does
+not call it. `c/test_step_slice` feeds the same bytes to both on
+the request line, the headers, a Content-Length body, and the
+close while still reading. After that close the book ignores a
+later fact. `docs/protocol-backend.md` lists what the slice leaves
+out. The adapter stays.
 Hand-written challenge, under `examples/challenge/`: `httpd.c` (main),
 `app.c` (the handler), `route_glue.c`, `store.c` (SQLite), `jwt.c`
 (SHA-256, HMAC-SHA256, base64url, the HS256 check), `json_text.c`

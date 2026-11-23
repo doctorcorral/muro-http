@@ -1,0 +1,5 @@
+-- A span after a 413 close. The step is quiet: span 0.
+-- Checked by test/step_slice_test.exs. Not part of the manifest.
+import "../step.muro"
+
+def span-after-close : evidence {spanOf (stepFact (take (stepFact readSt factBytes tooBig max10)) factPeer tooBig max10) ≡ toU64 1 : U64} := refl

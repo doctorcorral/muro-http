@@ -2,6 +2,18 @@
 
 ## 0.1.0-dev — unreleased
 
+- `priv/muro/http/step.muro` checks a read slice of one HTTP/1.1
+  connection: the request line, the headers, a Content-Length body,
+  and the 400 / 413 / 417 / 501 close while that read is still open.
+  `mix muro.gen` emits `c/generated/step_slice.c`. `c/step.c` stays
+  the function `c/host.c` calls. `c/test_step_slice` compares the
+  two on that slice. After the book closes, a later fact returns
+  no span. `hand_status` in `c/step.c` still leaves the image in
+  read, so the handwritten step can emit another span; the driver
+  prints that and does not require it. 100 Continue, chunked
+  bodies, pipelining, pulled bodies, idle `MURO_STEP_NOW`, short
+  writes, keep-alive consume, fuel, and a handler 500 are not in
+  the slice. The library version stays `0.1.0-dev`.
 - Pin muro `0.22.19` from Hex (`{:muro, "~> 0.22.19"}` in
   `mix.exs`, `muro: "0.22.19"` in `muro.exs`). The library version
   stays `0.1.0-dev`. There is no path dependency. `mix muro.gen`
