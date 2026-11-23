@@ -2,6 +2,12 @@
 
 ## 0.1.0-dev — unreleased
 
+- Closing an epoll connection always drops the cached interest for
+  that fd, even when `EPOLL_CTL_DEL` fails. A reused fd with the
+  same interest then gets a real `ADD` instead of a silent stall.
+  The library version stays `0.1.0-dev`. The pin stays muro
+  `0.22.14`.
+
 - CI type-checks the unique books as a matrix of GitHub-hosted
   jobs, then `mix muro.gen --check --skip-check` compares the
   committed files. A cache keyed on `mix.lock`, `muro.exs`, and
