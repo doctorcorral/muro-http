@@ -1,0 +1,13 @@
+cmd taskset -c 4-7 /home/rcc/Research/muro-http-bench/bench/loadgen --host 127.0.0.1 --port 18182 --concurrency 512 --duration 2 --mode keepalive --method GET
+requests 193229
+errors 0
+err_connect 0
+err_write 0
+err_read 0
+err_parse 0
+non2xx 0
+overflow 310
+elapsed_ms 2008
+rps 96229.58
+p50_us 5434
+p99_us 6995

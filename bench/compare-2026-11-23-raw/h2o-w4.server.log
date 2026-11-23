@@ -1,0 +1,10 @@
+loadavg 10.20 41.56 24.90 1/773 901547
+start taskset -c 0-3 /home/rcc/Research/muro-http-bench/bench/h2o-hello/h2o-hello --port 18182 --threads 4
+h2o-hello: threads 4 reuseport
+listening 127.0.0.1 18182
+listening 127.0.0.1 18182
+listening 127.0.0.1 18182
+listening 127.0.0.1 18182
+preflight h2o GET 200 'text/plain' b'hello\n'
+preflight h2o POST 200 'text/plain' b'hello\n'
+stopped loadavg 205.14 92.33 46.01 10/773 913187

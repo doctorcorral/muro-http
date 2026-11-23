@@ -488,8 +488,36 @@ static uint32_t ep_bits(int read, int write) {
   return ev;
 }
 
+/* Test seam. Unset in production.
+   MURO_HTTP_TEST_EP_FAIL_AFTER=N lets N ctl calls reach epoll_ctl,
+   then fails one call with EIO. */
+static int ep_env_take(const char *name, int *left) {
+  const char *e = getenv(name);
+  char *end = NULL;
+  char buf[16];
+  long v;
+  if (!e || !*e) return 0;
+  errno = 0;
+  v = strtol(e, &end, 10);
+  if (errno || !end || *end || v < 0 || v > 1000000L) return 0;
+  *left = (int)v;
+  if (*left == 0) {
+    unsetenv(name);
+    return 1;
+  }
+  snprintf(buf, sizeof buf, "%d", *left - 1);
+  if (setenv(name, buf, 1) != 0) return 0;
+  return 2;
+}
+
 static int ep_ctl(HostPoll *p, int op, int fd, struct epoll_event *ee) {
   for (;;) {
+    int left = 0;
+    int took = ep_env_take("MURO_HTTP_TEST_EP_FAIL_AFTER", &left);
+    if (took == 1) {
+      errno = EIO;
+      return -1;
+    }
     if (epoll_ctl(p->kq, op, fd, ee) == 0) return 0;
     if (errno == EINTR) continue;
     return -1;
@@ -515,12 +543,23 @@ static int ep_apply(HostPoll *p, int fd, int existed, uint32_t bits) {
 static int ep_watch(HostPoll *p, int fd, int read, int write) {
   int i = find_w(p, fd);
   uint32_t bits = ep_bits(read, write);
-  if (bits && i < 0 && p->wn == p->wcap && grow_w(p) < 0) return -1;
-  if (ep_apply(p, fd, i >= 0, bits) < 0) return -1;
-  if (!read && !write) {
-    if (i >= 0) drop_w(p, i);
+  int rc;
+  /* Steady keep-alive calls this after every request with the same
+     read interest. The stored bits match the last successful ctl,
+     so a repeat is not a new registration. */
+  if (bits && i >= 0 && p->w[i].read == read && p->w[i].write == write)
     return 0;
+  if (bits && i < 0 && p->wn == p->wcap && grow_w(p) < 0) return -1;
+  rc = ep_apply(p, fd, i >= 0, bits);
+  if (!read && !write) {
+    /* Drop the row even when delete fails. close_slot closes the
+       fd after this returns, and a later socket can reuse the
+       number. A stale row whose interests already match would
+       skip EPOLL_CTL_ADD, so the new socket would not be watched. */
+    if (i >= 0) drop_w(p, i);
+    return rc < 0 ? -1 : 0;
   }
+  if (rc < 0) return -1;
   if (i >= 0) {
     p->w[i].read = read;
     p->w[i].write = write;

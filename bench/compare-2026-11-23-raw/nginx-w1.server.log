@@ -1,0 +1,5 @@
+loadavg 6.10 4.28 3.46 1/773 866528
+start taskset -c 0 /home/rcc/opt/nginx/sbin/nginx -c /home/rcc/Research/muro-http-bench/bench/compare-2026-11-23-raw/nginx-w1.conf -p /tmp/muro-http-bench-nginx-w1
+preflight nginx GET 200 'text/plain' b'hello\n'
+preflight nginx POST 200 'text/plain' b'hello\n'
+stopped loadavg 2.64 3.39 3.26 1/773 878243

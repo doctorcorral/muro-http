@@ -431,10 +431,9 @@ done:
   host_poll_close(p);
 }
 
-#if defined(__APPLE__)
-static int kqueue_backend(HostPoll *p) {
+static int named_backend(HostPoll *p, const char *name) {
   const char *b = host_poll_backend(p);
-  return b && strcmp(b, "kqueue") == 0;
+  return b && strcmp(b, name) == 0;
 }
 
 /* Place `want` at fd number `num`. The peer comes back in *peer. */
@@ -470,9 +469,15 @@ static int saw_read(HostPoll *p, int fd) {
   return 0;
 }
 
-/* Close the watched fd first so the knote is gone, then unwatch.
+static const char *ctl_fail_env(HostPoll *p) {
+  if (named_backend(p, "kqueue")) return "MURO_HTTP_TEST_KQ_FAIL_AFTER";
+  if (named_backend(p, "epoll")) return "MURO_HTTP_TEST_EP_FAIL_AFTER";
+  return NULL;
+}
+
+/* Close the watched fd first so the kernel entry is gone, then unwatch.
    The row has to be dropped even though delete fails, and the
-   reused number has to get a real EV_ADD. */
+   reused number has to get a real ADD. */
 static void check_fd_reuse(void) {
   HostPoll *p = host_poll_open();
   int sp[2] = {-1, -1};
@@ -482,7 +487,7 @@ static void check_fd_reuse(void) {
     fail("reuse", "open");
     return;
   }
-  if (!kqueue_backend(p)) {
+  if (!ctl_fail_env(p)) {
     host_poll_close(p);
     return;
   }
@@ -517,7 +522,7 @@ static void check_fd_reuse(void) {
 }
 
 /* A failed delete still drops the row. FAIL_AFTER=0 fails that
-   delete with EIO before kevent. */
+   delete with EIO before the kernel call. */
 static void check_fd_reuse_fail(void) {
   HostPoll *p = host_poll_open();
   int sp[2] = {-1, -1};
@@ -525,11 +530,13 @@ static void check_fd_reuse_fail(void) {
   int fd;
   int held = -1;
   int rc;
+  const char *fail_env;
   if (!p) {
     fail("reuse-fail", "open");
     return;
   }
-  if (!kqueue_backend(p)) {
+  fail_env = ctl_fail_env(p);
+  if (!fail_env) {
     host_poll_close(p);
     return;
   }
@@ -544,9 +551,9 @@ static void check_fd_reuse_fail(void) {
     fail("reuse-fail", "watch");
     goto done;
   }
-  setenv("MURO_HTTP_TEST_KQ_FAIL_AFTER", "0", 1);
+  setenv(fail_env, "0", 1);
   rc = host_poll_watch(p, fd, 0, 0);
-  unsetenv("MURO_HTTP_TEST_KQ_FAIL_AFTER");
+  unsetenv(fail_env);
   if (rc == 0) {
     fail("reuse-fail", "delete succeeded");
     goto done;
@@ -565,6 +572,7 @@ static void check_fd_reuse_fail(void) {
 
 done:
   unsetenv("MURO_HTTP_TEST_KQ_FAIL_AFTER");
+  unsetenv("MURO_HTTP_TEST_EP_FAIL_AFTER");
   unsetenv("MURO_HTTP_TEST_KQ_EINTR");
   if (p && held >= 0) host_poll_watch(p, held, 0, 0);
   if (held >= 0) close(held);
@@ -572,6 +580,50 @@ done:
   if (sp[1] >= 0) close(sp[1]);
   if (peer >= 0) close(peer);
   host_poll_close(p);
+}
+
+/* A second watch with the same interest must not issue a ctl.
+   FAIL_AFTER=0 would fail that ctl. The socket must still be
+   watched afterwards. */
+static void check_noop_skip(void) {
+  HostPoll *p = host_poll_open();
+  int sp[2] = {-1, -1};
+  int rc;
+  const char *fail_env;
+  if (!p) {
+    fail("skip", "open");
+    return;
+  }
+  fail_env = ctl_fail_env(p);
+  if (!fail_env) {
+    host_poll_close(p);
+    return;
+  }
+  if (socketpair(AF_UNIX, SOCK_STREAM, 0, sp) < 0) {
+    fail("skip", "socketpair");
+    host_poll_close(p);
+    return;
+  }
+  if (host_poll_watch(p, sp[0], 1, 0) < 0) {
+    fail("skip", "watch");
+    close_pair(sp[0], sp[1]);
+    host_poll_close(p);
+    return;
+  }
+  setenv(fail_env, "0", 1);
+  rc = host_poll_watch(p, sp[0], 1, 0);
+  unsetenv(fail_env);
+  if (rc != 0) fail("skip", "redundant ctl");
+  if (write(sp[1], "z", 1) != 1) fail("skip", "write");
+  if (!saw_read(p, sp[0])) fail("skip", "missed");
+  host_poll_watch(p, sp[0], 0, 0);
+  close_pair(sp[0], sp[1]);
+  host_poll_close(p);
+}
+
+#if defined(__APPLE__)
+static int kqueue_backend(HostPoll *p) {
+  return named_backend(p, "kqueue");
 }
 
 static void check_kq_eintr(void) {
@@ -722,12 +774,16 @@ int main(void) {
   run_suite("kqueue");
   check_fd_reuse();
   check_fd_reuse_fail();
+  check_noop_skip();
   check_kq_eintr();
   check_kq_partial();
   check_kq_rollback_fail();
   reject("epoll");
 #elif defined(__linux__)
   run_suite("epoll");
+  check_fd_reuse();
+  check_fd_reuse_fail();
+  check_noop_skip();
   reject("kqueue");
 #endif
   reject("select");
