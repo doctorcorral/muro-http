@@ -2,6 +2,16 @@
 
 ## 0.1.0-dev — unreleased
 
+- After the step has closed the connection, a later fact returns
+  close with no new span. 413, 417, and 501 used to classify the
+  same buffer again and write a second response.
+  `examples/adapter/mem.c` checks those paths. The library version
+  stays `0.1.0-dev`. The pin stays muro `0.22.14`.
+- `make fuzz` builds `fuzz/step_fuzz` with clang, ASan, UBSan,
+  and libFuzzer. It drives `muro_http_step` with fact scripts
+  seeded from the adapter and protocol tests. It does not change
+  `CC` or `c-check`. The library version stays `0.1.0-dev`. The
+  pin stays muro `0.22.14`.
 - SIGINT and SIGTERM write a self-pipe. A wait that already
   passed the stop-flag check still wakes, and the parent reaps
   on that pipe plus SIGCHLD instead of a blocking `waitpid`
