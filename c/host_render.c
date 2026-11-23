@@ -42,7 +42,32 @@ static int owned_name(const uint8_t *p, size_t n) {
          name_is(p, n, "transfer-encoding") || name_is(p, n, "date");
 }
 
-/* 0 keeps *out (malloc'd, or NULL when nothing remains). -1 rejects. */
+/* A well-formed block that drops nothing is already the bytes httpRender
+   should see. The caller then does not free it. */
+static int extra_passthrough(const uint8_t *extra, size_t n) {
+  size_t i = 0;
+  if (!extra || n == 0) return 0;
+  while (i < n) {
+    size_t start = i;
+    size_t colon;
+    int saw = 0;
+    while (i < n && extra[i] != '\r' && extra[i] != '\n') i++;
+    if (i == start || i + 1 >= n || extra[i] != '\r' || extra[i + 1] != '\n') return 0;
+    for (colon = start; colon < i; colon++) {
+      if (extra[colon] == ':') {
+        saw = 1;
+        break;
+      }
+      if (extra[colon] == ' ' || extra[colon] == '\t') return 0;
+    }
+    if (!saw || colon == start || owned_name(extra + start, colon - start)) return 0;
+    i += 2;
+  }
+  return 1;
+}
+
+/* 0 keeps *out (malloc'd, the caller's bytes, or NULL when nothing
+   remains). -1 rejects. */
 static int filter_extra(const uint8_t *extra, size_t n, uint8_t **out, size_t *out_n) {
   size_t i = 0;
   size_t used = 0;
@@ -50,6 +75,11 @@ static int filter_extra(const uint8_t *extra, size_t n, uint8_t **out, size_t *o
   *out = NULL;
   *out_n = 0;
   if (!extra || n == 0) return 0;
+  if (extra_passthrough(extra, n)) {
+    *out = (uint8_t *)extra;
+    *out_n = n;
+    return 0;
+  }
   buf = malloc(n + 2);
   if (!buf) return -1;
   while (i < n) {
@@ -136,7 +166,7 @@ size_t host_copy_response(uint8_t *dst, size_t cap, uint64_t status, const uint8
   msg = httpRender(status, as_slice(reason, reason_n), as_slice(date, date_n),
                    as_slice(filtered, filtered_n), as_slice(body, body_n), keep, omit);
   n = copy_out(dst, cap, msg, got);
-  free(filtered);
+  if (filtered != extra) free(filtered);
   return n;
 }
 
@@ -210,7 +240,7 @@ size_t host_copy_head(uint8_t *dst, size_t cap, uint64_t status, const uint8_t *
   msg = httpHead(status, as_slice(reason, reason_n), as_slice(date, date_n), as_slice(filtered, filtered_n),
                  nlen, keep);
   n = copy_out(dst, cap, msg, got);
-  free(filtered);
+  if (filtered != extra) free(filtered);
   return n;
 }
 
@@ -228,7 +258,7 @@ size_t host_copy_chunked(uint8_t *dst, size_t cap, uint64_t status, const uint8_
   msg = httpChunked(status, as_slice(reason, reason_n), as_slice(date, date_n),
                     as_slice(filtered, filtered_n), keep);
   n = copy_out(dst, cap, msg, got);
-  free(filtered);
+  if (filtered != extra) free(filtered);
   return n;
 }
 
@@ -245,7 +275,7 @@ size_t host_copy_delim(uint8_t *dst, size_t cap, uint64_t status, const uint8_t 
   }
   msg = httpDelim(status, as_slice(reason, reason_n), as_slice(date, date_n), as_slice(filtered, filtered_n));
   n = copy_out(dst, cap, msg, got);
-  free(filtered);
+  if (filtered != extra) free(filtered);
   return n;
 }
 
