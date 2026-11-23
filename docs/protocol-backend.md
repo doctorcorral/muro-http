@@ -291,7 +291,12 @@ the response into the caller send buffer. The book does not render
 those bytes.
 
 Once the book has closed, every later fact is ignored. No second
-span. `c/test_step_slice` feeds the same buffer to both functions
+span. `priv/muro/http/neg/step_span.muro` claims a span after the
+413 close. It is not in `muro.exs`. `mix muro.check --fuel 5000000`
+on that file refuses `span-after-close`. `mix test` does not load
+it: the load checks `step.muro`, then checks the flattened book
+again, and that second pass does not finish inside the suite.
+`c/test_step_slice` feeds the same buffer to both functions
 on that slice. On the `status_now` close, `hand_status` in
 `c/step.c` leaves the image in read, so a later fact can still
 emit a span. The driver prints that line and requires the book to

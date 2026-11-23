@@ -8,7 +8,10 @@
   `mix muro.gen` emits `c/generated/step_slice.c`. `c/step.c` stays
   the function `c/host.c` calls. `c/test_step_slice` compares the
   two on that slice. After the book closes, a later fact returns
-  no span. `hand_status` in `c/step.c` still leaves the image in
+  no span. `priv/muro/http/neg/step_span.muro` claims a span after
+  the 413 close. `mix muro.check --fuel 5000000` on that file
+  refuses it. `mix test` does not load it. `hand_status` in
+  `c/step.c` still leaves the image in
   read, so the handwritten step can emit another span; the driver
   prints that and does not require it. 100 Continue, chunked
   bodies, pipelining, pulled bodies, idle `MURO_STEP_NOW`, short

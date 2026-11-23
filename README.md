@@ -888,8 +888,10 @@ as `c/generated/step_slice.c` (`http_step_stepFact`). The host does
 not call it. `c/test_step_slice` feeds the same bytes to both on
 the request line, the headers, a Content-Length body, and the
 close while still reading. After that close the book ignores a
-later fact. `docs/protocol-backend.md` lists what the slice leaves
-out. The adapter stays.
+later fact. `priv/muro/http/neg/step_span.muro` claims a span
+after the 413 close; `mix muro.check` refuses it, and `mix test`
+does not load that file. `docs/protocol-backend.md` lists what
+the slice leaves out. The adapter stays.
 Hand-written challenge, under `examples/challenge/`: `httpd.c` (main),
 `app.c` (the handler), `route_glue.c`, `store.c` (SQLite), `jwt.c`
 (SHA-256, HMAC-SHA256, base64url, the HS256 check), `json_text.c`
