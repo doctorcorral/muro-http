@@ -2,6 +2,9 @@
 
 ## 0.1.0-dev — unreleased
 
+- `make c-conformance` runs `c/test_conformance.py` against
+  `c/muro-hello` on epoll. The library version stays
+  `0.1.0-dev`. The pin stays muro `0.22.14`.
 - A header block past 16384 bytes is 414 when the request line
   itself passes that cap, and 431 otherwise. A shorter malformed
   request stays 400. `examples/adapter/mem.c` checks the two
