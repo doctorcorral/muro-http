@@ -1,0 +1,924 @@
+HEAD 09d3493c810a42aea330fb208423bc60c842a50b
+DATE Sun Nov 22 23:44:47 CST 2026
+UNAME Darwin 192.168.0.129 24.6.0 Darwin Kernel Version 24.6.0: Mon Jan 19 22:01:58 PST 2026; root:xnu-11417.140.69.708.3~1/RELEASE_ARM64_T6041 arm64
+MODEL Mac16,11 NCPU 12 MEM 25769803776
+UPTIME 23:44  up 163 days,  2:47, 3 users, load averages: 1.48 3.48 3.25
+PAGESIZE 16384
+VMSTAT_START
+Mach Virtual Memory Statistics: (page size of 16384 bytes)
+Pages free:                                4047.
+Pages active:                            328708.
+Pages inactive:                          328988.
+Pages speculative:                          431.
+Pages throttled:                              0.
+Pages wired down:                        196423.
+Pages purgeable:                             29.
+"Translation faults":              415960596466.
+Pages copy-on-write:                 3693833473.
+Pages zero filled:                  57722791935.
+Pages reactivated:                 123207962310.
+Pages purged:                        3109148642.
+File-backed pages:                       149965.
+Anonymous pages:                         508162.
+Pages stored in compressor:             2568147.
+Pages occupied by compressor:            679504.
+Decompressions:                    204472638765.
+Compressions:                      220426704741.
+Pageins:                            28555644910.
+Pageouts:                              51243109.
+Swapins:                             1374253807.
+Swapouts:                            1469121442.
+DOCKER
+muro-mac-2 Up 6 days
+muro-mac-1 Up 6 days
+BEAM
+85656   8224 /opt/homebrew/Cellar/erlang/28.1/lib/erlang/erts-16.1/bin/beam.smp -- -root /opt/homebrew/Cellar/erlang/28.1/lib/erlang -bindir /opt/homebrew/Cellar/erlang/28.1/lib/erlang/erts-16.1/bin -progname erl -- -home /Users/rcc -- -noshell -elixir_root /opt/homebrew/Cellar/elixir/1.18.4/lib/elixir/bin/../lib -pa /opt/homebrew/Cellar/elixir/1.18.4/lib/elixir/bin/../lib/elixir/ebin -s elixir start_cli -- -- -extra /opt/homebrew/bin/mix phx.server
+START Sun Nov 22 23:44:47 CST 2026
+===== CONFIG poll1 =====
+CMD ./c/muro-hello --bind 127.0.0.1 --port 18180 --max-connections 1024 --idle-ms 60000 --workers 1 --wait poll
+FREE Pages free:                                3638.
+UP 23:44  up 163 days,  2:47, 3 users, load averages: 1.48 3.48 3.25
+--- server stderr after listen ---
+muro-hello: wait poll
+listening 127.0.0.1 18180
+--- poll1 keepalive c=8 warmup ---
+FREE Pages free:                                3753.
+requests 115873
+errors 0
+err_connect 0
+err_write 0
+err_read 0
+err_parse 0
+non2xx 0
+overflow 0
+elapsed_ms 2000
+rps 57936.50
+p50_us 120
+p99_us 250
+--- poll1 keepalive c=8 run 1 ---
+FREE Pages free:                                3851.
+requests 293906
+errors 0
+err_connect 0
+err_write 0
+err_read 0
+err_parse 0
+non2xx 0
+overflow 0
+elapsed_ms 5000
+rps 58781.20
+p50_us 119
+p99_us 244
+--- poll1 keepalive c=8 run 2 ---
+FREE Pages free:                                3537.
+requests 294369
+errors 0
+err_connect 0
+err_write 0
+err_read 0
+err_parse 0
+non2xx 0
+overflow 0
+elapsed_ms 5000
+rps 58873.80
+p50_us 119
+p99_us 245
+--- poll1 keepalive c=8 run 3 ---
+FREE Pages free:                                4173.
+requests 294338
+errors 0
+err_connect 0
+err_write 0
+err_read 0
+err_parse 0
+non2xx 0
+overflow 0
+elapsed_ms 5000
+rps 58867.60
+p50_us 119
+p99_us 243
+--- server stderr end poll1 ---
+muro-hello: wait poll
+listening 127.0.0.1 18180
+===== END poll1 =====
+===== CONFIG kq1 =====
+CMD ./c/muro-hello --bind 127.0.0.1 --port 18180 --max-connections 1024 --idle-ms 60000 --workers 1 --wait kqueue
+FREE Pages free:                                3643.
+UP 23:45  up 163 days,  2:48, 3 users, load averages: 1.70 3.40 3.22
+--- server stderr after listen ---
+muro-hello: wait kqueue
+listening 127.0.0.1 18180
+--- kq1 keepalive c=8 warmup ---
+FREE Pages free:                                3771.
+requests 117436
+errors 0
+err_connect 0
+err_write 0
+err_read 0
+err_parse 0
+non2xx 0
+overflow 0
+elapsed_ms 2000
+rps 58718.00
+p50_us 119
+p99_us 246
+--- kq1 keepalive c=8 run 1 ---
+FREE Pages free:                                4211.
+requests 296776
+errors 0
+err_connect 0
+err_write 0
+err_read 0
+err_parse 0
+non2xx 0
+overflow 0
+elapsed_ms 5000
+rps 59355.20
+p50_us 118
+p99_us 241
+--- kq1 keepalive c=8 run 2 ---
+FREE Pages free:                                3997.
+requests 296920
+errors 0
+err_connect 0
+err_write 0
+err_read 0
+err_parse 0
+non2xx 0
+overflow 0
+elapsed_ms 5000
+rps 59384.00
+p50_us 118
+p99_us 242
+--- kq1 keepalive c=8 run 3 ---
+FREE Pages free:                                3644.
+requests 295647
+errors 0
+err_connect 0
+err_write 0
+err_read 0
+err_parse 0
+non2xx 0
+overflow 0
+elapsed_ms 5000
+rps 59129.40
+p50_us 118
+p99_us 242
+--- kq1 keepalive c=32 warmup ---
+FREE Pages free:                                3980.
+requests 119629
+errors 0
+err_connect 0
+err_write 0
+err_read 0
+err_parse 0
+non2xx 0
+overflow 0
+elapsed_ms 2000
+rps 59814.50
+p50_us 518
+p99_us 1041
+--- kq1 keepalive c=32 run 1 ---
+FREE Pages free:                                3774.
+requests 299175
+errors 0
+err_connect 0
+err_write 0
+err_read 0
+err_parse 0
+non2xx 0
+overflow 0
+elapsed_ms 5000
+rps 59835.00
+p50_us 518
+p99_us 1040
+--- kq1 keepalive c=32 run 2 ---
+FREE Pages free:                                3720.
+requests 299520
+errors 0
+err_connect 0
+err_write 0
+err_read 0
+err_parse 0
+non2xx 0
+overflow 0
+elapsed_ms 5000
+rps 59904.00
+p50_us 518
+p99_us 1039
+--- kq1 keepalive c=32 run 3 ---
+FREE Pages free:                                3752.
+requests 299649
+errors 0
+err_connect 0
+err_write 0
+err_read 0
+err_parse 0
+non2xx 0
+overflow 0
+elapsed_ms 5000
+rps 59929.80
+p50_us 518
+p99_us 1039
+--- kq1 keepalive c=128 warmup ---
+FREE Pages free:                                3821.
+requests 119364
+errors 0
+err_connect 0
+err_write 0
+err_read 0
+err_parse 0
+non2xx 0
+overflow 0
+elapsed_ms 2002
+rps 59622.38
+p50_us 2145
+p99_us 2235
+--- kq1 keepalive c=128 run 1 ---
+FREE Pages free:                                4155.
+requests 298131
+errors 0
+err_connect 0
+err_write 0
+err_read 0
+err_parse 0
+non2xx 0
+overflow 0
+elapsed_ms 5002
+rps 59602.36
+p50_us 2146
+p99_us 2245
+--- kq1 keepalive c=128 run 2 ---
+FREE Pages free:                                3835.
+requests 297734
+errors 0
+err_connect 0
+err_write 0
+err_read 0
+err_parse 0
+non2xx 0
+overflow 0
+elapsed_ms 5002
+rps 59522.99
+p50_us 2148
+p99_us 2268
+--- kq1 keepalive c=128 run 3 ---
+FREE Pages free:                                4434.
+requests 298133
+errors 0
+err_connect 0
+err_write 0
+err_read 0
+err_parse 0
+non2xx 0
+overflow 0
+elapsed_ms 5002
+rps 59602.76
+p50_us 2146
+p99_us 2255
+--- server stderr end kq1 ---
+muro-hello: wait kqueue
+listening 127.0.0.1 18180
+===== END kq1 =====
+===== CONFIG kq4 =====
+CMD ./c/muro-hello --bind 127.0.0.1 --port 18180 --max-connections 1024 --idle-ms 60000 --workers 4 --wait kqueue
+FREE Pages free:                                4128.
+UP 23:45  up 163 days,  2:49, 3 users, load averages: 2.14 3.26 3.18
+--- server stderr after listen ---
+muro-hello: wait kqueue
+muro-hello: wait kqueue
+muro-hello: wait kqueue
+muro-hello: workers 4 handoff
+listening 127.0.0.1 18180
+muro-hello: wait kqueue
+--- kq4 keepalive c=8 warmup ---
+FREE Pages free:                                4006.
+requests 323319
+errors 0
+err_connect 0
+err_write 0
+err_read 0
+err_parse 0
+non2xx 0
+overflow 0
+elapsed_ms 2000
+rps 161659.50
+p50_us 48
+p99_us 74
+--- kq4 keepalive c=8 run 1 ---
+FREE Pages free:                                4385.
+requests 813684
+errors 0
+err_connect 0
+err_write 0
+err_read 0
+err_parse 0
+non2xx 0
+overflow 0
+elapsed_ms 5000
+rps 162736.80
+p50_us 48
+p99_us 69
+--- kq4 keepalive c=8 run 2 ---
+FREE Pages free:                                3880.
+requests 816159
+errors 0
+err_connect 0
+err_write 0
+err_read 0
+err_parse 0
+non2xx 0
+overflow 0
+elapsed_ms 5000
+rps 163231.80
+p50_us 48
+p99_us 69
+--- kq4 keepalive c=8 run 3 ---
+FREE Pages free:                                3811.
+requests 815081
+errors 0
+err_connect 0
+err_write 0
+err_read 0
+err_parse 0
+non2xx 0
+overflow 0
+elapsed_ms 5000
+rps 163016.20
+p50_us 48
+p99_us 69
+--- kq4 keepalive c=32 warmup ---
+FREE Pages free:                                4111.
+requests 371650
+errors 0
+err_connect 0
+err_write 0
+err_read 0
+err_parse 0
+non2xx 0
+overflow 0
+elapsed_ms 2000
+rps 185825.00
+p50_us 167
+p99_us 306
+--- kq4 keepalive c=32 run 1 ---
+FREE Pages free:                                4009.
+requests 929800
+errors 0
+err_connect 0
+err_write 0
+err_read 0
+err_parse 0
+non2xx 0
+overflow 0
+elapsed_ms 5000
+rps 185960.00
+p50_us 168
+p99_us 305
+--- kq4 keepalive c=32 run 2 ---
+FREE Pages free:                                4275.
+requests 930651
+errors 0
+err_connect 0
+err_write 0
+err_read 0
+err_parse 0
+non2xx 0
+overflow 0
+elapsed_ms 5000
+rps 186130.20
+p50_us 167
+p99_us 306
+--- kq4 keepalive c=32 run 3 ---
+FREE Pages free:                                4009.
+requests 930352
+errors 0
+err_connect 0
+err_write 0
+err_read 0
+err_parse 0
+non2xx 0
+overflow 0
+elapsed_ms 5000
+rps 186070.40
+p50_us 168
+p99_us 304
+--- kq4 keepalive c=128 warmup ---
+FREE Pages free:                                3824.
+requests 371285
+errors 0
+err_connect 0
+err_write 0
+err_read 0
+err_parse 0
+non2xx 0
+overflow 0
+elapsed_ms 2001
+rps 185549.73
+p50_us 677
+p99_us 1263
+--- kq4 keepalive c=128 run 1 ---
+FREE Pages free:                                3561.
+requests 931244
+errors 0
+err_connect 0
+err_write 0
+err_read 0
+err_parse 0
+non2xx 0
+overflow 0
+elapsed_ms 5001
+rps 186211.56
+p50_us 677
+p99_us 1227
+--- kq4 keepalive c=128 run 2 ---
+FREE Pages free:                                3933.
+requests 931158
+errors 0
+err_connect 0
+err_write 0
+err_read 0
+err_parse 0
+non2xx 0
+overflow 0
+elapsed_ms 5001
+rps 186194.36
+p50_us 678
+p99_us 1230
+--- kq4 keepalive c=128 run 3 ---
+FREE Pages free:                                3871.
+requests 925812
+errors 0
+err_connect 0
+err_write 0
+err_read 0
+err_parse 0
+non2xx 0
+overflow 0
+elapsed_ms 5001
+rps 185125.37
+p50_us 676
+p99_us 1272
+--- kq4 close c=1 warmup ---
+FREE Pages free:                                3993.
+requests 28165
+errors 0
+err_connect 0
+err_write 0
+err_read 0
+err_parse 0
+non2xx 0
+overflow 0
+elapsed_ms 2000
+rps 14082.50
+p50_us 38
+p99_us 46
+--- kq4 close c=1 run 1 ---
+FREE Pages free:                                4031.
+requests 72833
+errors 0
+err_connect 0
+err_write 0
+err_read 0
+err_parse 0
+non2xx 0
+overflow 0
+elapsed_ms 5000
+rps 14566.60
+p50_us 38
+p99_us 44
+--- kq4 close c=1 run 2 ---
+FREE Pages free:                                4205.
+requests 72853
+errors 0
+err_connect 0
+err_write 0
+err_read 0
+err_parse 0
+non2xx 0
+overflow 0
+elapsed_ms 5000
+rps 14570.60
+p50_us 38
+p99_us 44
+--- kq4 close c=1 run 3 ---
+FREE Pages free:                                4357.
+requests 72673
+errors 0
+err_connect 0
+err_write 0
+err_read 0
+err_parse 0
+non2xx 0
+overflow 0
+elapsed_ms 5000
+rps 14534.60
+p50_us 38
+p99_us 45
+--- kq4 close c=8 warmup ---
+FREE Pages free:                                5376.
+requests 75832
+errors 0
+err_connect 0
+err_write 0
+err_read 0
+err_parse 0
+non2xx 0
+overflow 0
+elapsed_ms 2000
+rps 37916.00
+p50_us 83
+p99_us 135
+--- kq4 close c=8 run 1 ---
+FREE Pages free:                                4131.
+requests 189151
+errors 0
+err_connect 0
+err_write 0
+err_read 0
+err_parse 0
+non2xx 0
+overflow 0
+elapsed_ms 5000
+rps 37830.20
+p50_us 83
+p99_us 134
+--- kq4 close c=8 run 2 ---
+FREE Pages free:                                3963.
+requests 194156
+errors 0
+err_connect 0
+err_write 0
+err_read 0
+err_parse 0
+non2xx 0
+overflow 0
+elapsed_ms 5000
+rps 38831.20
+p50_us 83
+p99_us 132
+--- kq4 close c=8 run 3 ---
+FREE Pages free:                                3846.
+requests 191757
+errors 0
+err_connect 0
+err_write 0
+err_read 0
+err_parse 0
+non2xx 0
+overflow 0
+elapsed_ms 5000
+rps 38351.40
+p50_us 83
+p99_us 134
+--- kq4 close c=32 warmup ---
+FREE Pages free:                                4605.
+requests 72343
+errors 0
+err_connect 0
+err_write 0
+err_read 0
+err_parse 0
+non2xx 0
+overflow 0
+elapsed_ms 2000
+rps 36171.50
+p50_us 354
+p99_us 538
+--- kq4 close c=32 run 1 ---
+FREE Pages free:                                4397.
+requests 189563
+errors 0
+err_connect 0
+err_write 0
+err_read 0
+err_parse 0
+non2xx 0
+overflow 0
+elapsed_ms 5000
+rps 37912.60
+p50_us 347
+p99_us 505
+--- kq4 close c=32 run 2 ---
+FREE Pages free:                                4168.
+requests 195877
+errors 0
+err_connect 0
+err_write 0
+err_read 0
+err_parse 0
+non2xx 0
+overflow 0
+elapsed_ms 5000
+rps 39175.40
+p50_us 342
+p99_us 478
+--- kq4 close c=32 run 3 ---
+FREE Pages free:                                3758.
+requests 198281
+errors 0
+err_connect 0
+err_write 0
+err_read 0
+err_parse 0
+non2xx 0
+overflow 0
+elapsed_ms 5000
+rps 39656.20
+p50_us 342
+p99_us 480
+--- kq4 close c=128 warmup ---
+FREE Pages free:                                3868.
+requests 70972
+errors 0
+err_connect 0
+err_write 0
+err_read 0
+err_parse 0
+non2xx 0
+overflow 0
+elapsed_ms 2001
+rps 35468.27
+p50_us 1502
+p99_us 2382
+--- kq4 close c=128 run 1 ---
+FREE Pages free:                                4276.
+requests 174623
+errors 0
+err_connect 0
+err_write 0
+err_read 0
+err_parse 0
+non2xx 0
+overflow 0
+elapsed_ms 5001
+rps 34917.62
+p50_us 1494
+p99_us 2317
+--- kq4 close c=128 run 2 ---
+FREE Pages free:                                4728.
+requests 167369
+errors 0
+err_connect 0
+err_write 0
+err_read 0
+err_parse 0
+non2xx 0
+overflow 0
+elapsed_ms 5001
+rps 33467.11
+p50_us 1515
+p99_us 2395
+--- kq4 close c=128 run 3 ---
+FREE Pages free:                                4424.
+requests 177515
+errors 0
+err_connect 0
+err_write 0
+err_read 0
+err_parse 0
+non2xx 0
+overflow 0
+elapsed_ms 5002
+rps 35488.80
+p50_us 1505
+p99_us 2343
+--- server stderr end kq4 ---
+muro-hello: wait kqueue
+muro-hello: wait kqueue
+muro-hello: wait kqueue
+muro-hello: workers 4 handoff
+listening 127.0.0.1 18180
+muro-hello: wait kqueue
+muro-hello: handoff drops 0
+===== END kq4 =====
+===== CONFIG kq12 =====
+CMD ./c/muro-hello --bind 127.0.0.1 --port 18180 --max-connections 1024 --idle-ms 60000 --workers 12 --wait kqueue
+FREE Pages free:                                7044.
+UP 23:47  up 163 days,  2:51, 3 users, load averages: 7.21 4.69 3.74
+--- server stderr after listen ---
+muro-hello: wait kqueue
+muro-hello: wait kqueue
+muro-hello: wait kqueue
+muro-hello: wait kqueue
+muro-hello: wait kqueue
+muro-hello: wait kqueue
+muro-hello: wait kqueue
+muro-hello: wait kqueue
+muro-hello: wait kqueue
+muro-hello: wait kqueue
+muro-hello: workers 12 handoff
+listening 127.0.0.1 18180
+muro-hello: wait kqueue
+muro-hello: wait kqueue
+--- kq12 keepalive c=8 warmup ---
+FREE Pages free:                                6938.
+requests 307648
+errors 0
+err_connect 0
+err_write 0
+err_read 0
+err_parse 0
+non2xx 0
+overflow 0
+elapsed_ms 2000
+rps 153824.00
+p50_us 51
+p99_us 74
+--- kq12 keepalive c=8 run 1 ---
+FREE Pages free:                                7451.
+requests 770939
+errors 0
+err_connect 0
+err_write 0
+err_read 0
+err_parse 0
+non2xx 0
+overflow 0
+elapsed_ms 5000
+rps 154187.80
+p50_us 51
+p99_us 74
+--- kq12 keepalive c=8 run 2 ---
+FREE Pages free:                                6984.
+requests 771274
+errors 0
+err_connect 0
+err_write 0
+err_read 0
+err_parse 0
+non2xx 0
+overflow 0
+elapsed_ms 5000
+rps 154254.80
+p50_us 51
+p99_us 74
+--- kq12 keepalive c=8 run 3 ---
+FREE Pages free:                                7214.
+requests 771307
+errors 0
+err_connect 0
+err_write 0
+err_read 0
+err_parse 0
+non2xx 0
+overflow 0
+elapsed_ms 5000
+rps 154261.40
+p50_us 51
+p99_us 73
+--- kq12 keepalive c=32 warmup ---
+FREE Pages free:                               13405.
+requests 330400
+errors 0
+err_connect 0
+err_write 0
+err_read 0
+err_parse 0
+non2xx 0
+overflow 0
+elapsed_ms 2000
+rps 165200.00
+p50_us 192
+p99_us 233
+--- kq12 keepalive c=32 run 1 ---
+FREE Pages free:                               12849.
+requests 822786
+errors 0
+err_connect 0
+err_write 0
+err_read 0
+err_parse 0
+non2xx 0
+overflow 0
+elapsed_ms 5000
+rps 164557.20
+p50_us 192
+p99_us 235
+--- kq12 keepalive c=32 run 2 ---
+FREE Pages free:                               12079.
+requests 820992
+errors 0
+err_connect 0
+err_write 0
+err_read 0
+err_parse 0
+non2xx 0
+overflow 0
+elapsed_ms 5000
+rps 164198.40
+p50_us 193
+p99_us 235
+--- kq12 keepalive c=32 run 3 ---
+FREE Pages free:                               12228.
+requests 820906
+errors 0
+err_connect 0
+err_write 0
+err_read 0
+err_parse 0
+non2xx 0
+overflow 0
+elapsed_ms 5000
+rps 164181.20
+p50_us 193
+p99_us 236
+--- kq12 keepalive c=128 warmup ---
+FREE Pages free:                               16958.
+requests 329468
+errors 0
+err_connect 0
+err_write 0
+err_read 0
+err_parse 0
+non2xx 0
+overflow 0
+elapsed_ms 2001
+rps 164651.67
+p50_us 775
+p99_us 843
+--- kq12 keepalive c=128 run 1 ---
+FREE Pages free:                               17277.
+requests 821998
+errors 0
+err_connect 0
+err_write 0
+err_read 0
+err_parse 0
+non2xx 0
+overflow 0
+elapsed_ms 5001
+rps 164366.73
+p50_us 777
+p99_us 848
+--- kq12 keepalive c=128 run 2 ---
+FREE Pages free:                               15844.
+requests 829882
+errors 0
+err_connect 0
+err_write 0
+err_read 0
+err_parse 0
+non2xx 0
+overflow 0
+elapsed_ms 5001
+rps 165943.21
+p50_us 769
+p99_us 835
+--- kq12 keepalive c=128 run 3 ---
+FREE Pages free:                               15324.
+requests 829933
+errors 0
+err_connect 0
+err_write 0
+err_read 0
+err_parse 0
+non2xx 0
+overflow 0
+elapsed_ms 5001
+rps 165953.41
+p50_us 769
+p99_us 840
+--- server stderr end kq12 ---
+muro-hello: wait kqueue
+muro-hello: wait kqueue
+muro-hello: wait kqueue
+muro-hello: wait kqueue
+muro-hello: wait kqueue
+muro-hello: wait kqueue
+muro-hello: wait kqueue
+muro-hello: wait kqueue
+muro-hello: wait kqueue
+muro-hello: wait kqueue
+muro-hello: workers 12 handoff
+listening 127.0.0.1 18180
+muro-hello: wait kqueue
+muro-hello: wait kqueue
+muro-hello: handoff drops 0
+===== END kq12 =====
+END Sun Nov 22 23:48:47 CST 2026
+UP 23:48  up 163 days,  2:51, 3 users, load averages: 8.27 5.31 4.03
+VMSTAT_END
+Mach Virtual Memory Statistics: (page size of 16384 bytes)
+Pages free:                               23878.
+Pages active:                            260055.
+Pages inactive:                          259158.
+Pages speculative:                          184.
+Pages throttled:                              0.
+Pages wired down:                        213021.
+Pages purgeable:                            159.
+"Translation faults":              415960828704.
+Pages copy-on-write:                 3693863010.
+Pages zero filled:                  57722852407.
+Pages reactivated:                 123208063409.
+Pages purged:                        3109151885.
+File-backed pages:                       149849.
+Anonymous pages:                         369548.
+Pages stored in compressor:             2714096.
+Pages occupied by compressor:            781600.
+Decompressions:                    204472665785.
+Compressions:                      220426877750.
+Pageins:                            28555654275.
+Pageouts:                              51243255.
+Swapins:                             1374254103.
+Swapouts:                            1469133742.
