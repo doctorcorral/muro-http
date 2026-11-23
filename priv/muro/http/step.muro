@@ -178,8 +178,11 @@ def finOk : run Π (+ code : U64) → Out :=
 def onStatus : run Π (+ st : Status) → Π (+ fin : U64) → Π (+ s : Slice) → Π (+ max : U64) → Out :=
   λ (+ st : Status) → λ (+ fin : U64) → λ (+ s : Slice) → λ (+ max : U64) →
     match st motive (λ _ → Out)
+      | status-ok =>
+          (match (u64eq fin (toU64 1)) motive (λ _ → Out)
+            | true => finOk (policy s max)
+            | false => usePol (policy s max) (toU64 0))
       | status-malformed => owe (toU64 400)
-      | status-unimplemented => owe (toU64 501)
       | status-need-more =>
           (match (u64eq fin (toU64 1)) motive (λ _ → Out)
             | true => owe (toU64 400)
@@ -187,10 +190,7 @@ def onStatus : run Π (+ st : Status) → Π (+ fin : U64) → Π (+ s : Slice) 
                 (match (headersDone s) motive (λ _ → Out)
                   | true => usePol (policy s max) (toU64 1)
                   | false => more))
-      | status-ok =>
-          (match (u64eq fin (toU64 1)) motive (λ _ → Out)
-            | true => finOk (policy s max)
-            | false => usePol (policy s max) (toU64 0))
+      | status-unimplemented => owe (toU64 501)
 
 def onBuf : run Π (+ fin : U64) → Π (+ s : Slice) → Π (+ max : U64) → Out :=
   λ (+ fin : U64) → λ (+ s : Slice) → λ (+ max : U64) →
