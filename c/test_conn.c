@@ -73,6 +73,7 @@ static void want(const char *name, Conn st, int i, uint64_t expect) {
 }
 
 void step_memo_reset(void);
+void view_memo_reset(void);
 
 static int restart(Conn *st, Proto **proto) {
   proto_free(*proto);
@@ -141,12 +142,15 @@ static unsigned long take(const char *name, Conn *st, Proto *proto, Ev ev) {
     return 0;
   }
 
-  /* Build the event, then count only the step. Event builders are unboxed. */
+  /* Build the event, then count only the step. Event builders are unboxed.
+     The probe above may have remembered this buffer. Drop that memory
+     so this step still classifies once. */
   muro_http_reset();
   (void)ev;
   built = muro_http_allocs();
   if (built != 0) bad(name, "event allocated");
   muro_http_reset();
+  view_memo_reset();
   *st = step(*st, ev);
   n = muro_http_allocs();
   printf("%s %lu\n", name, n);
@@ -232,6 +236,38 @@ static void check_keepalive(void) {
     hit = step(begin(), evBytes(of(health)));
     if (muro_http_allocs() != 0) bad("health", "repeat allocs");
     if (!same(hit, st)) bad("health", "repeat result");
+  }
+  {
+    muro__slice s = of(health);
+    Classified *a;
+    Classified *b;
+    muro__slice body;
+    muro__slice body2;
+    uint64_t code;
+    unsigned long n0;
+    int status;
+    int keep;
+    view_memo_reset();
+    muro_http_reset();
+    a = classify(s);
+    status = a->muro__as.classified.muro__f_0->muro__field_tag;
+    keep = a->muro__as.classified.muro__f_1->muro__field_tag;
+    muro_http_reset();
+    n0 = muro_http_allocs();
+    b = classify(s);
+    if (muro_http_allocs() != n0) bad("health", "classify hit allocs");
+    if (b->muro__as.classified.muro__f_0->muro__field_tag != status) bad("health", "classify status");
+    if (b->muro__as.classified.muro__f_1->muro__field_tag != keep) bad("health", "classify keep");
+    code = methodCode(s);
+    muro_http_reset();
+    if (methodCode(s) != code) bad("health", "method hit");
+    body = bodyView(s);
+    muro_http_reset();
+    body2 = bodyView(s);
+    if (body2.n != body.n) bad("health", "body hit");
+    if (body.n > 0 && (body2.p != s.p + (size_t)(body.p - s.p) ||
+                       memcmp(body2.p, body.p, body.n) != 0))
+      bad("health", "body hit");
   }
   n = take("reply-allocs", &st, proto, evReply(0));
   if (n != 0) bad("reply", "allocs");
