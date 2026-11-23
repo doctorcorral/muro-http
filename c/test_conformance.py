@@ -2,8 +2,9 @@
 """HTTP/1.1 conformance against c/muro-hello on Linux epoll.
 
 Each case names the expected status or the close. The server is the
-real hello binary: GET answers hello\\n, POST echoes the body. One
-worker, --wait epoll. No extra packages.
+real hello binary: GET and POST / answer hello\\n. POST /echo echoes
+the body, which is what the chunk, expect, and pipeline cases use.
+One worker, --wait epoll. No extra packages.
 
 Limits this server already has, and this file checks on the wire:
   request line longer than 16384 bytes -> 414, close
@@ -551,7 +552,7 @@ def run_exchange(srv):
     case(
         "chunk-ok",
         "200 keep-alive body hi",
-        b"POST / HTTP/1.1\r\nHost: t\r\nTransfer-Encoding: chunked\r\n\r\n2\r\nhi\r\n0\r\n\r\n",
+        b"POST /echo HTTP/1.1\r\nHost: t\r\nTransfer-Encoding: chunked\r\n\r\n2\r\nhi\r\n0\r\n\r\n",
         200,
         b"hi",
         False,
@@ -559,7 +560,7 @@ def run_exchange(srv):
     case(
         "chunk-ext",
         "200 keep-alive",
-        b"POST / HTTP/1.1\r\nHost: t\r\nTransfer-Encoding: chunked\r\n\r\n4;ext=1\r\nwiki\r\n0\r\n\r\n",
+        b"POST /echo HTTP/1.1\r\nHost: t\r\nTransfer-Encoding: chunked\r\n\r\n4;ext=1\r\nwiki\r\n0\r\n\r\n",
         200,
         b"wiki",
         False,
@@ -615,7 +616,7 @@ def run_exchange(srv):
     case(
         "chunk-trailer-ok",
         "200 keep-alive",
-        b"POST / HTTP/1.1\r\nHost: t\r\nTransfer-Encoding: chunked\r\n\r\n2\r\nhi\r\n0\r\nX-A: b\r\n\r\n",
+        b"POST /echo HTTP/1.1\r\nHost: t\r\nTransfer-Encoding: chunked\r\n\r\n2\r\nhi\r\n0\r\nX-A: b\r\n\r\n",
         200,
         b"hi",
         False,
@@ -697,7 +698,7 @@ def run_exchange(srv):
     case(
         "post-echo",
         "200 keep-alive",
-        b"POST / HTTP/1.1\r\nHost: t\r\nContent-Length: 4\r\n\r\nping",
+        b"POST /echo HTTP/1.1\r\nHost: t\r\nContent-Length: 4\r\n\r\nping",
         200,
         b"ping",
         False,
@@ -762,7 +763,7 @@ def run_continue(srv):
         c = Conn(srv.port)
         try:
             c.send(
-                b"POST / HTTP/1.1\r\nHost: t\r\nContent-Length: 4\r\n"
+                b"POST /echo HTTP/1.1\r\nHost: t\r\nContent-Length: 4\r\n"
                 b"Expect: 100-continue\r\n\r\n"
             )
             first = c.read_response(time.monotonic() + 2)
@@ -839,7 +840,7 @@ def run_pipeline(srv):
         c = Conn(srv.port)
         try:
             c.send(
-                b"POST / HTTP/1.1\r\nHost: t\r\nContent-Length: 3\r\n\r\n"
+                b"POST /echo HTTP/1.1\r\nHost: t\r\nContent-Length: 3\r\n\r\n"
                 b"abcGET / HTTP/1.1\r\nHost: t\r\n\r\n"
             )
             a = c.read_response()
