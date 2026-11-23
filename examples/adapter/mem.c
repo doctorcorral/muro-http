@@ -7,8 +7,9 @@
 
    The checks pin short writes, a hard write error, 100 Continue
    (including a short write then a hard error), MURO_STEP_NOW and
-   wake_at, status_now for 413, 417, and 501, pipelining,
-   empty_before 0, and a one-byte window on a large body.
+   wake_at, status_now for 413, 417, and 501, 414 and 431 for a
+   header block past 16384, pipelining, empty_before 0, and a
+   one-byte window on a large body.
 
    Build: make c/test_step
    The reference server is still c/host.c. This file is the pattern,
@@ -604,6 +605,51 @@ static int check_blob(void) {
   return 0;
 }
 
+/* Request line past the 16384 header cap is 414. A short request
+   line with a header block past that cap is 431. Both close. */
+static int check_caps(void) {
+  Box b;
+  char *req;
+  const char *tail = " HTTP/1.1\r\nHost: h\r\n\r\n";
+  const char *head = "GET / HTTP/1.1\r\nHost: h\r\nX-Pad: ";
+  size_t tail_n = strlen(tail);
+  size_t head_n = strlen(head);
+  req = malloc(17000 + head_n + 64);
+  if (!req) return fail("cap alloc");
+  memcpy(req, "GET /", 5);
+  memset(req + 5, 'a', 17000);
+  memcpy(req + 5 + 17000, tail, tail_n + 1);
+  if (box_open(&b, 8388608) < 0) {
+    free(req);
+    return fail(b.err ? b.err : "line cap box");
+  }
+  if (feed(&b, req, 1, 1000, 0) < 0 || drive(&b, 0) < 0 || !b.closed || !saw(&b, "HTTP/1.1 414") ||
+      !saw(&b, "uri too long")) {
+    fail(b.err ? b.err : "414");
+    box_close(&b);
+    free(req);
+    return 1;
+  }
+  box_close(&b);
+  memcpy(req, head, head_n);
+  memset(req + head_n, 'b', 17000);
+  memcpy(req + head_n + 17000, "\r\n\r\n", 5);
+  if (box_open(&b, 8388608) < 0) {
+    free(req);
+    return fail(b.err ? b.err : "header cap box");
+  }
+  if (feed(&b, req, 1, 1000, 0) < 0 || drive(&b, 0) < 0 || !b.closed || !saw(&b, "HTTP/1.1 431") ||
+      !saw(&b, "header fields")) {
+    fail(b.err ? b.err : "431");
+    box_close(&b);
+    free(req);
+    return 1;
+  }
+  box_close(&b);
+  free(req);
+  return 0;
+}
+
 int main(void) {
   if (check_basic()) return 1;
   if (check_cont()) return 1;
@@ -622,6 +668,7 @@ int main(void) {
   if (check_pipe_and_short()) return 1;
   if (check_deadline_and_fail()) return 1;
   if (check_blob()) return 1;
+  if (check_caps()) return 1;
   printf("OK\n");
   return 0;
 }

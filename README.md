@@ -935,7 +935,8 @@ book linked beside it must not import that book. `decide.muro` and
 - A JWT claim name longer than 32 bytes is rejected. Header and
   payload JSON are decoded into a 4096-byte buffer.
 - The receive buffer is 65536 bytes and the write buffer is 69632.
-  A header block past 16384 is 400. A body past 16384 is streamed,
+  A header block past 16384 is 414 when the request line itself
+  passes that cap, and 431 otherwise. A body past 16384 is streamed,
   up to the max body (default 8 MiB). A known `Content-Length` over
   that max is 413 at the headers, including one of at most 16384.
   The host does not read that body to the end first. A

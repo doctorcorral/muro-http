@@ -141,9 +141,9 @@ closed 4.
 
 Moved into `c/step.c`: the per-connection pump. That is classify
 through `conn.step`, `proto_admit`, the handler call, keep-alive
-consume, pipelined `more`, 100 Continue bytes, 400 / 413 / 417 /
-501 while still reading, the idle-deadline decision, and the choice
-of which buffer a close still owes.
+consume, pipelined `more`, 100 Continue bytes, 400 / 413 / 414 /
+431 / 417 / 501 while still reading, the idle-deadline decision,
+and the choice of which buffer a close still owes.
 
 Stayed in the adapter (`c/host.c`, `c/host_poll.c`):
 

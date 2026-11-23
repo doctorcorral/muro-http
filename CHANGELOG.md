@@ -2,6 +2,11 @@
 
 ## 0.1.0-dev — unreleased
 
+- A header block past 16384 bytes is 414 when the request line
+  itself passes that cap, and 431 otherwise. A shorter malformed
+  request stays 400. `examples/adapter/mem.c` checks the two
+  statuses. The library version stays `0.1.0-dev`. The pin stays
+  muro `0.22.14`.
 - A short write of `100 Continue` keeps a flag for the rest of
   that span. A later hard error closes the connection and does
   not report `MURO_STEP_WRITE_FAILED`. An idle tick while that

@@ -5,7 +5,9 @@
    this translation unit.
 
    The image is conn.step. The moves are proto_admit. Origin 1 is
-   httpMalformed. Origin 2 is httpNotImplemented. A committed handler
+   httpMalformed. A header block the book rejects for passing 16384
+   bytes is 414 when the request line itself passes that cap, and
+   431 otherwise. Origin 2 is httpNotImplemented. A committed handler
    that fails before a status byte leaves is httpInternal. 100, 413,
    and 417 come from host_in_policy, and 501 from method code 1.
    host_in_policy does not answer an unknown transfer coding. */
@@ -30,8 +32,34 @@ enum {
   PEND_NONE = 0,
   PEND_CONT = 1,
   PEND_OUT = 2,
-  PUMP_FUSE = 100000
+  PUMP_FUSE = 100000,
+  /* Same cap as gt16384 in the request book. which 6 is 414.
+     which 7 is 431. */
+  HDR_CAP = 16384
 };
+
+/* 6, 7, or 0. The book already calls a block past HDR_CAP malformed.
+   A request line with no LF inside the cap is 414. A finished block
+   that ends past the cap, or an unfinished block past the cap whose
+   request line fit, is 431. A short malformed request stays 0 so
+   the caller still sends 400. Bytes after a short header block are
+   a body, not a second header cap. */
+static int limit_which(const uint8_t *buf, size_t n) {
+  size_t i;
+  if (!buf || n <= (size_t)HDR_CAP) return 0;
+  for (i = 0; i < (size_t)HDR_CAP; i++) {
+    if (buf[i] == '\n') break;
+  }
+  if (i == (size_t)HDR_CAP) return 6;
+  for (i = 0; i + 3 < n; i++) {
+    if (i >= (size_t)HDR_CAP) return 7;
+    if (buf[i] == '\r' && buf[i + 1] == '\n' && buf[i + 2] == '\r' && buf[i + 3] == '\n') {
+      if (i + 4 > (size_t)HDR_CAP) return 7;
+      return 0;
+    }
+  }
+  return 7;
+}
 
 static uint64_t field(Conn st, int i) {
   switch (i) {
@@ -566,8 +594,10 @@ static int pump(HttpStep *st, const StepIn *in, StepOut *out) {
         int origin = (int)field(st->st, 6);
         int which;
         note_head_buf(st, st->in, st->in_len);
-        if (origin == 1) which = 0;
-        else if (origin == 2) which = 2;
+        if (origin == 1) {
+          int lim = limit_which(st->in, st->in_len);
+          which = lim ? lim : 0;
+        } else if (origin == 2) which = 2;
         else {
           close_out(st, out);
           return 0;
