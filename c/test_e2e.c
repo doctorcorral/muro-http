@@ -1448,13 +1448,20 @@ static void check_interleaved(void) {
   }
   snprintf(feed_req, sizeof feed_req, "GET /feed HTTP/1.1\r\nAuthorization: Bearer %s\r\nHost: t\r\n\r\n", tok_ada);
   post_json(req, sizeof req, tok_ada, "{\"text\":\"concurrent\"}");
-  if (send_all(health, "GET /health HTTP/1.1\r\nHost: t\r\n\r\n") < 0 || send_all(feed, feed_req) < 0 ||
-      send_all(post, req) < 0 || send_all(bad, "GET/feed HTTP/1.1\r\n\r\n") < 0) {
+  /* The empty feed has to be read before the create is sent. The
+     two requests otherwise share the accept queue, and the post
+     can commit first. The macOS job then saw the new row on the
+     feed that expected []. */
+  if (send_all(health, "GET /health HTTP/1.1\r\nHost: t\r\n\r\n") < 0 || send_all(feed, feed_req) < 0) {
     fail("interleave", "fast send");
     goto done;
   }
   if (take_resp(health, "interleave-health", 200, "ok", 0, 0) < 0) goto done;
   if (take_resp(feed, "interleave-feed", 200, "[]", 0, 0) < 0) goto done;
+  if (send_all(post, req) < 0 || send_all(bad, "GET/feed HTTP/1.1\r\n\r\n") < 0) {
+    fail("interleave", "fast send");
+    goto done;
+  }
   if (take_resp(post, "interleave-create", 201, "{\"id\":1,\"text\":\"concurrent\"}", 0, 0) < 0)
     goto done;
   if (take_resp(bad, "interleave-bad", 400, "malformed", 1, 1) < 0) goto done;
