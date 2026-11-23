@@ -236,6 +236,81 @@ static int read_response(int fd, int *status, int *conn_close, char *body, size_
   }
 }
 
+
+/* Read one complete response from `held`, pulling more bytes from fd
+   if needed. Leftover bytes stay in `held` for a pipelined follow-up. */
+static int read_held(int fd, char *held, size_t *held_n, size_t held_cap,
+                     int *status, int *conn_close, char *body, size_t body_cap,
+                     size_t *body_n) {
+  for (;;) {
+    int hend = -1;
+    size_t i;
+    int cl = -1;
+    size_t total;
+    ssize_t r;
+    for (i = 0; i + 3 < *held_n; i++) {
+      if (held[i] == '\r' && held[i + 1] == '\n' && held[i + 2] == '\r' && held[i + 3] == '\n') {
+        hend = (int)i;
+        break;
+      }
+    }
+    if (hend >= 0 && find_cl(held, hend, &cl) == 0) {
+      total = (size_t)hend + 4 + (size_t)cl;
+      if (*held_n >= total) {
+        int code = 0;
+        if (sscanf(held, "HTTP/1.1 %d", &code) != 1) return -1;
+        *status = code;
+        *conn_close = memmem(held, (size_t)hend, "Connection: close", 17) != NULL;
+        if ((size_t)cl >= body_cap) return -1;
+        memcpy(body, held + hend + 4, (size_t)cl);
+        body[cl] = 0;
+        *body_n = (size_t)cl;
+        memmove(held, held + total, *held_n - total);
+        *held_n -= total;
+        return 0;
+      }
+    }
+    if (*held_n + 1 >= held_cap) return -1;
+    r = read(fd, held + *held_n, held_cap - *held_n - 1);
+    if (r < 0 && errno == EINTR) continue;
+    if (r <= 0) return -1;
+    *held_n += (size_t)r;
+  }
+}
+
+static void check_pipeline_post_slash(const char *host, int port) {
+  int fd = dial(host, port);
+  char held[2048];
+  size_t held_n = 0;
+  int status = 0;
+  int conn_close = 0;
+  char body[128];
+  size_t body_n = 0;
+  if (fd < 0) {
+    fail("pipeline-post-slash", "connect");
+    return;
+  }
+  if (send_all(fd, "POST / HTTP/1.1\r\nHost: t\r\nContent-Length: 4\r\n\r\nping"
+                   "GET / HTTP/1.1\r\nHost: t\r\n\r\n") < 0) {
+    fail("pipeline-post-slash", "send");
+    close(fd);
+    return;
+  }
+  if (read_held(fd, held, &held_n, sizeof held, &status, &conn_close, body, sizeof body, &body_n) < 0 ||
+      status != 200 || strcmp(body, "hello\n") != 0 || conn_close) {
+    fail("pipeline-post-slash", "first");
+    close(fd);
+    return;
+  }
+  if (read_held(fd, held, &held_n, sizeof held, &status, &conn_close, body, sizeof body, &body_n) < 0 ||
+      status != 200 || strcmp(body, "hello\n") != 0 || conn_close) {
+    fail("pipeline-post-slash", "second");
+    close(fd);
+    return;
+  }
+  close(fd);
+}
+
 static void expect_one(const char *host, int port, const char *name, const char *req, int want_status,
                        const char *want_body, int want_close) {
   int fd = dial(host, port);
@@ -789,22 +864,7 @@ int main(int argc, char **argv) {
   } else {
     close(fd);
   }
-  fd = dial(host, port);
-  if (fd < 0) {
-    fail("pipeline-post-slash", "connect");
-  } else if (send_all(fd, "POST / HTTP/1.1\r\nHost: t\r\nContent-Length: 4\r\n\r\nping"
-                          "GET / HTTP/1.1\r\nHost: t\r\n\r\n") < 0 ||
-             read_response(fd, &status, &conn_close, body, sizeof body, &body_n) < 0 ||
-             status != 200 || strcmp(body, "hello\n") != 0 || conn_close) {
-    fail("pipeline-post-slash", "first");
-    close(fd);
-  } else if (read_response(fd, &status, &conn_close, body, sizeof body, &body_n) < 0 ||
-             status != 200 || strcmp(body, "hello\n") != 0 || conn_close) {
-    fail("pipeline-post-slash", "second");
-    close(fd);
-  } else {
-    close(fd);
-  }
+  check_pipeline_post_slash(host, port);
   check_stream_echo(host, port);
   unlink(stream_ready);
   stop_server(pid);
