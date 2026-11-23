@@ -515,3 +515,211 @@ its earlier close c=1 number (14609 vs 15949), so the small-c
 gap is not only the ack byte. The ack is one extra write on
 the worker before the request is adopted, and the parent closes
 its copy when that byte arrives.
+
+## After the protocol split — git 3c74b00
+
+Same host, same port, same `bench/loadgen` flags, same
+`c/muro-hello` build (`OPT=-O2`). The binary is
+`3c74b00333262a63cc1758fbbbbf3c8613796e84`. HTTP/1.1 decisions
+are `c/step.c`. The adapter writes the pointer the step
+returns. It does not copy that span again.
+
+Start: Sun Nov 22 20:20:43 CST 2026. End: Sun Nov 22 20:29:50
+CST 2026. `hw.model` Mac16,11, 12 cores, 25769803776 bytes.
+`uname` is the same Darwin 24.6.0 arm64 string as the earlier
+sections. Load average at start 1.37, 1.38, 1.34. At the end
+5.99, 4.77, 3.05. Free pages at the start of each config
+(page size 16384): poll 4897 (about 80 MB), kqueue/1 10634
+(about 174 MB), kqueue/4 11977 (about 196 MB), kqueue/12
+12109 (about 198 MB). The start of the log had 5910 free
+pages, about 97 MB. Docker containers `muro-mac-1` and
+`muro-mac-2` were up. `beam.smp` 85656 was running. This is
+loopback. The raw tool output is `bench/after-3c74b00.txt`.
+
+```
+./c/muro-hello --bind 127.0.0.1 --port 18180 --max-connections 1024 --idle-ms 60000 --workers 1 --wait poll
+./c/muro-hello --bind 127.0.0.1 --port 18180 --max-connections 1024 --idle-ms 60000 --workers N --wait kqueue
+./bench/loadgen --host 127.0.0.1 --port 18180 --concurrency N --duration SEC --mode keepalive|close
+```
+
+`N` for workers is 1, then 4, then 12. Warmup `--duration 2`
+is in the raw log and is not in the tables. Three runs use
+`--duration 5`. stderr showed `wait poll` for the poll
+process; `wait kqueue` for the one kqueue process; `workers 4
+handoff` and four `wait kqueue` lines; `workers 12 handoff`
+and twelve `wait kqueue` lines. Each config printed one
+`listening 127.0.0.1 18180`. One worker does not print
+`handoff drops`. The 4-worker and 12-worker parents each
+printed `handoff drops 0` and no `handoff drop N:` line.
+
+`errors` is `err_connect + err_write + err_read + err_parse`.
+Every warmup and every measured run had 0 for each of those,
+and `non2xx` 0, and `overflow` 0. The median row is the
+middle req/s. The other columns on that row are from the same
+run.
+
+Compared with the handoff section (`b7d8bc2`, the #16 numbers
+on this Mac): keep-alive, kqueue, 4 workers is 162334 at c=8
+(was 162228), 183156 at c=32 (was 183691), and 183893 at
+c=128 (was 184525). That is under 1%. Twelve workers stay
+below four: 152938, 165134, and 166710, next to 154911,
+165374, and 165493. One kqueue worker at c=8, c=32, and
+c=128 is about 5% under that section (56589 vs 59617, 56869
+vs 60131, 56766 vs 59738). Poll is about 2 to 3.5% under
+(56167 vs 57648 at c=8). The machine was busier at the start
+of this matrix than at the start of the handoff matrix
+(load 1.37 versus 0.96, and the load climbed while this
+matrix ran). The 4-worker keep-alive path is the one a second
+copy of the response would have dropped. It did not drop.
+Close-mode errors are 0/0/0 on every config. The 4-worker
+close c=128 runs were 32672, 36415, and 36181. The low run
+is in the table. Its error count is still 0.
+
+### poll, 1 worker
+
+| mode | c | run | req/s | p50 µs | p99 µs | errors | non-2xx | connect | write | read | parse |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| keepalive | 1 | 1 | 31479.40 | 31 | 43 | 0 | 0 | 0 | 0 | 0 | 0 |
+| keepalive | 1 | 2 | 31109.00 | 32 | 42 | 0 | 0 | 0 | 0 | 0 | 0 |
+| keepalive | 1 | 3 | 31278.40 | 32 | 43 | 0 | 0 | 0 | 0 | 0 | 0 |
+| keepalive | 1 | median | 31278.40 | 32 | 43 | 0 | 0 | 0 | 0 | 0 | 0 |
+| keepalive | 8 | 1 | 56166.60 | 124 | 263 | 0 | 0 | 0 | 0 | 0 | 0 |
+| keepalive | 8 | 2 | 56080.80 | 125 | 263 | 0 | 0 | 0 | 0 | 0 | 0 |
+| keepalive | 8 | 3 | 56634.80 | 123 | 262 | 0 | 0 | 0 | 0 | 0 | 0 |
+| keepalive | 8 | median | 56166.60 | 124 | 263 | 0 | 0 | 0 | 0 | 0 | 0 |
+| keepalive | 32 | 1 | 56357.60 | 549 | 1108 | 0 | 0 | 0 | 0 | 0 | 0 |
+| keepalive | 32 | 2 | 56193.20 | 551 | 1112 | 0 | 0 | 0 | 0 | 0 | 0 |
+| keepalive | 32 | 3 | 56460.40 | 550 | 1109 | 0 | 0 | 0 | 0 | 0 | 0 |
+| keepalive | 32 | median | 56357.60 | 549 | 1108 | 0 | 0 | 0 | 0 | 0 | 0 |
+| keepalive | 128 | 1 | 54396.04 | 2353 | 2515 | 0 | 0 | 0 | 0 | 0 | 0 |
+| keepalive | 128 | 2 | 54530.79 | 2344 | 2516 | 0 | 0 | 0 | 0 | 0 | 0 |
+| keepalive | 128 | 3 | 53978.21 | 2367 | 2568 | 0 | 0 | 0 | 0 | 0 | 0 |
+| keepalive | 128 | median | 54396.04 | 2353 | 2515 | 0 | 0 | 0 | 0 | 0 | 0 |
+| close | 1 | 1 | 15261.20 | 33 | 57 | 0 | 0 | 0 | 0 | 0 | 0 |
+| close | 1 | 2 | 15181.20 | 34 | 57 | 0 | 0 | 0 | 0 | 0 | 0 |
+| close | 1 | 3 | 15320.00 | 33 | 53 | 0 | 0 | 0 | 0 | 0 | 0 |
+| close | 1 | median | 15261.20 | 33 | 57 | 0 | 0 | 0 | 0 | 0 | 0 |
+| close | 8 | 1 | 39120.40 | 109 | 213 | 0 | 0 | 0 | 0 | 0 | 0 |
+| close | 8 | 2 | 39095.60 | 108 | 209 | 0 | 0 | 0 | 0 | 0 | 0 |
+| close | 8 | 3 | 40682.00 | 112 | 203 | 0 | 0 | 0 | 0 | 0 | 0 |
+| close | 8 | median | 39120.40 | 109 | 213 | 0 | 0 | 0 | 0 | 0 | 0 |
+| close | 32 | 1 | 40386.80 | 420 | 794 | 0 | 0 | 0 | 0 | 0 | 0 |
+| close | 32 | 2 | 41350.80 | 411 | 793 | 0 | 0 | 0 | 0 | 0 | 0 |
+| close | 32 | 3 | 41876.80 | 419 | 802 | 0 | 0 | 0 | 0 | 0 | 0 |
+| close | 32 | median | 41350.80 | 411 | 793 | 0 | 0 | 0 | 0 | 0 | 0 |
+| close | 128 | 1 | 37179.33 | 1684 | 3856 | 0 | 0 | 0 | 0 | 0 | 0 |
+| close | 128 | 2 | 39116.35 | 1670 | 3851 | 0 | 0 | 0 | 0 | 0 | 0 |
+| close | 128 | 3 | 38391.64 | 1680 | 4130 | 0 | 0 | 0 | 0 | 0 | 0 |
+| close | 128 | median | 38391.64 | 1680 | 4130 | 0 | 0 | 0 | 0 | 0 | 0 |
+
+### kqueue, 1 worker
+
+| mode | c | run | req/s | p50 µs | p99 µs | errors | non-2xx | connect | write | read | parse |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| keepalive | 1 | 1 | 32384.00 | 30 | 41 | 0 | 0 | 0 | 0 | 0 | 0 |
+| keepalive | 1 | 2 | 32083.00 | 31 | 41 | 0 | 0 | 0 | 0 | 0 | 0 |
+| keepalive | 1 | 3 | 32170.00 | 31 | 41 | 0 | 0 | 0 | 0 | 0 | 0 |
+| keepalive | 1 | median | 32170.00 | 31 | 41 | 0 | 0 | 0 | 0 | 0 | 0 |
+| keepalive | 8 | 1 | 56446.20 | 124 | 260 | 0 | 0 | 0 | 0 | 0 | 0 |
+| keepalive | 8 | 2 | 56589.00 | 123 | 260 | 0 | 0 | 0 | 0 | 0 | 0 |
+| keepalive | 8 | 3 | 56769.80 | 123 | 260 | 0 | 0 | 0 | 0 | 0 | 0 |
+| keepalive | 8 | median | 56589.00 | 123 | 260 | 0 | 0 | 0 | 0 | 0 | 0 |
+| keepalive | 32 | 1 | 56847.20 | 544 | 1102 | 0 | 0 | 0 | 0 | 0 | 0 |
+| keepalive | 32 | 2 | 56868.60 | 545 | 1100 | 0 | 0 | 0 | 0 | 0 | 0 |
+| keepalive | 32 | 3 | 56955.80 | 542 | 1098 | 0 | 0 | 0 | 0 | 0 | 0 |
+| keepalive | 32 | median | 56868.60 | 545 | 1100 | 0 | 0 | 0 | 0 | 0 | 0 |
+| keepalive | 128 | 1 | 56766.29 | 2251 | 2438 | 0 | 0 | 0 | 0 | 0 | 0 |
+| keepalive | 128 | 2 | 56894.24 | 2253 | 2411 | 0 | 0 | 0 | 0 | 0 | 0 |
+| keepalive | 128 | 3 | 56668.93 | 2254 | 2439 | 0 | 0 | 0 | 0 | 0 | 0 |
+| keepalive | 128 | median | 56766.29 | 2251 | 2438 | 0 | 0 | 0 | 0 | 0 | 0 |
+| close | 1 | 1 | 14641.80 | 35 | 46 | 0 | 0 | 0 | 0 | 0 | 0 |
+| close | 1 | 2 | 14570.37 | 35 | 48 | 0 | 0 | 0 | 0 | 0 | 0 |
+| close | 1 | 3 | 14722.20 | 35 | 46 | 0 | 0 | 0 | 0 | 0 | 0 |
+| close | 1 | median | 14641.80 | 35 | 46 | 0 | 0 | 0 | 0 | 0 | 0 |
+| close | 8 | 1 | 38313.60 | 116 | 238 | 0 | 0 | 0 | 0 | 0 | 0 |
+| close | 8 | 2 | 38513.20 | 116 | 243 | 0 | 0 | 0 | 0 | 0 | 0 |
+| close | 8 | 3 | 40401.80 | 118 | 238 | 0 | 0 | 0 | 0 | 0 | 0 |
+| close | 8 | median | 38513.20 | 116 | 243 | 0 | 0 | 0 | 0 | 0 | 0 |
+| close | 32 | 1 | 41035.80 | 485 | 1054 | 0 | 0 | 0 | 0 | 0 | 0 |
+| close | 32 | 2 | 39653.34 | 487 | 1089 | 0 | 0 | 0 | 0 | 0 | 0 |
+| close | 32 | 3 | 41408.40 | 505 | 1081 | 0 | 0 | 0 | 0 | 0 | 0 |
+| close | 32 | median | 41035.80 | 485 | 1054 | 0 | 0 | 0 | 0 | 0 | 0 |
+| close | 128 | 1 | 38739.10 | 1814 | 5353 | 0 | 0 | 0 | 0 | 0 | 0 |
+| close | 128 | 2 | 36979.36 | 1758 | 4309 | 0 | 0 | 0 | 0 | 0 | 0 |
+| close | 128 | 3 | 38141.34 | 1833 | 4848 | 0 | 0 | 0 | 0 | 0 | 0 |
+| close | 128 | median | 38141.34 | 1833 | 4848 | 0 | 0 | 0 | 0 | 0 | 0 |
+
+### kqueue, 4 workers
+
+| mode | c | run | req/s | p50 µs | p99 µs | errors | non-2xx | connect | write | read | parse |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| keepalive | 1 | 1 | 32441.60 | 30 | 41 | 0 | 0 | 0 | 0 | 0 | 0 |
+| keepalive | 1 | 2 | 31938.00 | 31 | 41 | 0 | 0 | 0 | 0 | 0 | 0 |
+| keepalive | 1 | 3 | 32483.40 | 30 | 41 | 0 | 0 | 0 | 0 | 0 | 0 |
+| keepalive | 1 | median | 32441.60 | 30 | 41 | 0 | 0 | 0 | 0 | 0 | 0 |
+| keepalive | 8 | 1 | 162334.00 | 48 | 72 | 0 | 0 | 0 | 0 | 0 | 0 |
+| keepalive | 8 | 2 | 162080.00 | 48 | 72 | 0 | 0 | 0 | 0 | 0 | 0 |
+| keepalive | 8 | 3 | 162433.80 | 48 | 72 | 0 | 0 | 0 | 0 | 0 | 0 |
+| keepalive | 8 | median | 162334.00 | 48 | 72 | 0 | 0 | 0 | 0 | 0 | 0 |
+| keepalive | 32 | 1 | 183141.20 | 168 | 314 | 0 | 0 | 0 | 0 | 0 | 0 |
+| keepalive | 32 | 2 | 183590.60 | 167 | 313 | 0 | 0 | 0 | 0 | 0 | 0 |
+| keepalive | 32 | 3 | 183155.80 | 167 | 314 | 0 | 0 | 0 | 0 | 0 | 0 |
+| keepalive | 32 | median | 183155.80 | 167 | 314 | 0 | 0 | 0 | 0 | 0 | 0 |
+| keepalive | 128 | 1 | 184178.96 | 677 | 1308 | 0 | 0 | 0 | 0 | 0 | 0 |
+| keepalive | 128 | 2 | 183666.87 | 677 | 1314 | 0 | 0 | 0 | 0 | 0 | 0 |
+| keepalive | 128 | 3 | 183893.02 | 676 | 1315 | 0 | 0 | 0 | 0 | 0 | 0 |
+| keepalive | 128 | median | 183893.02 | 676 | 1315 | 0 | 0 | 0 | 0 | 0 | 0 |
+| close | 1 | 1 | 14318.00 | 38 | 52 | 0 | 0 | 0 | 0 | 0 | 0 |
+| close | 1 | 2 | 14321.40 | 38 | 51 | 0 | 0 | 0 | 0 | 0 | 0 |
+| close | 1 | 3 | 14304.40 | 38 | 51 | 0 | 0 | 0 | 0 | 0 | 0 |
+| close | 1 | median | 14318.00 | 38 | 52 | 0 | 0 | 0 | 0 | 0 | 0 |
+| close | 8 | 1 | 37076.00 | 84 | 140 | 0 | 0 | 0 | 0 | 0 | 0 |
+| close | 8 | 2 | 37345.80 | 84 | 138 | 0 | 0 | 0 | 0 | 0 | 0 |
+| close | 8 | 3 | 37638.00 | 84 | 136 | 0 | 0 | 0 | 0 | 0 | 0 |
+| close | 8 | median | 37345.80 | 84 | 138 | 0 | 0 | 0 | 0 | 0 | 0 |
+| close | 32 | 1 | 37182.00 | 354 | 532 | 0 | 0 | 0 | 0 | 0 | 0 |
+| close | 32 | 2 | 35749.40 | 360 | 552 | 0 | 0 | 0 | 0 | 0 | 0 |
+| close | 32 | 3 | 36218.20 | 354 | 531 | 0 | 0 | 0 | 0 | 0 | 0 |
+| close | 32 | median | 36218.20 | 354 | 531 | 0 | 0 | 0 | 0 | 0 | 0 |
+| close | 128 | 1 | 32672.07 | 1545 | 2465 | 0 | 0 | 0 | 0 | 0 | 0 |
+| close | 128 | 2 | 36414.92 | 1514 | 2169 | 0 | 0 | 0 | 0 | 0 | 0 |
+| close | 128 | 3 | 36180.73 | 1491 | 2170 | 0 | 0 | 0 | 0 | 0 | 0 |
+| close | 128 | median | 36180.73 | 1491 | 2170 | 0 | 0 | 0 | 0 | 0 | 0 |
+
+### kqueue, 12 workers
+
+| mode | c | run | req/s | p50 µs | p99 µs | errors | non-2xx | connect | write | read | parse |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| keepalive | 1 | 1 | 32868.80 | 30 | 39 | 0 | 0 | 0 | 0 | 0 | 0 |
+| keepalive | 1 | 2 | 32842.20 | 30 | 40 | 0 | 0 | 0 | 0 | 0 | 0 |
+| keepalive | 1 | 3 | 32905.60 | 30 | 39 | 0 | 0 | 0 | 0 | 0 | 0 |
+| keepalive | 1 | median | 32868.80 | 30 | 39 | 0 | 0 | 0 | 0 | 0 | 0 |
+| keepalive | 8 | 1 | 152937.80 | 51 | 78 | 0 | 0 | 0 | 0 | 0 | 0 |
+| keepalive | 8 | 2 | 153249.80 | 51 | 77 | 0 | 0 | 0 | 0 | 0 | 0 |
+| keepalive | 8 | 3 | 152565.00 | 51 | 78 | 0 | 0 | 0 | 0 | 0 | 0 |
+| keepalive | 8 | median | 152937.80 | 51 | 78 | 0 | 0 | 0 | 0 | 0 | 0 |
+| keepalive | 32 | 1 | 165133.60 | 191 | 242 | 0 | 0 | 0 | 0 | 0 | 0 |
+| keepalive | 32 | 2 | 165228.00 | 191 | 241 | 0 | 0 | 0 | 0 | 0 | 0 |
+| keepalive | 32 | 3 | 165018.20 | 191 | 243 | 0 | 0 | 0 | 0 | 0 | 0 |
+| keepalive | 32 | median | 165133.60 | 191 | 242 | 0 | 0 | 0 | 0 | 0 | 0 |
+| keepalive | 128 | 1 | 166801.04 | 764 | 850 | 0 | 0 | 0 | 0 | 0 | 0 |
+| keepalive | 128 | 2 | 166709.86 | 763 | 857 | 0 | 0 | 0 | 0 | 0 | 0 |
+| keepalive | 128 | 3 | 166250.35 | 765 | 858 | 0 | 0 | 0 | 0 | 0 | 0 |
+| keepalive | 128 | median | 166709.86 | 763 | 857 | 0 | 0 | 0 | 0 | 0 | 0 |
+| close | 1 | 1 | 13917.40 | 40 | 53 | 0 | 0 | 0 | 0 | 0 | 0 |
+| close | 1 | 2 | 13768.60 | 40 | 55 | 0 | 0 | 0 | 0 | 0 | 0 |
+| close | 1 | 3 | 13887.60 | 40 | 53 | 0 | 0 | 0 | 0 | 0 | 0 |
+| close | 1 | median | 13887.60 | 40 | 53 | 0 | 0 | 0 | 0 | 0 | 0 |
+| close | 8 | 1 | 34631.40 | 95 | 157 | 0 | 0 | 0 | 0 | 0 | 0 |
+| close | 8 | 2 | 34632.57 | 95 | 157 | 0 | 0 | 0 | 0 | 0 | 0 |
+| close | 8 | 3 | 34991.40 | 95 | 159 | 0 | 0 | 0 | 0 | 0 | 0 |
+| close | 8 | median | 34632.57 | 95 | 157 | 0 | 0 | 0 | 0 | 0 | 0 |
+| close | 32 | 1 | 35866.20 | 375 | 567 | 0 | 0 | 0 | 0 | 0 | 0 |
+| close | 32 | 2 | 36127.60 | 378 | 561 | 0 | 0 | 0 | 0 | 0 | 0 |
+| close | 32 | 3 | 34183.40 | 388 | 599 | 0 | 0 | 0 | 0 | 0 | 0 |
+| close | 32 | median | 35866.20 | 375 | 567 | 0 | 0 | 0 | 0 | 0 | 0 |
+| close | 128 | 1 | 35116.95 | 1553 | 2240 | 0 | 0 | 0 | 0 | 0 | 0 |
+| close | 128 | 2 | 33669.53 | 1604 | 2432 | 0 | 0 | 0 | 0 | 0 | 0 |
+| close | 128 | 3 | 35479.01 | 1562 | 2242 | 0 | 0 | 0 | 0 | 0 | 0 |
+| close | 128 | median | 35116.95 | 1553 | 2240 | 0 | 0 | 0 | 0 | 0 | 0 |
+
