@@ -7,6 +7,7 @@
 #include "host_render.h"
 #include "host_date.h"
 
+#include <stdint.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -115,12 +116,17 @@ static void expect_copy(const char *name, uint64_t status, const char *reason, c
   if (keep == 1 && !has_lit(dst, n, "Connection: close")) bad(name);
 }
 
+/* book_extra NULL means the host and the book see the same extra.
+   A non-NULL book_extra is what remains after the host drops
+   Connection, Content-Length, Transfer-Encoding, and Date. The host
+   still receives extra, so render_direct runs the filtered path. */
 static void expect_same(const char *name, uint64_t status, const char *reason, const char *extra,
-                        const char *body, uint64_t keep, uint64_t omit) {
+                        const char *book_extra, const char *body, uint64_t keep, uint64_t omit) {
   uint8_t book[4096];
   uint8_t host[4096];
   size_t got = 0;
-  muro__slice s = httpRender(status, of(reason), of(DATE), of(extra), of(body), keep, omit);
+  const char *shown = book_extra ? book_extra : extra;
+  muro__slice s = httpRender(status, of(reason), of(DATE), of(shown), of(body), keep, omit);
   size_t n;
   if (s.n > sizeof book) {
     bad(name);
@@ -135,6 +141,39 @@ static void expect_same(const char *name, uint64_t status, const char *reason, c
   if (n != s.n || got != s.n || memcmp(host, book, s.n) != 0) {
     fprintf(stderr, "FAIL %s: host %zu book %zu\n", name, n, s.n);
     failures += 1;
+  }
+}
+
+/* A length that wraps size_t if added to the fixed header pieces.
+   The pointer is one byte. The copy must not read it. */
+static void expect_no_wrap(void) {
+  uint8_t dst[128];
+  uint8_t one = 'Z';
+  const char *extra = "Content-Type: text/plain\r\n";
+  size_t got;
+  size_t n;
+  size_t i;
+  memset(dst, 0xa5, sizeof dst);
+  got = 1;
+  n = host_copy_response(dst, sizeof dst, 200, (const uint8_t *)"OK", 2, (const uint8_t *)DATE, 29,
+                         (const uint8_t *)extra, strlen(extra), &one, SIZE_MAX - 32, 0, 0, &got);
+  if (n != 0 || got != 0) bad("wrap-body");
+  for (i = 0; i < sizeof dst; i++) {
+    if (dst[i] != 0xa5) {
+      bad("wrap-body-wrote");
+      break;
+    }
+  }
+  memset(dst, 0xa5, sizeof dst);
+  got = 1;
+  n = host_copy_response(dst, sizeof dst, 200, (const uint8_t *)"OK", 2, &one, SIZE_MAX / 2,
+                         (const uint8_t *)extra, strlen(extra), &one, SIZE_MAX / 2, 0, 0, &got);
+  if (n != 0 || got != 0) bad("wrap-halves");
+  for (i = 0; i < sizeof dst; i++) {
+    if (dst[i] != 0xa5) {
+      bad("wrap-halves-wrote");
+      break;
+    }
   }
 }
 
@@ -226,13 +265,31 @@ int main(void) {
               "ab", 0, 1);
   expect_copy("extra-good", 200, "OK", "X-Trace: 1\r\n", "ab", 0, 1);
   expect_copy("extra-bare", 200, "OK", "X-Trace: 1", "ab", 0, 1);
-  expect_same("hello-keep", 200, "OK", "Content-Type: text/plain\r\n", "hello\n", 0, 0);
-  expect_same("hello-close", 200, "OK", "Content-Type: text/plain\r\n", "hello\n", 1, 0);
-  expect_same("hello-head", 200, "OK", "Content-Type: text/plain\r\n", "hello\n", 0, 1);
-  expect_same("empty-body", 204, "No Content", "", "", 0, 0);
-  expect_same("json-same", 201, "Created", json, "1234567890", 0, 0);
-  expect_same("odd-code", 418, "I'm a teapot", type, "no", 1, 0);
-  expect_same("zero-keep", 200, "OK", "", "", 0, 0);
+  expect_same("hello-keep", 200, "OK", "Content-Type: text/plain\r\n", NULL, "hello\n", 0, 0);
+  expect_same("hello-close", 200, "OK", "Content-Type: text/plain\r\n", NULL, "hello\n", 1, 0);
+  expect_same("hello-head", 200, "OK", "Content-Type: text/plain\r\n", NULL, "hello\n", 0, 1);
+  expect_same("empty-body", 204, "No Content", "", NULL, "", 0, 0);
+  expect_same("json-same", 201, "Created", json, NULL, "1234567890", 0, 0);
+  expect_same("odd-code", 418, "I'm a teapot", type, NULL, "no", 1, 0);
+  expect_same("zero-keep", 200, "OK", "", NULL, "", 0, 0);
+  expect_same("owned-keep", 200, "OK",
+              "Connection: close\r\nContent-Length: 0\r\nTransfer-Encoding: chunked\r\n"
+              "Date: Mon, 01 Jan 2000 00:00:00 GMT\r\nContent-Type: text/plain\r\n",
+              "Content-Type: text/plain\r\n", "hello\n", 0, 0);
+  expect_same("owned-middle", 200, "OK",
+              "X-Trace: 1\r\nConnection: close\r\nContent-Length: 9\r\n"
+              "Transfer-Encoding: chunked\r\nDate: Mon, 01 Jan 2000 00:00:00 GMT\r\n"
+              "Content-Type: text/plain\r\n",
+              "X-Trace: 1\r\nContent-Type: text/plain\r\n", "hello\n", 0, 0);
+  expect_same("owned-only", 200, "OK",
+              "Date: Mon, 01 Jan 2000 00:00:00 GMT\r\nContent-Length: 1\r\n"
+              "CoNnEcTiOn: keep-alive\r\nTransfer-Encoding: chunked\r\n",
+              "", "hello\n", 1, 0);
+  expect_same("owned-head", 200, "OK",
+              "Content-Length: 3\r\nX-Ok: yes\r\nConnection: keep-alive\r\n"
+              "Transfer-Encoding: chunked\r\nDate: nope\r\n",
+              "X-Ok: yes\r\n", "hello\n", 0, 1);
+  expect_no_wrap();
   {
     uint8_t a[512], b[512];
     size_t na, nb;

@@ -2,6 +2,13 @@
 
 ## 0.1.0-dev — unreleased
 
+- `render_direct` refuses a response whose piece lengths do not fit
+  in `size_t`, instead of wrapping the total and writing past the
+  caller buffer. `sess_key_of` asserts that the session state has
+  one slot, which is the only slot it keys. The fuzzer links the
+  patched connection book and the scan, step, and view memos, the
+  same objects the server runs. The library version stays
+  `0.1.0-dev`. The pin stays muro `0.22.14`.
 - Closing an epoll connection always drops the cached interest for
   that fd, even when `EPOLL_CTL_DEL` fails. A reused fd with the
   same interest then gets a real `ADD` instead of a silent stall.

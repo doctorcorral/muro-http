@@ -86,6 +86,18 @@ struct admit_slot {
 
 static struct admit_slot admit_slots[ADMIT_SLOTS];
 static unsigned admit_hand;
+static unsigned admit_misses;
+
+/* Tests isolate offers. The server never calls these. A hit does
+   not increment the miss count. */
+void admit_memo_reset(void) {
+  unsigned i;
+  for (i = 0; i < ADMIT_SLOTS; i++) admit_slots[i].used = 0;
+  admit_hand = 0;
+  admit_misses = 0;
+}
+
+unsigned admit_memo_misses(void) { return admit_misses; }
 
 static struct admit_key admit_key_of(uint64_t phase, uint64_t ev, uint64_t n, uint64_t has_cls,
                                      uint64_t cls, uint64_t has_rep, uint64_t rep, uint64_t observe,
@@ -130,6 +142,7 @@ AdmitOffer admit_offer(uint64_t phase, uint64_t ev, uint64_t n, uint64_t has_cls
     if (admit_slots[i].used && memcmp(&admit_slots[i].key, &akey, sizeof akey) == 0)
       return admit_slots[i].offer;
   }
+  admit_misses += 1;
   o = admitChoice(phase, ev, n, has_cls, cls, has_rep, rep, observe, close_after, at, stuck, key,
                   sess_done);
   out = none();

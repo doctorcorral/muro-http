@@ -74,11 +74,16 @@ static void want(const char *name, Conn st, int i, uint64_t expect) {
 
 void step_memo_reset(void);
 void view_memo_reset(void);
+void admit_memo_reset(void);
+void sess_memo_reset(void);
 
 static int restart(Conn *st, Proto **proto) {
   proto_free(*proto);
   *proto = NULL;
   step_memo_reset();
+  view_memo_reset();
+  admit_memo_reset();
+  sess_memo_reset();
   *st = begin();
   *proto = proto_begin();
   if (!*proto) {
@@ -93,6 +98,9 @@ static Proto *open_proto(const char *name) {
   /* A repeated pure step does not classify again. Start each scenario
      cold so the first bytes event still shows that one allocation. */
   step_memo_reset();
+  view_memo_reset();
+  admit_memo_reset();
+  sess_memo_reset();
   p = proto_begin();
   if (!p) bad(name, "session init");
   return p;

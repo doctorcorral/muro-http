@@ -14,6 +14,7 @@
 
 #include "conn.h"
 
+#include <stdint.h>
 #include <string.h>
 
 enum { VIEW_SLOTS = 8, VIEW_MAX = 65536 };
@@ -81,6 +82,10 @@ static struct view_slot *slot_for(muro__slice s) {
   return sl;
 }
 
+/* The pointer addresses a ring slot, not a heap object that lives
+   for the process. A later classify can overwrite that slot after
+   VIEW_SLOTS newer entries. A buffer that skips the ring returns
+   the book's pointer instead. */
 Classified *classify(muro__slice s) {
   struct view_slot *sl;
   Classified *c;
@@ -153,8 +158,15 @@ muro__slice bodyView(muro__slice s) {
     sl->has_body = 1;
     return r;
   }
-  if (!s.p || !r.p || r.p < s.p || r.p + r.n > s.p + s.n) return r;
-  off = (size_t)(r.p - s.p);
+  /* Integer addresses, not pointer compares. r.p + r.n is undefined
+     when that sum leaves the object r.p points at. */
+  if (!s.p || !r.p || r.n > s.n) return r;
+  {
+    uintptr_t base = (uintptr_t)s.p;
+    uintptr_t start = (uintptr_t)r.p;
+    if (start < base || start - base > s.n - r.n) return r;
+    off = (size_t)(start - base);
+  }
   sl->body_off = off;
   sl->body_n = r.n;
   sl->has_body = 1;

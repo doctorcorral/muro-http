@@ -96,6 +96,22 @@ static int sess_plain(const muro__sess_val *v) {
   return v && !v->a && !v->b && !v->names;
 }
 
+/* nat[0] and set[0] are the whole state only while the book has one
+   slot. A wider header must not reuse this key. */
+_Static_assert(MURO__SESS_SLOTS == 1, "sess_key_of keys only set[0] and nat[0]");
+
+static unsigned sess_misses;
+
+/* Tests isolate moves. The server never calls these. */
+void sess_memo_reset(void) {
+  unsigned i;
+  for (i = 0; i < SESS_SLOTS; i++) sess_slots[i].used = 0;
+  sess_hand = 0;
+  sess_misses = 0;
+}
+
+unsigned sess_memo_misses(void) { return sess_misses; }
+
 static void sess_key_of(struct sess_key *k, const muro__sess_st *st, int dir,
                         const muro__sess_val *v) {
   memset(k, 0, sizeof *k);
@@ -159,10 +175,12 @@ static int step_val(Proto *p, int dir, muro__sess_val v) {
     sess_key_of(&key, &p->st, dir, &v);
     hit = sess_find(&key, &res);
     if (!hit) {
+      sess_misses += 1;
       res = muro__sess_conn_step(p->st, dir, &v);
       if (res.status == MURO_SESS_OK) sess_store(&key, res.status, res.state);
     }
   } else {
+    sess_misses += 1;
     res = muro__sess_conn_step(p->st, dir, &v);
   }
   if (res.status != MURO_SESS_OK) return 0;

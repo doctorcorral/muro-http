@@ -200,9 +200,11 @@ clean:
 FUZZ_CC = clang
 FUZZ_SAN = -fsanitize=fuzzer,address,undefined
 FUZZ_CFLAGS = -std=c11 -g -O1 -fno-omit-frame-pointer -fno-sanitize-recover=undefined $(FUZZ_SAN) -Wall -Wextra -Werror -D_GNU_SOURCE -I c -I c/generated -include c/shim.h
-# conn.c already emits the request classifiers. Linking request.c
-# twice defines those symbols twice. render.c is separate.
-FUZZ_SRCS = fuzz/step_fuzz.c c/step.c c/shim.c c/proto.c c/admit_glue.c c/host_render.c c/host_stream.c c/generated/conn.c c/generated/session.c c/generated/admit.c c/generated/render.c
+# The server steps through c/conn.patched.c plus the scan cache and
+# the step and view memos. The fuzzer links that same path.
+# c/generated/conn.c and c/generated/request.c define those symbols
+# again. render.c is separate.
+FUZZ_SRCS = fuzz/step_fuzz.c c/step.c c/shim.c c/proto.c c/admit_glue.c c/host_render.c c/host_stream.c c/conn.patched.c c/scan_cache.c c/step_memo.c c/view_memo.c c/generated/session.c c/generated/admit.c c/generated/render.c
 
 fuzz/step_fuzz: $(FUZZ_SRCS) c/step.h c/shim.h c/host_stream.h c/host_render.h
 	$(FUZZ_CC) $(FUZZ_CFLAGS) -o $@ $(FUZZ_SRCS)

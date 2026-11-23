@@ -6,6 +6,7 @@
 #include "shim.h"
 #include "render.h"
 
+#include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -140,6 +141,21 @@ static muro__slice as_slice(const uint8_t *p, size_t n) {
 
 static size_t copy_out(uint8_t *dst, size_t cap, muro__slice msg, size_t *got);
 
+static int size_add(size_t *acc, size_t n) {
+  if (n > SIZE_MAX - *acc) return 0;
+  *acc += n;
+  return 1;
+}
+
+/* n bytes at o must fit in cap. A zero length copies nothing. */
+static int put_bytes(uint8_t *dst, size_t cap, size_t *o, const uint8_t *p, size_t n) {
+  if (n == 0) return 1;
+  if (!dst || !p || *o > cap || n > cap - *o) return 0;
+  memcpy(dst + *o, p, n);
+  *o += n;
+  return 1;
+}
+
 /* One pass into dst. httpConn still chooses keep-alive versus close,
    and httpCode still chooses the status digits, including rdShow for
    a code the book does not spell. The date bytes are the slice the
@@ -175,39 +191,56 @@ static size_t render_direct(uint8_t *dst, size_t cap, uint64_t status, muro__sli
     nlen /= 10u;
   } while (nlen > 0);
   body_n = omit == 1 ? 0 : body.n;
-  total = (sizeof http - 1) + code.n + (sizeof spc - 1) + reason.n + (sizeof crlf - 1) +
-          (sizeof date_name - 1) + date.n + (sizeof crlf - 1) + conn.n + (sizeof cl_name - 1) + cl_n +
-          (sizeof crlf - 1) + extra.n + (sizeof crlf - 1) + body_n;
+  /* A wrapping sum is not a length. The book's concat aborts on it,
+     so refuse instead of copying a short total past dst. */
+  total = 0;
+  if (!size_add(&total, sizeof http - 1) || !size_add(&total, code.n) ||
+      !size_add(&total, sizeof spc - 1) || !size_add(&total, reason.n) ||
+      !size_add(&total, sizeof crlf - 1) || !size_add(&total, sizeof date_name - 1) ||
+      !size_add(&total, date.n) || !size_add(&total, sizeof crlf - 1) ||
+      !size_add(&total, conn.n) || !size_add(&total, sizeof cl_name - 1) ||
+      !size_add(&total, cl_n) || !size_add(&total, sizeof crlf - 1) ||
+      !size_add(&total, extra.n) || !size_add(&total, sizeof crlf - 1) ||
+      !size_add(&total, body_n)) {
+    if (got) *got = 0;
+    muro_http_reset();
+    return 0;
+  }
   if (got) *got = total;
   if (!dst || total == 0 || total > cap) {
     muro_http_reset();
     return 0;
   }
-#define PUT(p, n)                         \
-  do {                                    \
-    if ((n) != 0) {                       \
-      memcpy(dst + o, (p), (n));          \
-      o += (n);                           \
-    }                                     \
-  } while (0)
-  PUT(http, sizeof http - 1);
-  PUT(code_buf, code.n);
-  PUT(spc, sizeof spc - 1);
-  PUT(reason.p, reason.n);
-  PUT(crlf, sizeof crlf - 1);
-  PUT(date_name, sizeof date_name - 1);
-  PUT(date.p, date.n);
-  PUT(crlf, sizeof crlf - 1);
-  PUT(conn.p, conn.n);
-  PUT(cl_name, sizeof cl_name - 1);
+  if (!put_bytes(dst, cap, &o, http, sizeof http - 1) ||
+      !put_bytes(dst, cap, &o, code_buf, code.n) ||
+      !put_bytes(dst, cap, &o, spc, sizeof spc - 1) ||
+      !put_bytes(dst, cap, &o, reason.p, reason.n) ||
+      !put_bytes(dst, cap, &o, crlf, sizeof crlf - 1) ||
+      !put_bytes(dst, cap, &o, date_name, sizeof date_name - 1) ||
+      !put_bytes(dst, cap, &o, date.p, date.n) ||
+      !put_bytes(dst, cap, &o, crlf, sizeof crlf - 1) ||
+      !put_bytes(dst, cap, &o, conn.p, conn.n) ||
+      !put_bytes(dst, cap, &o, cl_name, sizeof cl_name - 1)) {
+    muro_http_reset();
+    if (got) *got = 0;
+    return 0;
+  }
   while (cl_n > 0) {
+    if (o >= cap) {
+      muro_http_reset();
+      if (got) *got = 0;
+      return 0;
+    }
     dst[o++] = cl_buf[--cl_n];
   }
-  PUT(crlf, sizeof crlf - 1);
-  PUT(extra.p, extra.n);
-  PUT(crlf, sizeof crlf - 1);
-  if (body_n) PUT(body.p, body_n);
-#undef PUT
+  if (!put_bytes(dst, cap, &o, crlf, sizeof crlf - 1) ||
+      !put_bytes(dst, cap, &o, extra.p, extra.n) ||
+      !put_bytes(dst, cap, &o, crlf, sizeof crlf - 1) ||
+      (body_n != 0 && !put_bytes(dst, cap, &o, body.p, body_n))) {
+    muro_http_reset();
+    if (got) *got = 0;
+    return 0;
+  }
   if (o != total) {
     muro_http_reset();
     if (got) *got = 0;
