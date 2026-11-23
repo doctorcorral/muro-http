@@ -2,6 +2,20 @@
 
 ## 0.1.0-dev — unreleased
 
+- HTTP/1.1 for one connection lives in `c/step.c`
+  (`muro_http_step`). The socket loop in `c/host.c` is an adapter:
+  it reports accepted, bytes already read, a write of `n` bytes, a
+  hard write failure, peer close, and the clock, then writes the
+  span the step returns. That span points at the connection's send
+  buffer, the 100 Continue area, or the close area. The keep-alive
+  path does not copy the response a second time. `c/step.c` does
+  not call `read`, `write`, `accept`, `poll`, `kqueue`, `epoll`,
+  `fork`, or the clock. `make c-check` runs `c/check_step_pure.sh`
+  and `c/test_step` (`examples/adapter/mem.c`). The books, the
+  admit wall, and `c/host_render.c` stay. Workers, `--wait poll`,
+  and the listen backlog stay in the adapter.
+  `docs/protocol-backend.md` is the contract. The library version
+  stays `0.1.0-dev`. The pin stays muro `0.22.14`.
 - The listen backlog is `SOMAXCONN`. On macOS the parent still
   passes accepted sockets with `SCM_RIGHTS`. It retries `EINTR`,
   and a full worker channel blocks the parent until some worker

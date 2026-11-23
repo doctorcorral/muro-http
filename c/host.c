@@ -1,24 +1,10 @@
-/* One connection is one image and one session.
-   The image is conn.step. The moves are proto_admit, which applies
-   the emitted admitChoice. This file does not choose a move. It
-   feeds bytes, peer eof, write progress, write done, write error,
-   an idle tick, and the handler's reply. When the image asks for
-   the handler, this file builds a request view, calls that callback,
-   and copies the book's framing of the handler's status, headers,
-   and body.
-
-   Origin 1 is a malformed request. The bytes are httpMalformed.
-   Origin 2 is a transfer coding the book does not implement. The
-   bytes are httpNotImplemented. A committed handler that fails
-   before a status byte leaves is httpInternal. This file also writes
-   100 Continue, 413, and 417 when host_in_policy says so, and 501
-   for method code 1. host_in_policy does not answer an unknown
-   transfer coding. The image still chooses 400 and that 501.
-
-   The response copy is c/host_render.c, which includes render.h.
-   conn.h and render.h both put the prelude under MURO__PRELUDE, so
-   one translation unit can include both. This file calls
-   host_copy_response and does not include render.h. */
+/* Socket adapter for one worker. Poll, kqueue, or epoll, the
+   listen socket, worker processes, and the SCM_RIGHTS handoff live
+   here. HTTP/1.1 (classify, admit, the handler, keep or close, the
+   body limit, the idle deadline) is c/step.c. This file turns an
+   accepted fd, arrived bytes, a finished write, a peer close, and
+   the clock into step facts, then writes the span the step returns.
+   That span points at the connection's own send buffer. */
 
 #include "shim.h"
 #include "conn.h"
@@ -28,6 +14,7 @@
 #include "host_render.h"
 #include "host_date.h"
 #include "host_stream.h"
+#include "step.h"
 
 #include <arpa/inet.h>
 #include <errno.h>
@@ -46,22 +33,8 @@
 #include <unistd.h>
 
 enum {
-  PH_READ = 0,
-  PH_DECIDE = 1,
-  PH_WRITE = 2,
-  PH_IDLE = 3,
-  PH_CLOSED = 4,
-  HOST_ACT_NONE = 0,
-  HOST_ACT_READ = 1,
-  HOST_ACT_WRITE = 2,
-  HOST_ACT_CLOSE = 3,
-  HOST_ACT_HANDLER = 4,
-  EV_BYTES = 0,
-  EV_EOF = 1,
-  EV_REPLY = 6,
   IN_CAP = 65536,
-  OUT_CAP = 69632,
-  PUMP_FUSE = 100000
+  OUT_CAP = 69632
 };
 
 static volatile sig_atomic_t stop_flag;
@@ -93,55 +66,18 @@ static const char *cfg_name(const MuroHttpConfig *cfg) {
   return "muro-http";
 }
 
-static uint64_t field(Conn st, int i) {
-  switch (i) {
-  case 0: return st.muro__as.conn.muro__f_0;
-  case 1: return st.muro__as.conn.muro__f_1;
-  case 2: return st.muro__as.conn.muro__f_2;
-  case 3: return st.muro__as.conn.muro__f_3;
-  case 4: return st.muro__as.conn.muro__f_4;
-  case 5: return st.muro__as.conn.muro__f_5;
-  case 6: return st.muro__as.conn.muro__f_6;
-  case 7: return st.muro__as.conn.muro__f_7;
-  case 8: return st.muro__as.conn.muro__f_8;
-  case 9: return st.muro__as.conn.muro__f_9;
-  case 10: return st.muro__as.conn.muro__f_10;
-  case 11: return st.muro__as.conn.muro__f_11;
-  case 12: return st.muro__as.conn.muro__f_12;
-  default: return 0;
-  }
-}
-
 typedef struct Slot {
   int fd;
   int used;
   int want_read;
   int want_write;
-  int rendered;
-  int owe;
-  Proto *proto;
-  Conn st;
-  uint8_t *in;
-  size_t in_len;
-  uint8_t *out;
-  size_t out_cap;
-  size_t out_len;
-  size_t out_off;
   uint64_t deadline;
   int body_idle;
   struct HostIn hin;
-  int sent_100;
-  uint8_t cont[160];
-  size_t cont_len;
-  size_t cont_off;
-  int is_head;
-  int ver11;
-  int resp_mode;
-  int pull_until_end;
-  int pull_done;
-  MuroHttpPull pull;
-  void *pull_user;
-  uint64_t pull_left;
+  HttpStep step;
+  const uint8_t *pend;
+  size_t pend_len;
+  int pend_interim;
 } Slot;
 
 typedef struct Server {
@@ -347,49 +283,14 @@ static void close_slot(Server *sv, Slot *s) {
   status_before_close(sv, s);
   host_poll_watch(sv->pq, s->fd, 0, 0);
   close(s->fd);
-  proto_free(s->proto);
+  muro_http_step_shutdown(&s->step);
   host_in_close(&s->hin);
-  free(s->in);
-  free(s->out);
+  free(s->step.in);
+  free(s->step.out);
   memset(s, 0, sizeof *s);
   s->fd = -1;
   if (sv->nconn > 0) sv->nconn -= 1;
   (void)sync_listen(sv);
-}
-
-static int step_ev(Server *sv, Slot *s, Ev ev) {
-  int phase = (int)field(s->st, 0);
-  int half = (int)field(s->st, 1);
-  int keep = (int)field(s->st, 2);
-  int tag = (int)ev.muro__as.ev.muro__f_0;
-  muro__slice buf = ev.muro__as.ev.muro__f_1;
-  int status = -1;
-  int reply = -1;
-  int observe = 0;
-  int admitted;
-
-  if (!s->proto) return 0;
-  if (proto_live(s->proto) && !proto_done(s->proto) && (phase == PH_READ || phase == PH_IDLE) &&
-      (tag == EV_BYTES || (tag == EV_EOF && buf.n > 0))) {
-    Classified *c = classify(buf);
-    status = c->muro__as.classified.muro__f_0->muro__field_tag;
-  }
-  /* n1 is 1 for an HTTP status 400..599. That is reply-bad and
-     closes the connection. Any other handler status is reply-ok. */
-  if (proto_live(s->proto) && !proto_done(s->proto) && phase == PH_DECIDE && tag == EV_REPLY) {
-    uint64_t bad_reply = ev.muro__as.ev.muro__f_3;
-    reply = bad_reply == 0 ? 0 : 1;
-    observe = 0;
-  }
-  admitted = proto_admit(s->proto, phase, tag, buf.n, status, reply, observe, half || keep);
-  if (admitted != 1) {
-    muro_http_reset();
-    fprintf(stderr, "%s: admit refused phase %d ev %d\n", sv->name, phase, tag);
-    return 0;
-  }
-  s->st = step(s->st, ev);
-  muro_http_reset();
-  return 1;
 }
 
 /* Best-effort status before close. The fd is non-blocking. A short
@@ -412,45 +313,18 @@ static void write_status(Server *sv, int fd, const uint8_t *p, size_t n) {
 
 /* owe is set when the handler committed a side effect. If no status
    byte has left the socket, send one before the fd is closed. A
-   rendered buffer is that status. Otherwise the book supplies 500. */
-static void load_date(char date[30]) { host_date_fill(date); }
-
+   rendered buffer is that status. Otherwise the book supplies 500.
+   The fd is non-blocking. write_status does not wait. */
 static void status_before_close(Server *sv, Slot *s) {
-  uint8_t tmp[512];
-  char date[30];
+  const uint8_t *msg = NULL;
   size_t n = 0;
-  const uint8_t *msg;
-  if (!s->owe || s->fd < 0 || s->out_off > 0) return;
-  if (s->rendered && s->out && s->out_len > 0) {
-    msg = s->out;
-    n = s->out_len;
-  } else {
-    load_date(date);
-    n = host_copy_literal(tmp, sizeof tmp, 1, (const uint8_t *)date, 29, s->is_head ? 1u : 0u, NULL);
-    msg = tmp;
-    fprintf(stderr, "%s: committed write has no status; sending 500\n", sv->name);
-  }
+  int log500 = 0;
+  char date[30];
+  if (s->fd < 0) return;
+  host_date_fill(date);
+  muro_http_step_close_status(&s->step, (const uint8_t *)date, 29, &msg, &n, &log500);
+  if (log500) fprintf(stderr, "%s: committed write has no status; sending 500\n", sv->name);
   if (n > 0) write_status(sv, s->fd, msg, n);
-  s->owe = 0;
-}
-
-static int span_is(MuroHttpSlice s, const char *lit) {
-  size_t n = strlen(lit);
-  if (s.n != n) return 0;
-  if (n == 0) return 1;
-  return memcmp(s.p, lit, n) == 0;
-}
-
-static void note_version(Slot *s, const MuroHttpRequest *req) {
-  s->is_head = span_is(req->method, "HEAD");
-  s->ver11 = span_is(req->version, "HTTP/1.1");
-}
-
-static int fill_bound(Slot *s, size_t *n) {
-  uint64_t end = field(s->st, 11);
-  if (end == 0 || end > (uint64_t)s->in_len || !s->in) return -1;
-  *n = (size_t)end;
-  return 0;
 }
 
 /* One create. The test process waits on this path before it sends
@@ -481,573 +355,176 @@ static int sock_pending(int fd) {
   return 1;
 }
 
-/* 1 when HTTP/1.1 100 Continue has been fully written. 0 when some
-   bytes remain and the slot wants a write. -1 on a hard write error
-   or a literal that does not fit. One successful write per call, so
-   a short write or EAGAIN returns to poll. sent_100 is set only
-   after the last byte. The date is rendered once into s->cont. */
-static int write_100(Server *sv, Slot *s) {
+/* The step returns a span. This writes it, or parks it when the
+   socket cannot take more. A 100 Continue span can pause before the
+   first byte when MURO_TEST_100_STALL is set and the socket has
+   nothing queued. */
+static void log_step(const Server *sv, const StepOut *out) {
+  int i;
+  for (i = 0; i < 2; i++) {
+    int note = i == 0 ? out->note : out->note2;
+    size_t n = i == 0 ? out->note_n : out->note_n2;
+    if (note == MURO_STEP_NOTE_ADMIT)
+      fprintf(stderr, "%s: admit refused phase %d ev %d\n", sv->name, out->note_phase, out->note_ev);
+    else if (note == MURO_STEP_NOTE_TOO_BIG_COMMIT)
+      fprintf(stderr, "%s: response is %zu bytes after commit; sending 500\n", sv->name, n);
+    else if (note == MURO_STEP_NOTE_TOO_BIG)
+      fprintf(stderr, "%s: response is %zu bytes\n", sv->name, n);
+    else if (note == MURO_STEP_NOTE_HANDLER_500)
+      fprintf(stderr, "%s: handler failed after a commit; sending 500\n", sv->name);
+    else if (note == MURO_STEP_NOTE_FUEL)
+      fprintf(stderr, "%s: pump fuel exhausted\n", sv->name);
+  }
+}
+
+/* 1 and *wrote set when the socket took some bytes. 0 when the span
+   stays outstanding (short write, or the interim stall). -1 on a
+   hard write error. A signal retry stays here. */
+static int emit_span(Server *sv, Slot *s, const uint8_t *p, size_t len, int interim, size_t *wrote) {
   int spins = 0;
-  if (s->sent_100) return 1;
-  if (s->cont_len == 0) {
-    char date[30];
-    size_t nlen;
-    load_date(date);
-    nlen = host_copy_literal(s->cont, sizeof s->cont, 5, (const uint8_t *)date, 29, 0, NULL);
-    if (nlen == 0 || nlen > sizeof s->cont) return -1;
-    s->cont_len = nlen;
-    s->cont_off = 0;
-  }
-  if (s->cont_off >= s->cont_len) {
-    s->sent_100 = 1;
-    s->cont_len = 0;
-    s->cont_off = 0;
-    return 1;
-  }
-  if (sv->stall_100 > 0 && s->cont_off == 0) {
+  if (interim && sv->stall_100 > 0 && !sock_pending(s->fd)) {
     struct timespec ts;
     note_100_ready();
-    /* No interim byte yet. Wait until the peer has queued more
-       bytes, so a body and a pipelined request are in the kernel
-       during the short write. A pause that ignores the socket loses
-       the race on a slow accept and the first response is 200. */
-    if (!sock_pending(s->fd)) {
-      sv->stall_100 -= 1;
-      s->want_write = 1;
-      ts.tv_sec = 0;
-      ts.tv_nsec = 20000000L;
-      while (nanosleep(&ts, &ts) < 0 && errno == EINTR)
-        continue;
-      return 0;
-    }
-    sv->stall_100 = 0;
+    sv->stall_100 -= 1;
+    s->want_read = 0;
+    s->want_write = 1;
+    ts.tv_sec = 0;
+    ts.tv_nsec = 20000000L;
+    while (nanosleep(&ts, &ts) < 0 && errno == EINTR) continue;
+    return 0;
   }
-  while (spins < 8) {
-    size_t chunk = s->cont_len - s->cont_off;
+  while (spins < 64) {
+    size_t chunk = len;
     ssize_t n;
     if (sv->write_limit > 0 && chunk > sv->write_limit) chunk = sv->write_limit;
-    n = write(s->fd, s->cont + s->cont_off, chunk);
+    n = write(s->fd, p, chunk);
     if (n < 0 && errno == EINTR) {
       spins += 1;
       continue;
     }
-    if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
-      s->want_write = 1;
-      return 0;
-    }
+    if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) return 0;
     if (n <= 0) return -1;
-    s->cont_off += (size_t)n;
+    *wrote = (size_t)n;
     note_write(sv, (size_t)n);
-    break;
-  }
-  if (s->cont_off < s->cont_len) {
-    s->want_write = 1;
-    return 0;
-  }
-  s->sent_100 = 1;
-  s->cont_len = 0;
-  s->cont_off = 0;
-  return 1;
-}
-
-/* 1 when 100 Continue is fully written. 0 when bytes remain: watch
-   POLLOUT and not POLLIN. A read during a short interim steps leftover
-   bytes into HANDLE, and onHandle holds them until the client writes
-   again. -1 on a hard write error. A READ-phase timer still arms the
-   idle deadline, so a peer that never takes the interim still times
-   out. HANDLE has the book timer off, so that deadline clears.
-   A stalled muro_http_body_read arms its own deadline and closes
-   after the idle timeout. That close is not an image tick. */
-static int hold_100(Server *sv, Slot *s) {
-  int w100 = write_100(sv, s);
-  int timer;
-  if (w100 != 0) return w100;
-  s->want_read = 0;
-  s->want_write = 1;
-  timer = (int)field(s->st, 5);
-  if (timer) {
-    if (s->deadline == 0) s->deadline = host_poll_now_ms() + (uint64_t)sv->idle_ms;
-  } else {
-    s->deadline = 0;
+    return 1;
   }
   return 0;
 }
 
-static int copy_fixed(Slot *s, int which) {
+static void drive(Server *sv, Slot *s, StepIn *in);
+
+static void drive(Server *sv, Slot *s, StepIn *in) {
   char date[30];
-  size_t got = 0;
-  size_t n;
-  load_date(date);
-  n = host_copy_literal(s->out, s->out_cap, which, (const uint8_t *)date, 29, s->is_head ? 1u : 0u, &got);
-  if (n == 0) return -1;
-  s->out_len = n;
-  s->out_off = 0;
-  s->rendered = 1;
-  s->resp_mode = 0;
-  s->pull = NULL;
-  return 0;
-}
-
-static int begin_reply(Server *sv, Slot *s, const MuroHttpResponse *resp) {
-  int half = (int)field(s->st, 1);
-  int keep = (int)field(s->st, 2);
-  int bad = (resp->status >= 400 && resp->status <= 599) ? 1 : 0;
-  int bit = (resp->close_after || bad) ? 1 : 0;
-  uint64_t eff;
-  size_t got = 0;
-  size_t n = 0;
-  char date[30];
-  const uint8_t *reason = resp->reason ? (const uint8_t *)resp->reason : NULL;
-  const uint8_t *extra = resp->headers ? (const uint8_t *)resp->headers : NULL;
-  const uint8_t *body = resp->body;
-  size_t reason_n = reason ? resp->reason_len : 0;
-  size_t extra_n = extra ? resp->headers_len : 0;
-  size_t body_n = body ? resp->body_len : 0;
-  int omit = s->is_head ? 1 : 0;
-  load_date(date);
-  s->pull = NULL;
-  s->pull_user = NULL;
-  s->pull_left = 0;
-  s->pull_done = 0;
-  s->pull_until_end = 0;
-  s->resp_mode = 0;
-  if (resp->pull && resp->has_length) {
-    if (omit) {
-      n = host_copy_head(s->out, s->out_cap, (uint64_t)resp->status, reason, reason_n,
-                         (const uint8_t *)date, 29, extra, extra_n, resp->content_length, 0, &got);
-    } else {
-      n = host_copy_head(s->out, s->out_cap, (uint64_t)resp->status, reason, reason_n,
-                         (const uint8_t *)date, 29, extra, extra_n, resp->content_length, 0, &got);
-      s->resp_mode = 1;
-      s->pull = resp->pull;
-      s->pull_user = resp->pull_user;
-      s->pull_left = resp->content_length;
-    }
-  } else if (resp->pull) {
-    bit = omit || !s->ver11 ? 1 : bit;
-    if (omit || !s->ver11) {
-      n = host_copy_delim(s->out, s->out_cap, (uint64_t)resp->status, reason, reason_n,
-                          (const uint8_t *)date, 29, extra, extra_n, &got);
-      if (!omit) {
-        s->resp_mode = 1;
-        s->pull = resp->pull;
-        s->pull_user = resp->pull_user;
-        s->pull_until_end = 1;
-      }
-    } else {
-      n = host_copy_chunked(s->out, s->out_cap, (uint64_t)resp->status, reason, reason_n,
-                            (const uint8_t *)date, 29, extra, extra_n, 0, &got);
-      s->resp_mode = 2;
-      s->pull = resp->pull;
-      s->pull_user = resp->pull_user;
-    }
-  } else {
-    n = host_copy_response(s->out, s->out_cap, (uint64_t)resp->status, reason, reason_n,
-                           (const uint8_t *)date, 29, extra, extra_n, body, body_n, 0, (uint64_t)omit,
-                           &got);
-  }
-  eff = (half || keep || bit) ? 1u : 0u;
-  /* The book already ran with keep 0. A forced close has to be the
-     value the book saw, so rebuild when eff is 1 and the first copy
-     assumed keep-alive. */
-  if (eff == 1 && n > 0 && !(resp->pull && !resp->has_length && (omit || !s->ver11))) {
-    if (resp->pull && resp->has_length) {
-      n = host_copy_head(s->out, s->out_cap, (uint64_t)resp->status, reason, reason_n,
-                         (const uint8_t *)date, 29, extra, extra_n, resp->content_length, 1, &got);
-    } else if (resp->pull && s->ver11 && !omit) {
-      n = host_copy_chunked(s->out, s->out_cap, (uint64_t)resp->status, reason, reason_n,
-                            (const uint8_t *)date, 29, extra, extra_n, 1, &got);
-    } else if (!resp->pull) {
-      n = host_copy_response(s->out, s->out_cap, (uint64_t)resp->status, reason, reason_n,
-                             (const uint8_t *)date, 29, extra, extra_n, body, body_n, 1, (uint64_t)omit,
-                             &got);
-    }
-  }
-  if (n == 0 && resp->owe_status) {
-    n = host_copy_literal(s->out, s->out_cap, 1, (const uint8_t *)date, 29, (uint64_t)omit, NULL);
-    bit = 1;
-    bad = 1;
-    eff = 1;
-    s->resp_mode = 0;
-    s->pull = NULL;
-    if (n > 0) fprintf(stderr, "%s: response is %zu bytes after commit; sending 500\n", sv->name, got);
-  }
-  if (n == 0) {
-    fprintf(stderr, "%s: response is %zu bytes\n", sv->name, got);
-    return -1;
-  }
-  s->out_len = n;
-  s->out_off = 0;
-  s->rendered = 1;
-  s->owe = resp->owe_status ? 1 : 0;
-  if (!step_ev(sv, s, evReplyOf((uint64_t)bit, (uint64_t)bad))) return -1;
-  return 0;
-}
-
-static int fill_pull(Slot *s) {
-  uint8_t tmp[8192];
-  int r;
-  size_t cap;
-  if (!s->pull || s->resp_mode == 0) return 0;
-  if (s->resp_mode == 2) {
-    r = s->pull(tmp, sizeof tmp, s->pull_user);
-    if (r < 0) return -1;
-    if (r == 0) {
-      s->out_len = host_copy_last(s->out, s->out_cap, NULL);
-      s->out_off = 0;
-      s->pull_done = 1;
-      s->resp_mode = 0;
-      s->pull = NULL;
-      return s->out_len > 0 ? 0 : -1;
-    }
-    s->out_len = host_copy_chunk(s->out, s->out_cap, tmp, (size_t)r, NULL);
-    s->out_off = 0;
-    return s->out_len > 0 ? 0 : -1;
-  }
-  if (!s->pull_until_end && s->pull_left == 0) {
-    s->pull_done = 1;
-    s->resp_mode = 0;
-    s->pull = NULL;
-    s->out_len = 0;
-    s->out_off = 0;
-    return 0;
-  }
-  cap = s->out_cap < sizeof tmp ? s->out_cap : sizeof tmp;
-  if (!s->pull_until_end && s->pull_left < cap) cap = (size_t)s->pull_left;
-  if (cap == 0) return -1;
-  r = s->pull(s->out, cap, s->pull_user);
-  if (r < 0) return -1;
-  if (r == 0) {
-    if (!s->pull_until_end && s->pull_left != 0) return -1;
-    s->pull_done = 1;
-    s->resp_mode = 0;
-    s->pull = NULL;
-    s->out_len = 0;
-    s->out_off = 0;
-    return 0;
-  }
-  if (!s->pull_until_end && (uint64_t)r > s->pull_left) return -1;
-  if (!s->pull_until_end) s->pull_left -= (uint64_t)r;
-  s->out_len = (size_t)r;
-  s->out_off = 0;
-  return 0;
-}
-
-static void consume(Slot *s, uint64_t end_off) {
-  size_t n;
-  if (end_off == 0 || end_off > (uint64_t)s->in_len) return;
-  n = (size_t)end_off;
-  memmove(s->in, s->in + n, s->in_len - n);
-  s->in_len -= n;
-}
-
-static int which_of(int pol) {
-  if (pol == 413) return 3;
-  if (pol == 417) return 4;
-  if (pol == 501) return 2;
-  return 0;
-}
-
-static void note_head_buf(Slot *s, const uint8_t *buf, size_t n) {
-  muro__slice sl;
-  muro__slice m;
-  muro__slice v;
-  if (!buf || n == 0) return;
-  sl.p = buf;
-  sl.n = n;
-  m = methodView(sl);
-  v = versionView(sl);
-  s->is_head = m.n == 4 && m.p && memcmp(m.p, "HEAD", 4) == 0;
-  s->ver11 = v.n == 8 && v.p && memcmp(v.p, "HTTP/1.1", 8) == 0;
-  muro_http_reset();
-}
-
-static void prepare_in(Slot *s, int fresh) {
-  int phase = (int)field(s->st, 0);
-  if (phase != PH_READ && phase != PH_IDLE) return;
-  host_in_reset(&s->hin);
-  if (fresh) {
-    s->sent_100 = 0;
-    s->cont_len = 0;
-    s->cont_off = 0;
-  }
-  if (s->in && s->in_len) host_in_capture(&s->hin, s->in, s->in_len);
-}
-
-static int step_buf(Server *sv, Slot *s) {
-  if (!s->in) return 0;
-  return step_ev(sv, s, evBytes(muro__slice_of(s->in, s->in_len)));
-}
-
-static void send_and_close(Server *sv, Slot *s, int which) {
-  uint8_t tmp[512];
-  char date[30];
-  size_t n;
-  load_date(date);
-  n = host_copy_literal(tmp, sizeof tmp, which, (const uint8_t *)date, 29, s->is_head ? 1u : 0u, NULL);
-  if (n > 0) write_status(sv, s->fd, tmp, n);
-  s->owe = 0;
-  s->out_off = 1;
-  close_slot(sv, s);
-}
-
-static int reply_fixed(Server *sv, Slot *s, int which) {
-  if (copy_fixed(s, which) < 0) return -1;
-  if (!step_ev(sv, s, evReplyOf(1, 1))) return -1;
-  return 0;
-}
-
-static int inject_next(Server *sv, Slot *s) {
-  uint8_t *q = NULL;
-  size_t qn = 0;
-  if (!host_in_take_next(&s->hin, &q, &qn)) return 0;
-  if (qn > sv->in_cap || !s->in) {
-    free(q);
-    return -1;
-  }
-  memcpy(s->in, q, qn);
-  s->in_len = qn;
-  free(q);
-  prepare_in(s, 1);
-  return step_buf(sv, s) ? 1 : -1;
-}
-
-/* Returns 1 to keep pumping, 0 when the slot is waiting or gone. */
-static int pump(Server *sv, Slot *s) {
-  int spins = 0;
-  while (s->used && spins < PUMP_FUSE) {
-    int phase = (int)field(s->st, 0);
-    int action = (int)field(s->st, 4);
-    int timer = (int)field(s->st, 5);
-    uint64_t end_off = field(s->st, 11);
-    uint64_t more = field(s->st, 12);
-    spins += 1;
-    if (s->cont_len > 0 && !s->sent_100) {
-      int w100 = hold_100(sv, s);
-      if (w100 < 0) {
-        close_slot(sv, s);
-        return 0;
-      }
-      if (w100 == 0) return 0;
-    }
-    if (phase == PH_CLOSED || action == HOST_ACT_CLOSE) {
+  int guard = 0;
+  /* One clock sample for this turn. The idle deadline is armed from
+     it. Refreshing it on every partial write would add a clock read
+     to the keep-alive path. */
+  host_date_fill(date);
+  in->date = (const uint8_t *)date;
+  in->date_n = 29;
+  in->now_ms = host_poll_now_ms();
+  while (s->used && guard < 1000000) {
+    StepOut out;
+    int rc;
+    size_t wrote = 0;
+    int er;
+    guard += 1;
+    in->deadline = s->deadline;
+    rc = muro_http_step(&s->step, in, &out);
+    log_step(sv, &out);
+    if (rc < 0) {
       close_slot(sv, s);
-      return 0;
+      return;
     }
-    if (phase == PH_READ || phase == PH_IDLE) {
-      s->rendered = 0;
-      s->owe = 0;
-      s->out_len = 0;
-      s->out_off = 0;
-      s->resp_mode = 0;
-      s->pull = NULL;
+    if (out.close_conn) {
+      if (out.status_now && out.status && out.status_len)
+        write_status(sv, s->fd, out.status, out.status_len);
+      close_slot(sv, s);
+      return;
     }
-    if (action == HOST_ACT_HANDLER) {
-      MuroHttpRequest req;
-      MuroHttpResponse resp;
-      size_t span = 0;
-      int rc;
-      int send100 = 0;
-      int pol;
-      int dec;
-      int force = 0;
-      int over = 0;
-      if (fill_bound(s, &span) < 0 || !sv->handler) {
-        close_slot(sv, s);
-        return 0;
+    if (out.bytes && out.len) {
+      er = emit_span(sv, s, out.bytes, out.len, out.interim, &wrote);
+      if (er == 0) {
+        s->want_read = out.read_more;
+        s->want_write = 1;
+        s->deadline = out.wake_at;
+        s->pend = out.bytes;
+        s->pend_len = out.len;
+        s->pend_interim = out.interim;
+        return;
       }
-      note_head_buf(s, s->in, span);
-      pol = host_in_policy(s->in, span, sv->max_body, &send100);
-      if (pol) {
-        if (reply_fixed(sv, s, which_of(pol)) < 0) {
+      s->pend = NULL;
+      s->pend_len = 0;
+      s->pend_interim = 0;
+      if (er < 0) {
+        if (out.interim) {
           close_slot(sv, s);
-          return 0;
+          return;
         }
+        in->kind = MURO_STEP_WRITE_FAILED;
+        in->n = 0;
         continue;
       }
-      if (send100 && !s->sent_100) {
-        int w100 = hold_100(sv, s);
-        if (w100 < 0) {
-          close_slot(sv, s);
-          return 0;
-        }
-        if (w100 == 0) return 0;
-      }
-      dec = host_in_bind(&s->hin, s->in, span, &req);
-      if (dec) {
-        if (reply_fixed(sv, s, which_of(dec)) < 0) {
-          close_slot(sv, s);
-          return 0;
-        }
-        continue;
-      }
-      note_version(s, &req);
-      memset(&resp, 0, sizeof resp);
-      rc = sv->handler(&req, &resp, sv->user);
-      if (rc < 0) {
-        if (resp.owe_status) {
-          s->owe = 1;
-          if (copy_fixed(s, 1) == 0)
-            fprintf(stderr, "%s: handler failed after a commit; sending 500\n", sv->name);
-        }
-        close_slot(sv, s);
-        return 0;
-      }
-      host_in_after(&s->hin, resp.pull != NULL && !s->is_head, &force, &over);
-      if (over) {
-        if (reply_fixed(sv, s, which_of(over)) < 0) {
-          close_slot(sv, s);
-          return 0;
-        }
-        continue;
-      }
-      if (force) resp.close_after = 1;
-      if (begin_reply(sv, s, &resp) < 0) {
-        if (resp.owe_status) s->owe = 1;
-        close_slot(sv, s);
-        return 0;
-      }
+      in->kind = MURO_STEP_WROTE;
+      in->n = wrote;
       continue;
     }
-    if (action == HOST_ACT_WRITE) {
-      ssize_t n;
-      size_t chunk;
-      if (!s->rendered) {
-        int origin = (int)field(s->st, 6);
-        int which;
-        note_head_buf(s, s->in, s->in_len);
-        if (origin == 1) which = 0;
-        else if (origin == 2) which = 2;
-        else {
-          close_slot(sv, s);
-          return 0;
-        }
-        if (copy_fixed(s, which) < 0) {
-          close_slot(sv, s);
-          return 0;
-        }
-      }
-      s->want_read = 0;
-      if (s->out_off < s->out_len) {
-        chunk = s->out_len - s->out_off;
-        if (sv->write_limit > 0 && chunk > sv->write_limit) chunk = sv->write_limit;
-        n = write(s->fd, s->out + s->out_off, chunk);
-        if (n < 0 && errno == EINTR) continue;
-        if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
-          s->want_write = 1;
-          return 0;
-        }
-        if (n <= 0) {
-          if (!step_ev(sv, s, evError())) {
-            close_slot(sv, s);
-            return 0;
-          }
-          continue;
-        }
-        s->out_off += (size_t)n;
-        if (s->out_off > 0) s->owe = 0;
-        s->want_write = 0;
-        note_write(sv, (size_t)n);
-        if (!step_ev(sv, s, evProgress((uint64_t)n))) {
-          close_slot(sv, s);
-          return 0;
-        }
-        continue;
-      }
-      if (s->resp_mode != 0) {
-        /* Headers for this response are already written. A pull
-           error, including a chunk past max_body, cannot be a 413.
-           close_slot drops the fd. A chunked body then has no
-           last-chunk. */
-        if (fill_pull(s) < 0) {
-          close_slot(sv, s);
-          return 0;
-        }
-        if (s->out_len > 0) continue;
-      }
-      s->want_write = 0;
-      s->rendered = 0;
-      s->out_len = 0;
-      s->out_off = 0;
-      if (!step_ev(sv, s, evDone())) {
-        close_slot(sv, s);
-        return 0;
-      }
-      if (s->used && s->hin.open) {
-        close_slot(sv, s);
-        return 0;
-      }
-      continue;
-    }
-    if (action == HOST_ACT_READ) {
-      int injected;
-      s->want_write = 0;
-      if (more && end_off > 0 && end_off <= (uint64_t)s->in_len) {
-        consume(s, end_off);
-        s->want_read = 0;
-        prepare_in(s, 1);
-        if (!step_buf(sv, s)) {
-          close_slot(sv, s);
-          return 0;
-        }
-        continue;
-      }
-      if (!more && end_off > 0 && end_off <= (uint64_t)s->in_len) consume(s, end_off);
-      injected = inject_next(sv, s);
-      if (injected < 0) {
-        close_slot(sv, s);
-        return 0;
-      }
-      if (injected > 0) continue;
-      if (phase == PH_READ && s->in && s->in_len > 0) {
-        int send100 = 0;
-        int pol = host_in_policy(s->in, s->in_len, sv->max_body, &send100);
-        if (pol) {
-          note_head_buf(s, s->in, s->in_len);
-          send_and_close(sv, s, which_of(pol));
-          return 0;
-        }
-        if (send100 && !s->sent_100) {
-          int w100 = hold_100(sv, s);
-          if (w100 < 0) {
-            close_slot(sv, s);
-            return 0;
-          }
-          if (w100 == 0) return 0;
-        }
-      }
-      s->want_read = 1;
-      if (timer) {
-        if (s->deadline == 0) s->deadline = host_poll_now_ms() + (uint64_t)sv->idle_ms;
-      } else {
-        s->deadline = 0;
-      }
-      return 0;
-    }
-    s->want_read = (phase == PH_READ || phase == PH_IDLE);
-    s->want_write = 0;
-    return 0;
+    s->want_read = out.read_more;
+    s->want_write = out.write_more;
+    s->deadline = out.wake_at;
+    s->pend = NULL;
+    s->pend_len = 0;
+    s->pend_interim = 0;
+    return;
   }
   if (s->used) {
     fprintf(stderr, "%s: pump fuel exhausted\n", sv->name);
     close_slot(sv, s);
   }
-  return 0;
 }
-
-static void after_io(Server *sv, Slot *s) {
-  pump(sv, s);
+static void resume_write(Server *sv, Slot *s) {
+  StepIn in;
+  size_t wrote = 0;
+  int rc;
+  if (!s->used || !s->pend || s->pend_len == 0) return;
+  rc = emit_span(sv, s, s->pend, s->pend_len, s->pend_interim, &wrote);
+  if (rc == 0) {
+    s->want_write = 1;
+    sync_watch(sv, s);
+    return;
+  }
+  if (rc < 0 && s->pend_interim) {
+    close_slot(sv, s);
+    return;
+  }
+  memset(&in, 0, sizeof in);
+  if (rc < 0) in.kind = MURO_STEP_WRITE_FAILED;
+  else {
+    in.kind = MURO_STEP_WROTE;
+    in.n = wrote;
+  }
+  s->pend = NULL;
+  s->pend_len = 0;
+  s->pend_interim = 0;
+  drive(sv, s, &in);
   if (s->used) sync_watch(sv, s);
 }
 
 static void on_readable(Server *sv, Slot *s, int hangup) {
+  uint8_t *p = NULL;
+  size_t len = 0;
+  size_t cap = 0;
   int got = 0;
   int hit_eof = 0;
-  int fresh = s->in_len == 0;
-  while (s->in_len < sv->in_cap) {
-    ssize_t n = read(s->fd, s->in + s->in_len, sv->in_cap - s->in_len);
+  int fresh;
+  StepIn in;
+  muro_http_step_recv(&s->step, &p, &len, &cap);
+  fresh = len == 0;
+  while (p && len < cap) {
+    ssize_t n = read(s->fd, p + len, cap - len);
     if (n > 0) {
-      s->in_len += (size_t)n;
+      len += (size_t)n;
+      muro_http_step_set_in_len(&s->step, len);
       got = 1;
       continue;
     }
@@ -1061,29 +538,23 @@ static void on_readable(Server *sv, Slot *s, int hangup) {
     return;
   }
   if (!got && !hit_eof && !hangup) {
-    if (s->in_len >= sv->in_cap) close_slot(sv, s);
+    if (len >= cap) close_slot(sv, s);
     return;
   }
   s->deadline = 0;
-  prepare_in(s, fresh);
-  if (hit_eof || hangup) {
-    if (!step_ev(sv, s, evEof(muro__slice_of(s->in, s->in_len)))) {
-      close_slot(sv, s);
-      return;
-    }
-  } else if (!step_buf(sv, s)) {
-    close_slot(sv, s);
-    return;
-  }
-  after_io(sv, s);
+  memset(&in, 0, sizeof in);
+  in.kind = (hit_eof || hangup) ? MURO_STEP_PEER_CLOSED : MURO_STEP_BYTES;
+  in.empty_before = fresh;
+  drive(sv, s, &in);
+  if (s->used) sync_watch(sv, s);
 }
 
 static int fd_skipped(int fd);
 
 static void on_tick(Server *sv, Slot *s, uint64_t now) {
   int phase;
+  StepIn in;
   if (!s->used || s->deadline == 0 || s->deadline > now) return;
-  phase = (int)field(s->st, 0);
   /* A socket on io_skip is inside muro_http_body_read. Do not step
      the image: the handler or the pull is still on the stack.
      Decide and write leave the book timer off, so a deadline there
@@ -1092,17 +563,22 @@ static void on_tick(Server *sv, Slot *s, uint64_t now) {
      host_io_once arm a new window, and the wait never ends. Set
      body_idle in every phase. The wait returns and that caller
      closes. Do not close_slot here. */
-  if (fd_skipped(s->fd) || (phase != PH_READ && phase != PH_IDLE)) {
+  if (fd_skipped(s->fd)) {
+    s->deadline = 0;
+    s->body_idle = 1;
+    return;
+  }
+  phase = muro_http_step_phase(&s->step);
+  if (phase != MURO_STEP_PH_READ && phase != MURO_STEP_PH_IDLE) {
     s->deadline = 0;
     s->body_idle = 1;
     return;
   }
   s->deadline = 0;
-  if (!step_ev(sv, s, evTick())) {
-    close_slot(sv, s);
-    return;
-  }
-  after_io(sv, s);
+  memset(&in, 0, sizeof in);
+  in.kind = MURO_STEP_NOW;
+  drive(sv, s, &in);
+  if (s->used) sync_watch(sv, s);
 }
 
 /* These servers do not call muro_http_body_read while the image is
@@ -1126,7 +602,7 @@ int host_test_skipped_tick(int phase) {
      if on_tick falls through into close_slot. */
   s.fd = -1;
   s.deadline = 1;
-  s.st.muro__as.conn.muro__f_0 = (uint64_t)phase;
+  muro_http_step_set_phase(&s.step, phase);
   io_skip[0] = s.fd;
   io_depth = 1;
   on_tick(&sv, &s, 2);
@@ -1149,6 +625,9 @@ static int take_conn(int lfd, struct sockaddr_in *peer, socklen_t *len) {
 static int adopt_fd(Server *sv, int fd) {
   Slot *s = NULL;
   int i;
+  uint8_t *inb;
+  uint8_t *outb;
+  StepIn in;
   if (set_nb_cloexec(fd) < 0) {
     close(fd);
     return 1;
@@ -1175,27 +654,26 @@ static int adopt_fd(Server *sv, int fd) {
   }
   memset(s, 0, sizeof *s);
   s->fd = fd;
-  s->in = malloc(sv->in_cap);
-  s->out = malloc(OUT_CAP);
-  s->out_cap = s->out ? (size_t)OUT_CAP : 0;
-  s->proto = proto_begin();
-  if (!s->in || !s->out || !s->proto) {
-    proto_free(s->proto);
-    free(s->in);
-    free(s->out);
+  inb = malloc(sv->in_cap);
+  outb = malloc((size_t)OUT_CAP);
+  if (!inb || !outb) {
+    free(inb);
+    free(outb);
     close(fd);
     memset(s, 0, sizeof *s);
     s->fd = -1;
     fprintf(stderr, "%s: connection setup failed\n", sv->name);
     return -1;
   }
-  s->st = begin();
+  muro_http_step_bind(&s->step, inb, sv->in_cap, outb, (size_t)OUT_CAP, &s->hin, &s->want_read,
+                      &s->want_write, sv->handler, sv->user, sv->max_body, sv->idle_ms);
   host_in_init(&s->hin, fd, sv->max_body);
-  s->ver11 = 1;
   s->used = 1;
-  s->want_read = 1;
-  s->deadline = host_poll_now_ms() + (uint64_t)sv->idle_ms;
   sv->nconn += 1;
+  memset(&in, 0, sizeof in);
+  in.kind = MURO_STEP_ACCEPTED;
+  drive(sv, s, &in);
+  if (!s->used) return -1;
   sync_watch(sv, s);
   if (sv->fatal) return -1;
   return 0;
@@ -1617,9 +1095,9 @@ int muro_http_config_parse(MuroHttpConfig *cfg, int argc, char **argv) {
 static int slot_idle(Slot *s) {
   int phase;
   if (!s->used) return 0;
-  phase = (int)field(s->st, 0);
-  if (phase == PH_IDLE) return 1;
-  if (phase == PH_READ && s->in_len == 0) return 1;
+  phase = muro_http_step_phase(&s->step);
+  if (phase == MURO_STEP_PH_IDLE) return 1;
+  if (phase == MURO_STEP_PH_READ && muro_http_step_in_len(&s->step) == 0) return 1;
   return 0;
 }
 
@@ -1780,7 +1258,7 @@ int host_io_once(int watch_fd) {
       close_slot(sv, s);
       continue;
     }
-    if (s->used && evs[i].writable && s->want_write) after_io(sv, s);
+    if (s->used && evs[i].writable && s->want_write) resume_write(sv, s);
     if (s->used && evs[i].readable && s->want_read) on_readable(sv, s, evs[i].hangup);
     else if (s->used && evs[i].hangup && s->want_read) on_readable(sv, s, 1);
     else if (s->used && evs[i].hangup && !evs[i].writable) close_slot(sv, s);
@@ -1944,7 +1422,7 @@ static int serve_one(const MuroHttpConfig *cfg, MuroHttpHandler handler, void *u
         close_slot(&sv, s);
         continue;
       }
-      if (s->used && evs[i].writable && s->want_write) after_io(&sv, s);
+      if (s->used && evs[i].writable && s->want_write) resume_write(&sv, s);
       if (s->used && evs[i].readable && s->want_read) on_readable(&sv, s, evs[i].hangup);
       else if (s->used && evs[i].hangup && s->want_read) on_readable(&sv, s, 1);
       else if (s->used && evs[i].hangup && !evs[i].writable) {
