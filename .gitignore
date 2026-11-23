@@ -21,6 +21,7 @@ c/test_serve
 c/test_workers
 c/test_http11
 c/test_step
+c/test_step_slice
 c/muro-httpd
 c/muro-hello
 c/muro-stream
