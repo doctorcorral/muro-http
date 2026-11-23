@@ -11,7 +11,9 @@
    nearest-rank: rank = ceil(p/100 * N), reported as the 1 us bucket
    index. A sample at or above 200 ms lands in the last bucket and
    is counted in overflow. TCP_NODELAY is set. The request is
-   GET / HTTP/1.1. errors is the sum of err_connect, err_write,
+   GET / HTTP/1.1 unless --method POST, which sends POST / with a
+   fixed 32-byte body and Content-Length. The GET bytes are
+   unchanged. errors is the sum of err_connect, err_write,
    err_read, and err_parse. */
 
 #include <arpa/inet.h>
@@ -47,7 +49,10 @@ static int opt_conc = 1;
 static int opt_duration = 5;
 static int opt_requests = 0;
 static int opt_close = 0;
+static int opt_post = 0;
 static char opt_host[64] = "127.0.0.1";
+/* Fixed POST body. 32 bytes, no escaping, Content-Length set. */
+static const char post_body[] = "0123456789abcdef0123456789abcdef";
 static uint64_t deadline_ms;
 static uint64_t req_left;
 
@@ -232,16 +237,28 @@ static int take_request(void) {
 }
 
 static void *worker(void *arg) {
-  char req[256];
+  char req[512];
   int req_n;
   int fd = -1;
   (void)arg;
-  req_n = snprintf(req, sizeof req,
-                   "GET / HTTP/1.1\r\n"
-                   "Host: %s:%d\r\n"
-                   "Connection: %s\r\n"
-                   "\r\n",
-                   opt_host, opt_port, opt_close ? "close" : "keep-alive");
+  if (!opt_post) {
+    req_n = snprintf(req, sizeof req,
+                     "GET / HTTP/1.1\r\n"
+                     "Host: %s:%d\r\n"
+                     "Connection: %s\r\n"
+                     "\r\n",
+                     opt_host, opt_port, opt_close ? "close" : "keep-alive");
+  } else {
+    req_n = snprintf(req, sizeof req,
+                     "POST / HTTP/1.1\r\n"
+                     "Host: %s:%d\r\n"
+                     "Content-Length: %d\r\n"
+                     "Connection: %s\r\n"
+                     "\r\n"
+                     "%s",
+                     opt_host, opt_port, (int)(sizeof post_body - 1),
+                     opt_close ? "close" : "keep-alive", post_body);
+  }
   if (req_n < 0 || req_n >= (int)sizeof req) {
     add_err(&err_parse);
     return NULL;
@@ -319,9 +336,10 @@ static int parse_i(const char *s, int lo, int hi, int *out) {
 static void usage(void) {
   fprintf(stderr,
           "loadgen --host H --port N --concurrency N --duration S\n"
-          "        [--requests N] --mode keepalive|close\n"
+          "        [--requests N] --mode keepalive|close [--method GET|POST]\n"
           "duration is seconds. requests 0 means duration only.\n"
-          "When both are set, the run stops at the first limit.\n");
+          "When both are set, the run stops at the first limit.\n"
+          "POST sends a fixed 32-byte body. Default method is GET.\n");
 }
 
 int main(int argc, char **argv) {
@@ -362,6 +380,11 @@ int main(int argc, char **argv) {
       else if (strcmp(val, "close") == 0) opt_close = 1;
       else return 2;
       mode_set = 1;
+      i++;
+    } else if (strcmp(a, "--method") == 0 && val) {
+      if (strcmp(val, "GET") == 0) opt_post = 0;
+      else if (strcmp(val, "POST") == 0) opt_post = 1;
+      else return 2;
       i++;
     } else {
       usage();

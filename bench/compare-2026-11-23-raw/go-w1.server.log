@@ -1,0 +1,7 @@
+loadavg 188.71 90.80 45.76 1/772 913194
+start taskset -c 0 /home/rcc/Research/muro-http-bench/bench/go-hello/go-hello
+GOMAXPROCS=1
+2026/11/23 07:00:40 listening 127.0.0.1 18183
+preflight go GET 200 'text/plain' b'hello\n'
+preflight go POST 200 'text/plain' b'hello\n'
+stopped loadavg 8.05 46.62 37.05 1/771 924848

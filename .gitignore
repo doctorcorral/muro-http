@@ -25,6 +25,9 @@ c/muro-httpd
 c/muro-hello
 c/muro-stream
 /bench/loadgen
+/bench/go-hello/go-hello
+/bench/h2o-hello/h2o-hello
+__pycache__/
 *.o
 fuzz/step_fuzz
 fuzz/work/
