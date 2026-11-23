@@ -1,9 +1,9 @@
 # Compiler gaps
 
-muro 0.22.14. The books check, and the runs emit. The generated C is
+muro 0.22.19. The books check, and the runs emit. The generated C is
 not edited. The three limits below were real on muro 0.20.36. They
 are closed as of muro 0.20.39. The header record is unboxed as of
-muro 0.20.42. On 0.22.14, as on 0.21.14, `classify` still allocates
+muro 0.20.42. On 0.22.19, as on 0.22.14 and 0.21.14, `classify` still allocates
 the one `Classified` result, and the C driver still prints
 `view-allocs 0`, `health-allocs 1`, `post-allocs 1`.
 
@@ -110,7 +110,7 @@ the request buffer, including a zero-length value. Comparing the
 pointer with the including file's `muro__empty_bytes` does not
 detect a miss.
 
-## The connection stepper, on muro 0.22.14
+## The connection stepper, on muro 0.22.19
 
 `--backend c` emits `priv/muro/http/session.muro` as a stepper
 (`c/generated/session.c`). That file is generated. The emitted stepper
@@ -308,7 +308,7 @@ translation unit can include both. `c/host.c` calls
 muro 0.21.15 and muro 0.21.16 do not change the response bytes.
 0.21.15 is a temporal check over a keyed family. 0.21.16 ranks a
 recursive `State` that does not declare `all-states`. Neither emits
-a socket loop. The pin is 0.22.14. The per-key family is below.
+a socket loop. The pin is 0.22.19. The per-key family is below.
 
 ## Reply order per key
 

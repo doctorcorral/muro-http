@@ -2,6 +2,12 @@
 
 ## 0.1.0-dev — unreleased
 
+- Pin muro `0.22.19` from Hex (`{:muro, "~> 0.22.19"}` in
+  `mix.exs`, `muro: "0.22.19"` in `muro.exs`). The library version
+  stays `0.1.0-dev`. There is no path dependency. `mix muro.gen`
+  rewrites the committed C and Elixir headers for that pin. The
+  books are unchanged. 0.22.15 through 0.22.19 do not change the C
+  emitter this tree uses.
 - A short write of `100 Continue` keeps a flag for the rest of
   that span. A later hard error closes the connection and does
   not report `MURO_STEP_WRITE_FAILED`. An idle tick while that
