@@ -599,11 +599,16 @@ static void on_readable(Server *sv, Slot *s, int hangup) {
   muro_http_step_recv(&s->step, &p, &len, &cap);
   fresh = len == 0;
   while (p && len < cap) {
-    ssize_t n = read(s->fd, p + len, cap - len);
+    size_t want = cap - len;
+    ssize_t n = read(s->fd, p + len, want);
     if (n > 0) {
       len += (size_t)n;
       muro_http_step_set_in_len(&s->step, len);
       got = 1;
+      /* A short read drained the socket. Level-triggered epoll
+         reports bytes that arrive later. Keep reading only when
+         this call filled the buffer. */
+      if ((size_t)n < want) break;
       continue;
     }
     if (n == 0) {
