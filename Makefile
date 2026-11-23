@@ -5,7 +5,7 @@ CFLAGS ?= -Wall -Wextra -Werror -std=c11 $(OPT) -D_GNU_SOURCE -I c -I c/generate
 LDFLAGS ?=
 CHALLENGE_INC = -I examples/challenge
 
-.PHONY: all c-check c-sanitize clean
+.PHONY: all c-check c-sanitize c-conformance clean fuzz
 
 bench/loadgen: bench/loadgen.c
 	$(CC) -Wall -Wextra -Werror -std=c11 -O2 -o $@ bench/loadgen.c -pthread
@@ -13,7 +13,7 @@ bench/loadgen: bench/loadgen.c
 SAN_CFLAGS = -Wall -Wextra -Werror -std=c11 -D_GNU_SOURCE -I c -I c/generated -include c/shim.h -g -fno-omit-frame-pointer -fsanitize=address,undefined
 SAN_LDFLAGS = -fsanitize=address,undefined
 
-all: c/muro-httpd c/muro-hello c/muro-stream c/test_classify c/test_conn c/test_sess c/test_render c/test_e2e c/test_body c/test_jwt c/test_json c/test_store c/test_poll c/test_route c/test_tags c/test_hello c/test_serve c/test_workers c/test_http11
+all: c/muro-httpd c/muro-hello c/muro-stream c/test_classify c/test_conn c/test_sess c/test_render c/test_e2e c/test_body c/test_jwt c/test_json c/test_store c/test_poll c/test_route c/test_tags c/test_hello c/test_serve c/test_workers c/test_http11 c/test_step
 
 c/%.o: c/%.c
 	$(CC) $(CFLAGS) -c -o $@ $<
@@ -69,11 +69,14 @@ c/route_glue.o: examples/challenge/route_glue.c
 c/hello.o: examples/hello/hello.c
 	$(CC) $(CFLAGS) -c -o $@ examples/hello/hello.c
 
+c/mem_adapter.o: examples/adapter/mem.c
+	$(CC) $(CFLAGS) -c -o $@ examples/adapter/mem.c
+
 c/stream.o: examples/stream/stream.c
 	$(CC) $(CFLAGS) -c -o $@ examples/stream/stream.c
 
 CORE = c/shim.o c/proto.o c/admit_glue.o c/session.o c/admit.o c/conn.o
-HOST = c/host.o c/host_poll.o c/host_render.o c/host_date.o c/host_stream.o c/render.o $(CORE)
+HOST = c/host.o c/step.o c/host_poll.o c/host_render.o c/host_date.o c/host_stream.o c/render.o $(CORE)
 
 c/test_classify: c/test_classify.o c/request.o c/shim.o
 	$(CC) $(LDFLAGS) -o $@ c/test_classify.o c/request.o c/shim.o
@@ -132,7 +135,13 @@ c/muro-stream: c/stream.o $(HOST)
 c/test_http11: c/test_http11.o
 	$(CC) $(LDFLAGS) -o $@ c/test_http11.o
 
-c-check: bench/loadgen c/test_classify c/test_conn c/test_sess c/test_render c/test_body c/test_jwt c/test_json c/test_store c/test_poll c/test_route c/test_tags c/test_serve c/test_workers c/muro-httpd c/muro-hello c/muro-stream c/test_e2e c/test_hello c/test_http11
+c/test_step: c/mem_adapter.o $(HOST)
+	$(CC) $(LDFLAGS) -o $@ c/mem_adapter.o $(HOST)
+
+c-conformance: c/muro-hello
+	PYTHONDONTWRITEBYTECODE=1 python3 c/test_conformance.py c/muro-hello
+
+c-check: bench/loadgen c/test_classify c/test_conn c/test_sess c/test_render c/test_body c/test_jwt c/test_json c/test_store c/test_poll c/test_route c/test_tags c/test_serve c/test_workers c/muro-httpd c/muro-hello c/muro-stream c/test_e2e c/test_hello c/test_http11 c/test_step
 	./c/test_classify
 	./c/test_conn
 	./c/test_sess
@@ -149,10 +158,26 @@ c-check: bench/loadgen c/test_classify c/test_conn c/test_sess c/test_render c/t
 	./c/test_hello
 	./c/test_e2e c/muro-httpd
 	./c/test_http11
+	sh c/check_step_pure.sh
+	./c/test_step
 
 c-sanitize:
 	$(MAKE) clean
 	$(MAKE) c-check CFLAGS="$(SAN_CFLAGS)" LDFLAGS="$(SAN_LDFLAGS)"
 
 clean:
-	rm -f c/*.o c/muro-httpd c/muro-hello c/muro-stream c/test_classify c/test_conn c/test_sess c/test_render c/test_e2e c/test_admit c/test_body c/test_jwt c/test_json c/test_store c/test_poll c/test_route c/test_tags c/test_hello c/test_serve c/test_workers c/test_http11 bench/loadgen
+	rm -f c/*.o c/muro-httpd c/muro-hello c/muro-stream c/test_classify c/test_conn c/test_sess c/test_render c/test_e2e c/test_admit c/test_body c/test_jwt c/test_json c/test_store c/test_poll c/test_route c/test_tags c/test_hello c/test_serve c/test_workers c/test_http11 c/test_step bench/loadgen fuzz/step_fuzz
+
+# libFuzzer + ASan + UBSan. clang is fixed here so CC, c-check, and
+# c-sanitize keep using $(CC). Objects are not written into c/.
+FUZZ_CC = clang
+FUZZ_SAN = -fsanitize=fuzzer,address,undefined
+FUZZ_CFLAGS = -std=c11 -g -O1 -fno-omit-frame-pointer -fno-sanitize-recover=undefined $(FUZZ_SAN) -Wall -Wextra -Werror -D_GNU_SOURCE -I c -I c/generated -include c/shim.h
+# conn.c already emits the request classifiers. Linking request.c
+# twice defines those symbols twice. render.c is separate.
+FUZZ_SRCS = fuzz/step_fuzz.c c/step.c c/shim.c c/proto.c c/admit_glue.c c/host_render.c c/host_stream.c c/generated/conn.c c/generated/session.c c/generated/admit.c c/generated/render.c
+
+fuzz/step_fuzz: $(FUZZ_SRCS) c/step.h c/shim.h c/host_stream.h c/host_render.h
+	$(FUZZ_CC) $(FUZZ_CFLAGS) -o $@ $(FUZZ_SRCS)
+
+fuzz: fuzz/step_fuzz

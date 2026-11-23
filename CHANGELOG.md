@@ -2,6 +2,59 @@
 
 ## 0.1.0-dev — unreleased
 
+- After the step has closed the connection, a later fact returns
+  close with no new span. 413, 417, and 501 used to classify the
+  same buffer again and write a second response.
+  `examples/adapter/mem.c` checks those paths. The library version
+  stays `0.1.0-dev`. The pin stays muro `0.22.14`.
+- `make fuzz` builds `fuzz/step_fuzz` with clang, ASan, UBSan,
+  and libFuzzer. It drives `muro_http_step` with fact scripts
+  seeded from the adapter and protocol tests. It does not change
+  `CC` or `c-check`. The library version stays `0.1.0-dev`. The
+  pin stays muro `0.22.14`.
+- SIGINT and SIGTERM write a self-pipe. A wait that already
+  passed the stop-flag check still wakes, and the parent reaps
+  on that pipe plus SIGCHLD instead of a blocking `waitpid`
+  that can miss the signal. The library version stays
+  `0.1.0-dev`. The pin stays muro `0.22.14`.
+- `make c-conformance` runs `c/test_conformance.py` against
+  `c/muro-hello` on epoll. The library version stays
+  `0.1.0-dev`. The pin stays muro `0.22.14`.
+- A header block past 16384 bytes is 414 when the request line
+  itself passes that cap, and 431 otherwise. A shorter malformed
+  request stays 400. `examples/adapter/mem.c` checks the two
+  statuses. The library version stays `0.1.0-dev`. The pin stays
+  muro `0.22.14`.
+- A short write of `100 Continue` keeps a flag for the rest of
+  that span. A later hard error closes the connection and does
+  not report `MURO_STEP_WRITE_FAILED`. An idle tick while that
+  span is still outstanding closes and drops it. `muro_http_step`
+  resets its pump budget on every call, so a one-byte write
+  window on a large body does not trip the fuse. A short response
+  write does not keep the previous idle deadline.
+  `MURO_TEST_100_STALL` still clears when the socket already has
+  bytes queued. `c/check_step_pure.sh` allows whitespace before
+  `(`, rejects a wider set of calls and headers, and checks
+  undefined symbols in `c/step.o`. `examples/adapter/mem.c`
+  covers those paths. `c/test_http11` waits up to 10 seconds for
+  the server to exit, and `c/test_workers` waits up to 10 seconds
+  for SIGTERM. A process that has already exited is reaped on
+  the next poll. The library version stays `0.1.0-dev`. The pin
+  stays muro `0.22.14`.
+- HTTP/1.1 for one connection lives in `c/step.c`
+  (`muro_http_step`). The socket loop in `c/host.c` is an adapter:
+  it reports accepted, bytes already read, a write of `n` bytes, a
+  hard write failure, peer close, and the clock, then writes the
+  span the step returns. That span points at the connection's send
+  buffer, the 100 Continue area, or the close area. The keep-alive
+  path does not copy the response a second time. `c/step.c` does
+  not call `read`, `write`, `accept`, `poll`, `kqueue`, `epoll`,
+  `fork`, or the clock. `make c-check` runs `c/check_step_pure.sh`
+  and `c/test_step` (`examples/adapter/mem.c`). The books, the
+  admit wall, and `c/host_render.c` stay. Workers, `--wait poll`,
+  and the listen backlog stay in the adapter.
+  `docs/protocol-backend.md` is the contract. The library version
+  stays `0.1.0-dev`. The pin stays muro `0.22.14`.
 - The listen backlog is `SOMAXCONN`. On macOS the parent still
   passes accepted sockets with `SCM_RIGHTS`. It retries `EINTR`,
   and a full worker channel blocks the parent until some worker

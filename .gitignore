@@ -20,8 +20,11 @@ c/test_hello
 c/test_serve
 c/test_workers
 c/test_http11
+c/test_step
 c/muro-httpd
 c/muro-hello
 c/muro-stream
 /bench/loadgen
 *.o
+fuzz/step_fuzz
+fuzz/work/

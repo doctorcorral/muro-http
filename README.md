@@ -387,17 +387,23 @@ then exits 0. One worker is that process. Above one worker, the
 parent forwards SIGINT and SIGTERM and waits. Each worker drains
 itself. The parent returns 0 when every worker exits 0.
 
-`c/host.c` owns the sockets, the buffers, the connection table, the
-clock, and the wait. `make c-check` compiles it with
-`-Wall -Wextra -Werror -std=c11 -O2`, then runs the drivers. The loop
-does not choose a session move. It writes 100, 413, and 417, and
-it writes 501 for a method the book marks with method code 1. It
-copies the book's 400 and the book's unimplemented transfer coding
-(origin 2). `host_in_policy` does not answer that coding.
-It formats `Date`. The image chooses malformed and unimplemented.
-A partial `100 Continue` stays unsent until the wait can write the
-rest, and that socket is not watched for read while the interim is
-short. `sent_100` is set only after the last byte.
+`c/host.c` is the socket adapter. It owns the sockets, the buffers,
+the connection table, the clock, and the wait. HTTP/1.1 for one
+connection (classify, admit, the handler, keep or close, the body
+limit, the idle deadline) is `c/step.c`. The adapter reports facts
+and writes the span the step returns. That span points at the
+connection's own send buffer. `docs/protocol-backend.md` is the
+contract. `make c-check` compiles both with
+`-Wall -Wextra -Werror -std=c11 -O2`, then runs the drivers. The
+loop does not choose a session move. The step writes 100, 413, and
+417, and it writes 501 for a method the book marks with method code
+1. It copies the book's 400 and the book's unimplemented transfer
+coding (origin 2). `host_in_policy` does not answer that coding.
+The adapter formats `Date` and passes 29 bytes in. The image
+chooses malformed and unimplemented. A partial `100 Continue`
+stays unsent until the wait can write the rest, and that socket is
+not watched for read while the interim is short. `sent_100` is set
+only after the last byte.
 
 `c/host_poll.c` waits with kqueue on macOS and epoll on Linux.
 `poll(2)` is compiled on both and is the fallback. `--wait poll`
@@ -451,12 +457,17 @@ channel is left) is counted and written as
 count that cannot be set up returns -1. The parent is not an
 HTTP worker.
 
-Each accepted socket is one `Conn` and one session. Bytes, peer FIN,
-write progress, write done, write error, and the idle tick go through
-`proto_admit` and then `step`, the same order as `c/test_conn`. A
-refusal closes the socket. The image does not run. A read error
-closes the socket and is not `evError`: that event holds while the
-phase is read. A write error is `evError`, and the image shuts.
+Each accepted socket is one `Conn` and one session. The adapter
+turns an accepted fd, arrived bytes, a finished write, a hard write
+error, a peer close, and a due deadline into `StepIn`. `c/step.c`
+feeds those through `proto_admit` and then `step`, the same order
+as `c/test_conn`. A refusal closes the socket. The image does not
+run. A read error closes the socket and is not `evError`: that
+event holds while the phase is read. A response write error is
+`evError`, and the image shuts. A `100 Continue` write error closes
+with no `evError`, including when some of that span was already
+written. That flag stays set until the last byte is accepted. A
+short write is not a fact. The adapter retries the same pointer.
 
 The write range in the image stays length 16. `priv/muro/http/render.muro`
 is `httpRender(status, reason, date, extraHeaders, body, keep, omit)`.
@@ -549,6 +560,43 @@ The same pin does not prove three properties of the poll loop.
 An older reply that arrives after a newer one has opened runs beside
 it. The host does not do that. It does not read the next request
 while a response is in progress. The formula does not say so.
+
+## Writing a backend
+
+A backend owns the bytes and the clock. It does not own the
+HTTP/1.1 decisions. `c/step.h` is the contract.
+`docs/protocol-backend.md` lists the facts and the actions.
+
+Bind a recv buffer and a send buffer with `muro_http_step_bind`.
+Report one fact at a time: a connection was accepted
+(`MURO_STEP_ACCEPTED`), request bytes are already in the recv
+buffer (`MURO_STEP_BYTES`), the peer closed
+(`MURO_STEP_PEER_CLOSED`), a write of `n` bytes finished
+(`MURO_STEP_WROTE`), that write failed hard
+(`MURO_STEP_WRITE_FAILED`), or the armed deadline is due
+(`MURO_STEP_NOW`). Pass monotonic time and 29 bytes of IMF-fixdate.
+The step does not read the clock and does not call `read`,
+`write`, `accept`, or `poll`.
+
+Perform what comes back. Write `StepOut.bytes` from the pointer
+the step returned. On the keep-alive path that pointer is inside
+the send buffer passed to `muro_http_step_bind`. Copying it again
+is the regression this split avoids. A short write retries that
+same span and reports `MURO_STEP_WROTE` only for the bytes taken.
+Arm `wake_at` (0 disarms). Close when `close_conn` is set. If
+`status_now` is set, write `status` first without waiting out a
+full send buffer.
+
+Readable and writable are not facts. `:gen_tcp` has no readiness
+event, and neither does a muro-beam process. Both can still report
+"bytes arrived" and "write of n bytes finished".
+
+`examples/adapter/mem.c` is that loop with no socket. `make c-check`
+builds it as `c/test_step`. The reference server is still
+`c/host.c`. Workers, the listen backlog, and `--wait poll` stay
+there. `MURO_HTTP_WORKERS` and `--workers` are 1 through 64. The
+default is 1 and does not fork. `--wait poll` or
+`MURO_HTTP_WAIT=poll` forces `poll(2)`.
 
 ## The challenge example
 
@@ -828,9 +876,13 @@ emits `family.muro` as `MuroHttp.FamilyFsm`. That backend is the one
 that emits a keyed family. The C backend omits it, and `c/host.c`
 does not call the dispatcher.
 
-Hand-written core: `c/muro_http.h`, `c/host.c`, `c/host_poll.c`,
-`c/host_render.c`, `c/host_date.c`, `c/host_stream.c`, `c/proto.c`,
-`c/admit_glue.c`, `c/shim.c`.
+Hand-written core: `c/muro_http.h`, `c/step.h`, `c/step.c`,
+`c/host.c`, `c/host_poll.c`, `c/host_render.c`, `c/host_date.c`,
+`c/host_stream.c`, `c/proto.c`, `c/admit_glue.c`, `c/shim.c`.
+`examples/adapter/mem.c` is the socket-free backend. `c/step.c`
+calls the books. It does not replace them. A later muro step can
+take the same `StepIn` and return the same `StepOut`. The adapter
+stays.
 Hand-written challenge, under `examples/challenge/`: `httpd.c` (main),
 `app.c` (the handler), `route_glue.c`, `store.c` (SQLite), `jwt.c`
 (SHA-256, HMAC-SHA256, base64url, the HS256 check), `json_text.c`
@@ -883,7 +935,8 @@ book linked beside it must not import that book. `decide.muro` and
 - A JWT claim name longer than 32 bytes is rejected. Header and
   payload JSON are decoded into a 4096-byte buffer.
 - The receive buffer is 65536 bytes and the write buffer is 69632.
-  A header block past 16384 is 400. A body past 16384 is streamed,
+  A header block past 16384 is 414 when the request line itself
+  passes that cap, and 431 otherwise. A body past 16384 is streamed,
   up to the max body (default 8 MiB). A known `Content-Length` over
   that max is 413 at the headers, including one of at most 16384.
   The host does not read that body to the end first. A
@@ -927,7 +980,12 @@ scanner, and the default fuel of 2000 is not enough.
 
 `make c-check` compiles the drivers, `c/muro-httpd`, `c/muro-hello`,
 and `c/muro-stream` with `-Wall -Wextra -Werror -std=c11 -O2` and
-runs them. `c/test_hello` runs the hello server. `c/test_http11`
+runs them. It also runs `sh c/check_step_pure.sh` and `c/test_step`.
+The script rejects an OS call or an OS header in `c/step.c` and
+`c/step.h`. `c/test_step` drives `examples/adapter/mem.c`: two
+keep-alive responses whose bytes point into the caller-owned send
+buffer, then a peer close of a partial request (400, body
+`malformed`). `c/test_hello` runs the hello server. `c/test_http11`
 runs the stream server. `c/test_route` and `c/test_tags` check the
 challenge route book and the decide constructor tags. `c/test_admit`
 is not
