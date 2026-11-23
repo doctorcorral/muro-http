@@ -66,6 +66,8 @@ static pid_t start_stream_ms(int *port, const char *max_body, const char *drain_
     unsetenv("MURO_HTTP_MAX_CONNECTIONS");
     unsetenv("MURO_HTTP_MAX_BODY");
     unsetenv("MURO_HTTP_DRAIN_MS");
+    unsetenv("MURO_HTTP_WORKERS");
+    unsetenv("MURO_HTTP_WAIT");
     av[argc++] = "muro-stream";
     av[argc++] = "--port";
     av[argc++] = "0";

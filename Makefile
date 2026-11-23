@@ -7,10 +7,13 @@ CHALLENGE_INC = -I examples/challenge
 
 .PHONY: all c-check c-sanitize clean
 
+bench/loadgen: bench/loadgen.c
+	$(CC) -Wall -Wextra -Werror -std=c11 -O2 -o $@ bench/loadgen.c -pthread
+
 SAN_CFLAGS = -Wall -Wextra -Werror -std=c11 -D_GNU_SOURCE -I c -I c/generated -include c/shim.h -g -fno-omit-frame-pointer -fsanitize=address,undefined
 SAN_LDFLAGS = -fsanitize=address,undefined
 
-all: c/muro-httpd c/muro-hello c/muro-stream c/test_classify c/test_conn c/test_sess c/test_render c/test_e2e c/test_body c/test_jwt c/test_json c/test_store c/test_poll c/test_route c/test_tags c/test_hello c/test_serve c/test_http11
+all: c/muro-httpd c/muro-hello c/muro-stream c/test_classify c/test_conn c/test_sess c/test_render c/test_e2e c/test_body c/test_jwt c/test_json c/test_store c/test_poll c/test_route c/test_tags c/test_hello c/test_serve c/test_workers c/test_http11
 
 c/%.o: c/%.c
 	$(CC) $(CFLAGS) -c -o $@ $<
@@ -114,6 +117,9 @@ c/test_hello: c/test_hello.o
 c/test_serve: c/test_serve.o $(HOST)
 	$(CC) $(LDFLAGS) -o $@ c/test_serve.o $(HOST)
 
+c/test_workers: c/test_workers.o $(HOST)
+	$(CC) $(LDFLAGS) -o $@ c/test_workers.o $(HOST)
+
 c/muro-httpd: c/httpd.o c/app.o c/route_glue.o c/host_body.o c/body.o c/decide.o c/route.o c/jwt.o c/json_text.o c/store.o $(HOST)
 	$(CC) $(LDFLAGS) -o $@ c/httpd.o c/app.o c/route_glue.o c/host_body.o c/body.o c/decide.o c/route.o c/jwt.o c/json_text.o c/store.o $(HOST) -lsqlite3
 
@@ -126,7 +132,7 @@ c/muro-stream: c/stream.o $(HOST)
 c/test_http11: c/test_http11.o
 	$(CC) $(LDFLAGS) -o $@ c/test_http11.o
 
-c-check: c/test_classify c/test_conn c/test_sess c/test_render c/test_body c/test_jwt c/test_json c/test_store c/test_poll c/test_route c/test_tags c/test_serve c/muro-httpd c/muro-hello c/muro-stream c/test_e2e c/test_hello c/test_http11
+c-check: bench/loadgen c/test_classify c/test_conn c/test_sess c/test_render c/test_body c/test_jwt c/test_json c/test_store c/test_poll c/test_route c/test_tags c/test_serve c/test_workers c/muro-httpd c/muro-hello c/muro-stream c/test_e2e c/test_hello c/test_http11
 	./c/test_classify
 	./c/test_conn
 	./c/test_sess
@@ -139,6 +145,7 @@ c-check: c/test_classify c/test_conn c/test_sess c/test_render c/test_body c/tes
 	./c/test_route
 	./c/test_tags
 	./c/test_serve
+	./c/test_workers
 	./c/test_hello
 	./c/test_e2e c/muro-httpd
 	./c/test_http11
@@ -148,4 +155,4 @@ c-sanitize:
 	$(MAKE) c-check CFLAGS="$(SAN_CFLAGS)" LDFLAGS="$(SAN_LDFLAGS)"
 
 clean:
-	rm -f c/*.o c/muro-httpd c/muro-hello c/muro-stream c/test_classify c/test_conn c/test_sess c/test_render c/test_e2e c/test_admit c/test_body c/test_jwt c/test_json c/test_store c/test_poll c/test_route c/test_tags c/test_hello c/test_serve c/test_http11
+	rm -f c/*.o c/muro-httpd c/muro-hello c/muro-stream c/test_classify c/test_conn c/test_sess c/test_render c/test_e2e c/test_admit c/test_body c/test_jwt c/test_json c/test_store c/test_poll c/test_route c/test_tags c/test_hello c/test_serve c/test_workers c/test_http11 bench/loadgen

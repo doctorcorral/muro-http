@@ -15,21 +15,26 @@ static void usage(FILE *out) {
       "  --bind HOST            IPv4 address. default 127.0.0.1\n"
       "  --port N               listen port (0 picks one). default 8080\n"
       "  --idle-ms N            idle tick. default 5000\n"
-      "  --max-connections N    accept cap. default 128, max 1024\n"
+      "  --max-connections N    accept cap per worker. default 128, max 1024\n"
       "  --max-body N           body cap in bytes. default 8388608\n"
       "  --drain-ms N           SIGINT/SIGTERM drain. default 1000\n"
+      "  --workers N            processes. default 1, max 64\n"
+      "  --wait NAME            poll, kqueue, or epoll. default is native\n"
       "  --db PATH              SQLite file. Overrides MURO_HTTP_DB and SQLITE_PATH.\n"
       "                         Default :memory: is test-only and is not WAL.\n"
       "  --jwt-key SECRET       HS256 key, raw bytes, at most 256\n"
       "\n"
       "Environment, used when the flag is absent: MURO_HTTP_BIND,\n"
       "MURO_HTTP_PORT, MURO_HTTP_IDLE_MS, MURO_HTTP_MAX_CONNECTIONS,\n"
-      "MURO_HTTP_MAX_BODY, MURO_HTTP_DRAIN_MS,\n"
-      "MURO_HTTP_JWT_KEY. The database path is --db, then MURO_HTTP_DB,\n"
-      "then SQLITE_PATH, then :memory:. A file that is not wal stays\n"
-      "down. The process still listens. An empty key checks no bearer.\n"
+      "MURO_HTTP_MAX_BODY, MURO_HTTP_DRAIN_MS, MURO_HTTP_WORKERS,\n"
+      "MURO_HTTP_WAIT, MURO_HTTP_JWT_KEY. The database path is --db,\n"
+      "then MURO_HTTP_DB, then SQLITE_PATH, then :memory:. A file that\n"
+      "is not wal stays down. The process still listens. An empty key\n"
+      "checks no bearer.\n"
       "\n"
-      "The default bind host is 127.0.0.1. SIGINT and SIGTERM stop it.\n",
+      "The default bind host is 127.0.0.1. One worker is one process.\n"
+      "Above that, each process opens its own SQLite connection.\n"
+      ":memory: is not shared. SIGINT and SIGTERM stop it.\n",
       out);
 }
 

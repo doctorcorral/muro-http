@@ -75,6 +75,8 @@ static pid_t start_hello(const char *env_bind, const char *bind_host, int *port,
     unsetenv("MURO_HTTP_MAX_CONNECTIONS");
     unsetenv("MURO_HTTP_MAX_BODY");
     unsetenv("MURO_HTTP_DRAIN_MS");
+    unsetenv("MURO_HTTP_WORKERS");
+    unsetenv("MURO_HTTP_WAIT");
     unsetenv("MURO_HTTP_DB");
     unsetenv("MURO_HTTP_JWT_KEY");
     unsetenv("SQLITE_PATH");
@@ -286,6 +288,8 @@ static void check_bad_bind(void) {
     close(sp[0]);
     close(sp[1]);
     unsetenv("MURO_HTTP_BIND");
+    unsetenv("MURO_HTTP_WORKERS");
+    unsetenv("MURO_HTTP_WAIT");
     execv(bin_path, av);
     _exit(127);
   }

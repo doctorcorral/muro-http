@@ -2,6 +2,57 @@
 
 ## 0.1.0-dev — unreleased
 
+- The listen backlog is `SOMAXCONN`. On macOS the parent still
+  passes accepted sockets with `SCM_RIGHTS`. It retries `EINTR`,
+  and a full worker channel blocks the parent until some worker
+  can take the fd. The parent scans every live channel again
+  after that wait. It does not close an accepted socket because
+  the workers are busy, and it keeps its copy until the worker
+  acks the receipt. A channel error removes that worker from
+  rotation. The parent reaps children with `waitpid(WNOHANG)`. A
+  signalled or non-zero worker exit stops the pool, as on Linux.
+  A real drop is logged (`handoff drop N: reason`) and the parent
+  prints `handoff drops N` when it exits. `MSG_CTRUNC` on the
+  worker's `recvmsg` is an error: the fd is not adopted, and a
+  complete fd in that buffer is closed.
+- kqueue applies one filter per `kevent` and retries `EINTR`. A
+  failed second filter is rolled back. If that undo also fails,
+  both filters are deleted and the watch row is dropped, so a
+  leftover knote cannot outlive the row. A failed delete still
+  drops the watch row, so a reused fd number gets `EV_ADD`.
+  `poll`, kqueue, and epoll reserve a slot for a due idle tick
+  instead of overwriting an fd event. `c/test_poll` checks that
+  slot, fd reuse, an injected `EINTR`, a partial kevent change,
+  and a failed rollback. `c/test_workers` runs on `poll` and on the native wait.
+  It includes a close-mode flood with `workers > 1` and a
+  `SIGKILL` of one worker.
+- `bench/loadgen` includes `sys/time.h`, defines `_DEFAULT_SOURCE`,
+  and sleeps with `nanosleep`, so `make bench/loadgen` builds with
+  `-std=c11 -Werror` on Linux. `errors` is the sum of
+  `err_connect`, `err_write`, `err_read`, and `err_parse`.
+  `make c-check` compiles the tool and does not run it.
+- The wait is kqueue on macOS and epoll on Linux. `poll(2)` stays
+  compiled and is selected with `--wait poll` or `MURO_HTTP_WAIT=poll`.
+  The default is the native backend. The contract stays
+  level-triggered: a one-shot deadline, `ms == 0` disarms, a ready
+  socket does not move the deadline, and a wait returns at most 64
+  events. `poll(2)` still scans from a rotating cursor. kqueue and
+  epoll return kernel order and do not invent that cursor.
+  `c/test_poll` runs the timer, empty-set, hangup, and scan checks
+  on the default backend and on `poll`. Linux `check` and `asan`
+  exercise epoll. The macOS job exercises kqueue. Past eight nested
+  `muro_http_body_read` calls the wait on that socket is still
+  `poll(2)`.
+- `MuroHttpConfig.workers` is 1 through 64. The default is 1.
+  `--workers` and `MURO_HTTP_WORKERS` set it. `max_conn` stays per
+  worker. One worker is the single process and does not set
+  `SO_REUSEPORT`. Above that, Linux workers each bind with
+  `SO_REUSEPORT`. Other systems bind once in the parent and pass
+  accepted sockets with `SCM_RIGHTS`. macOS `SO_REUSEPORT` does not
+  load-balance TCP. SIGINT and SIGTERM stop the workers. Each
+  worker drains itself. `c/test_workers` checks one worker, two
+  workers, the poll fallback, a refused count, and SIGTERM. The
+  pin stays 0.22.14. The library version stays `0.1.0-dev`.
 - HTTP/1.1 methods. `GET`, `HEAD`, `POST`, `PUT`, `DELETE`, `OPTIONS`,
   and `PATCH` reach the handler. `OPTIONS *` is in that set. Any other
   method with target `*` is 400. A well-formed method outside the set

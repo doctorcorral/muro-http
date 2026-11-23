@@ -200,7 +200,10 @@ image does not call `decide`. A classify step allocates 1. A reply
 step allocates 0.
 
 `c/host.c` is the socket loop behind `c/muro_http.h`. `c/host_poll.c`
-waits with `poll(2)`. `examples/challenge/httpd.c` and
+waits with kqueue on macOS, epoll on Linux, and `poll(2)` as the
+fallback. `MURO_HTTP_WAIT=poll` forces that fallback. Past eight
+nested body reads the wait on that socket is still `poll(2)`.
+`examples/challenge/httpd.c` and
 `examples/hello/hello.c` are each a `main`. The core owns the file
 descriptors, the buffers, the connection table, and the clock. It
 performs the action `step` returns. It writes `100 Continue`, 413,
@@ -211,10 +214,10 @@ for that coding. It does not invent a status the book did not name. A
 partial `100 Continue` is not watched for read until the last byte
 is written. Arming the drain inside `muro_http_body_read` closes
 idle connections on that turn. A `muro_http_body_read` that has to
-wait uses the same poll. Other
+wait uses the same wait. Other
 connections are accepted and served. A socket already inside a
 read is left out of that set, and past eight nested reads the wait
-is that socket alone. A read error closes
+is `poll(2)` on that socket alone. A read error closes
 the fd. It is not `evError`.
 That event holds in the read phase. A full receive buffer that the
 image did not consume is a host limit. Closing it is not a status.

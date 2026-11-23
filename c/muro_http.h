@@ -8,9 +8,11 @@
 /* A reusable HTTP/1.1 server. The books choose framing, admission,
    keep-alive, and close. The handler chooses the status, the extra
    headers, and the body for a request the book accepted. This
-   process owns the sockets, the buffers, the connection table, the
-   clock, and poll. It writes 100 Continue, 413, and 417, and it
-   writes 501 for a method the book marks with method code 1.
+   worker process owns its sockets, its buffers, its connection
+   table, its clock, and its wait. The wait is kqueue on macOS,
+   epoll on Linux, and poll otherwise. MURO_HTTP_WAIT=poll forces
+   poll. It writes 100 Continue, 413, and 417, and it writes 501
+   for a method the book marks with method code 1.
    host_in_policy does not answer an unknown transfer coding. The
    host copies the book's 400 and the book's unimplemented transfer
    coding, which is origin 2. It does not invent a status the book
@@ -46,10 +48,10 @@ typedef struct MuroHttpRequest {
    past the configured maximum. A buffered body can be read here as
    well as through body. A streamed body must be read here, or passed
    to the response pull, or the host closes after the response. The
-   read waits in the server poll. Other connections are accepted and
-   served on that wait. A nested read does not watch the socket
-   already inside a read. Past eight nested reads, the wait is this
-   socket alone. */
+   read waits in the server wait (kqueue, epoll, or poll). Other
+   connections are accepted and served on that wait. A nested read
+   does not watch the socket already inside a read. Past eight
+   nested reads, the wait is poll(2) on this socket alone. */
 int muro_http_body_read(MuroHttpBody *body, uint8_t *dst, size_t cap);
 
 /* header_at and header_find return 1 when the header is present.
@@ -108,10 +110,11 @@ typedef struct MuroHttpConfig {
   const char *bind_host; /* NULL is 127.0.0.1. IPv4 only. */
   int port;
   int idle_ms;
-  int max_conn; /* 1..1024. serve returns -1 outside that. */
+  int max_conn; /* 1..1024 per worker. serve returns -1 outside that. */
   const char *name; /* log prefix. NULL is muro-http. */
   int max_body; /* default 8388608. 0 rejects every positive length. */
   int drain_ms; /* default 1000. SIGINT and SIGTERM wait this long. */
+  int workers;  /* 1..64 processes. Default 1. max_conn is per worker. */
 } MuroHttpConfig;
 
 void muro_http_config_init(MuroHttpConfig *cfg);
@@ -125,10 +128,21 @@ void muro_http_config_usage(FILE *out, const MuroHttpConfig *cfg);
 
 /* 0 after SIGINT or SIGTERM, once in-flight requests have finished
    or drain_ms has passed. -1 if listen or setup fails, if max_conn
-   is outside 1..1024, or if max_body or drain_ms is negative.
+   is outside 1..1024, if workers is outside 1..64, if workers is
+   above 1 and the port is 0, or if max_body or drain_ms is negative.
    -2 if the bind host is empty or not an IPv4 address. Every
    successful listen prints "listening <host> <port>", including
-   port 0. */
+   port 0. workers above 1 prints one line per listening socket.
+   Default is one process and does not fork. Above that, each
+   worker is its own process, event loop, and connection table.
+   On Linux each worker binds with SO_REUSEPORT. Elsewhere the
+   parent binds once and passes accepted sockets. The backlog is
+   SOMAXCONN. The parent does not close an accepted socket because
+   workers are busy; it waits until one can take it, and it keeps
+   its own copy until the worker acks that receipt. A drop is
+   logged as "handoff drop N: reason" and summarized as
+   "handoff drops N". A worker that dies from a signal or a
+   non-zero status stops the pool. */
 int muro_http_serve(const MuroHttpConfig *cfg, MuroHttpHandler handler, void *user);
 
 #endif
