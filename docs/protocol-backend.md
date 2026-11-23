@@ -152,7 +152,10 @@ Stayed in the adapter (`c/host.c`, `c/host_poll.c`):
 - `read`, `write`, `accept`, `close`, `listen`, `bind`, `fork`
 - `sendmsg` / `recvmsg` and the `SCM_RIGHTS` handoff
 - the listen backlog (`SOMAXCONN`), `SO_REUSEPORT` on Linux
-- signals, drain, and the connection table
+- signals, drain, and the connection table. SIGINT and SIGTERM
+  also write a self-pipe, so a wait that already passed the flag
+  check still wakes. The parent reaps on that pipe and on
+  SIGCHLD.
 - logging (`fprintf`). The step returns a note code.
 - `MURO_TEST_WRITE_LIMIT`, `MURO_TEST_WRITE_FAIL_AFTER`,
   `MURO_TEST_100_STALL`, `note_write`

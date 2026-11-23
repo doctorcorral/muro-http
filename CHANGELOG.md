@@ -2,6 +2,11 @@
 
 ## 0.1.0-dev — unreleased
 
+- SIGINT and SIGTERM write a self-pipe. A wait that already
+  passed the stop-flag check still wakes, and the parent reaps
+  on that pipe plus SIGCHLD instead of a blocking `waitpid`
+  that can miss the signal. The library version stays
+  `0.1.0-dev`. The pin stays muro `0.22.14`.
 - `make c-conformance` runs `c/test_conformance.py` against
   `c/muro-hello` on epoll. The library version stays
   `0.1.0-dev`. The pin stays muro `0.22.14`.
