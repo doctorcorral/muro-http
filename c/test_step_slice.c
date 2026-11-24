@@ -593,6 +593,27 @@ static int adapter_shut(const StepOut *bo, const BookStep *bk, int brc, int want
   return 1;
 }
 
+static int protos_agree(const Proto *h, const Proto *a) {
+  ProtoMove x, y;
+  int n;
+  int i;
+  int hl = h && proto_live(h);
+  int al = a && proto_live(a);
+  int hd = h && proto_done(h);
+  int ad = a && proto_done(a);
+  if (hl != al || hd != ad) return 0;
+  if (!h || !a) return h == a;
+  n = proto_move_count(h);
+  if (n != proto_move_count(a)) return 0;
+  for (i = 0; i < n; i++) {
+    if (!proto_move_at(h, i, &x) || !proto_move_at(a, i, &y)) return 0;
+    if (x.dir != y.dir || x.kind != y.kind || x.bit != y.bit) return 0;
+    if ((x.ctor == NULL) != (y.ctor == NULL)) return 0;
+    if (x.ctor && strcmp(x.ctor, y.ctor) != 0) return 0;
+  }
+  return 1;
+}
+
 static int host_and_book(HttpStep *st, const StepIn *in, StepOut *out) {
   Box *b = (Box *)((unsigned char *)st - offsetof(Box, st));
   StepOut bo;
@@ -643,6 +664,17 @@ static int host_and_book(HttpStep *st, const StepIn *in, StepOut *out) {
             muro_book_in_len(&b->bk), out->close_conn, bo.close_conn, out->read_more, bo.read_more,
             out->write_more, bo.write_more, (unsigned long long)out->wake_at,
             (unsigned long long)bo.wake_at, out->len, bo.len, out->note, bo.note, rc, brc);
+    return -1;
+  }
+  if (!protos_agree(st->proto, b->bk.proto)) {
+    ProtoMove mv;
+    int hn = st->proto ? proto_move_count(st->proto) : -1;
+    int an = b->bk.proto ? proto_move_count(b->bk.proto) : -1;
+    const char *hc = (hn > 0 && proto_move_at(st->proto, hn - 1, &mv) && mv.ctor) ? mv.ctor : "-";
+    fprintf(stderr,
+            "book admit fact %d live %d/%d done %d/%d moves %d/%d host-last %s\n", in->kind,
+            st->proto && proto_live(st->proto), b->bk.proto && proto_live(b->bk.proto),
+            st->proto && proto_done(st->proto), b->bk.proto && proto_done(b->bk.proto), hn, an, hc);
     return -1;
   }
   return rc;
@@ -2702,6 +2734,44 @@ static int capture_stream(void) {
   return 0;
 }
 
+/* The last admit of a keep-alive GET is the reply. The last admit
+   of the completing write is done. The session stays open. */
+static int admit_agrees(void) {
+  Box b;
+  StepOut seen;
+  http_step_St st;
+  uint64_t wake;
+  if (open_acc(&b, 10, 1000, 0) < 0) return -1;
+  if (!b.st.proto || !b.bk.proto || !proto_live(b.st.proto) || proto_done(b.st.proto) ||
+      proto_move_count(b.st.proto) != 0 || !protos_agree(b.st.proto, b.bk.proto)) {
+    box_free(&b);
+    return fail("admit-accept");
+  }
+  scripted += 1;
+  st = http_step_readSt();
+  if (reply_bytes(&b, &st, GET, 0, &seen, "admit-get") < 0) {
+    box_free(&b);
+    return -1;
+  }
+  if (!proto_live(b.st.proto) || proto_done(b.st.proto) || !protos_agree(b.st.proto, b.bk.proto)) {
+    box_free(&b);
+    return fail("admit-get");
+  }
+  scripted += 1;
+  wake = armed(1000, 0, (uint64_t)b.st.idle_ms);
+  if (full_write(&b, &st, seen, DEC_IDLE, 0, wake, "admit-idle") < 0) {
+    box_free(&b);
+    return -1;
+  }
+  if (!proto_live(b.st.proto) || proto_done(b.st.proto) || !protos_agree(b.st.proto, b.bk.proto)) {
+    box_free(&b);
+    return fail("admit-idle");
+  }
+  scripted += 1;
+  box_free(&b);
+  return 0;
+}
+
 int main(void) {
   uint64_t wake = 61000;
   if (decide(DEC_MORE, MURO_STEP_ACCEPTED, "", 10, 0, NULL, 0, wake, 0, "accept", NULL, NULL,
@@ -2790,6 +2860,7 @@ int main(void) {
   if (cap_span(7, "cap-431") < 0) return 1;
 
   if (keep_alive() < 0) return 1;
+  if (admit_agrees() < 0) return 1;
   if (clocks() < 0) return 1;
   if (one_byte(GET, 0, DEC_IDLE, "get-bytes") < 0) return 1;
   if (one_byte(CLOSE, 1, DEC_QUIET, "close-bytes") < 0) return 1;
