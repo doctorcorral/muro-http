@@ -9,7 +9,11 @@
 
    After a 413, 417, or 501 status_now close, both the book and
    the handwritten step must stay quiet. c/step.c now marks the
-   connection shut, so a later fact returns close with no span. */
+   connection shut, so a later fact returns close with no span.
+
+   A header block past 16384, a short WROTE (n below the outstanding
+   span), and a finished request on a peer close are outside the
+   slice. The driver checks cover=1 on those paths. */
 
 #include "step.h"
 #include "host_stream.h"
@@ -267,7 +271,7 @@ static int decide(int kind, int fact, const char *buf, uint64_t max_body, uint64
     fprintf(stderr, "%s: host step failed\n", name);
     return -1;
   }
-  bk = http_step_stepFact(http_step_readSt(), (uint64_t)fact, sl_of(buf), max_body);
+  bk = http_step_stepFact(http_step_readSt(), (uint64_t)fact, sl_of(buf), max_body, 0, 0);
   if (check_shape(kind, &o, bk, &b, code, word, name) < 0) {
     box_free(&b);
     return -1;
@@ -310,7 +314,7 @@ static int later_fact(const char *req, uint64_t max_body, uint64_t code, int fac
   memset(&o, 0, sizeof o);
   rc = muro_http_step(&b.st, &b.in, &o);
   bk = http_step_stepFact(closed, (uint64_t)fact, sl_of(fact == MURO_STEP_BYTES ? next : req),
-                          max_body);
+                          max_body, 0, 0);
   if (book_is(bk, 2, code, 1, 0, 0, 0, 0, 0, name) < 0) {
     box_free(&b);
     return -1;
@@ -367,7 +371,7 @@ static int owe_then(const char *req, uint64_t max_body, uint64_t code, const cha
     fprintf(stderr, "%s-peer: host step failed\n", name);
     return -1;
   }
-  bk = http_step_stepFact(owing, MURO_STEP_PEER_CLOSED, sl_of(req), max_body);
+  bk = http_step_stepFact(owing, MURO_STEP_PEER_CLOSED, sl_of(req), max_body, 0, 0);
   if (check_shape(DEC_OWE, &o, bk, &b, code, word, name) < 0) {
     box_free(&b);
     return -1;
@@ -375,7 +379,8 @@ static int owe_then(const char *req, uint64_t max_body, uint64_t code, const cha
   box_free(&b);
 
   /* A full write of that span closes. A later peer close stays quiet.
-     The book ignores the byte count. The host is given the whole span. */
+     The book is given n and the outstanding span, both equal to the
+     host length. */
   if (decide(DEC_OWE, MURO_STEP_BYTES, req, max_body, code, word, name, &b, &first, &seen) < 0)
     return -1;
   owing = http_step_take(first);
@@ -390,7 +395,8 @@ static int owe_then(const char *req, uint64_t max_body, uint64_t code, const cha
     fprintf(stderr, "%s-wrote: host step failed\n", name);
     return -1;
   }
-  bk = http_step_stepFact(owing, MURO_STEP_WROTE, sl_of(req), max_body);
+  bk = http_step_stepFact(owing, MURO_STEP_WROTE, sl_of(req), max_body, (uint64_t)seen.len,
+                          (uint64_t)seen.len);
   if (check_shape(DEC_QUIET, &o, bk, &b, code, NULL, name) < 0) {
     box_free(&b);
     return -1;
@@ -399,7 +405,7 @@ static int owe_then(const char *req, uint64_t max_body, uint64_t code, const cha
   set_fact(&b, MURO_STEP_PEER_CLOSED, 0);
   memset(&o, 0, sizeof o);
   rc = muro_http_step(&b.st, &b.in, &o);
-  bk = http_step_stepFact(owing, MURO_STEP_PEER_CLOSED, sl_of(req), max_body);
+  bk = http_step_stepFact(owing, MURO_STEP_PEER_CLOSED, sl_of(req), max_body, 0, 0);
   if (book_is(bk, 2, code, 1, 0, 0, 0, 0, 0, name) < 0) {
     box_free(&b);
     return -1;
@@ -434,7 +440,7 @@ static int owe_failed(const char *req, uint64_t max_body, uint64_t code, const c
   set_fact(&b, MURO_STEP_WRITE_FAILED, 0);
   memset(&o, 0, sizeof o);
   rc = muro_http_step(&b.st, &b.in, &o);
-  bk = http_step_stepFact(owing, MURO_STEP_WRITE_FAILED, sl_of(req), max_body);
+  bk = http_step_stepFact(owing, MURO_STEP_WRITE_FAILED, sl_of(req), max_body, 0, 0);
   if (book_is(bk, 2, code, 1, 0, 0, 0, 0, 0, name) < 0) {
     box_free(&b);
     return -1;
@@ -445,6 +451,186 @@ static int owe_failed(const char *req, uint64_t max_body, uint64_t code, const c
     return -1;
   }
   if (check_shape(DEC_QUIET, &o, bk, &b, code, NULL, name) < 0) {
+    box_free(&b);
+    return -1;
+  }
+  box_free(&b);
+  return 0;
+}
+
+
+/* Same construction as examples/adapter/mem.c. A request line with
+   no LF in the first 16384 bytes is 414 on the host. A short line
+   with a header block past that cap is 431. The book marks both
+   outside rather than claiming 400. */
+static int cap_out(int which, const char *name) {
+  Box b;
+  StepOut o;
+  http_step_Out bk;
+  char *req;
+  int rc;
+  const char *tail = " HTTP/1.1\r\nHost: h\r\n\r\n";
+  const char *head = "GET / HTTP/1.1\r\nHost: h\r\nX-Pad: ";
+  const char *word = which == 6 ? "uri too long" : "header fields";
+  uint64_t code = which == 6 ? 414 : 431;
+  size_t tail_n = strlen(tail);
+  size_t head_n = strlen(head);
+  req = malloc(17000 + head_n + 64);
+  if (!req) return fail("cap alloc");
+  if (which == 6) {
+    memcpy(req, "GET /", 5);
+    memset(req + 5, 'a', 17000);
+    memcpy(req + 5 + 17000, tail, tail_n + 1);
+  } else {
+    memcpy(req, head, head_n);
+    memset(req + head_n, 'b', 17000);
+    memcpy(req + head_n + 17000, "\r\n\r\n", 5);
+  }
+  rc = decide(DEC_OUT, MURO_STEP_BYTES, req, 8388608, 0, NULL, name, &b, &bk, &o);
+  if (rc < 0) {
+    free(req);
+    return -1;
+  }
+  /* The book is outside. The host answers 414 or 431 as a write
+     span (or status_now) rather than 400. Close may wait until
+     that span is written. */
+  if (o.read_more || !(o.write_more || o.status_now)) {
+    fprintf(stderr, "%s: host close=%d read=%d write=%d status_now=%d\n", name, o.close_conn,
+            o.read_more, o.write_more, o.status_now);
+    box_free(&b);
+    free(req);
+    return -1;
+  }
+  if (text_ok(&o, code, word, name) < 0) {
+    box_free(&b);
+    free(req);
+    return -1;
+  }
+  if (has_lit(o.bytes ? o.bytes : o.status, o.bytes ? o.len : o.status_len, "400")) {
+    fprintf(stderr, "%s: host text has 400, want %llu\n", name, (unsigned long long)code);
+    box_free(&b);
+    free(req);
+    return -1;
+  }
+  box_free(&b);
+  free(req);
+  return 0;
+}
+
+/* A short write of an outstanding error span stays in write on the
+   host. The book marks it outside rather than claiming quiet. */
+static int owe_short(const char *req, uint64_t max_body, uint64_t code, const char *word,
+                     const char *name) {
+  Box b;
+  StepOut seen;
+  StepOut o;
+  http_step_Out first;
+  http_step_Out bk;
+  http_step_St owing;
+  size_t n;
+  if (decide(DEC_OWE, MURO_STEP_BYTES, req, max_body, code, word, name, &b, &first, &seen) < 0)
+    return -1;
+  owing = http_step_take(first);
+  if (!seen.bytes || seen.len < 2) {
+    box_free(&b);
+    return fail(name);
+  }
+  n = seen.len - 1;
+  set_fact(&b, MURO_STEP_WROTE, n);
+  memset(&o, 0, sizeof o);
+  if (muro_http_step(&b.st, &b.in, &o) < 0) {
+    box_free(&b);
+    fprintf(stderr, "%s-short: host step failed\n", name);
+    return -1;
+  }
+  bk = http_step_stepFact(owing, MURO_STEP_WROTE, sl_of(req), max_body, (uint64_t)n,
+                          (uint64_t)seen.len);
+  if (check_shape(DEC_OUT, &o, bk, &b, 0, NULL, name) < 0) {
+    box_free(&b);
+    return -1;
+  }
+  /* The host stays in write on a short write. */
+  if (!o.write_more || o.close_conn || o.read_more || o.status_now) {
+    fprintf(stderr, "%s: host close=%d read=%d write=%d status_now=%d\n", name, o.close_conn,
+            o.read_more, o.write_more, o.status_now);
+    box_free(&b);
+    return -1;
+  }
+  box_free(&b);
+  return 0;
+}
+
+/* n > owed completes like a full write (the host clamps). owed == 0
+   is quiet in the book. n == 0 with a positive span is a short write. */
+static int owe_edges(const char *req, uint64_t max_body, uint64_t code, const char *word,
+                     const char *name) {
+  Box b;
+  StepOut seen;
+  StepOut o;
+  http_step_Out first;
+  http_step_Out bk;
+  http_step_St owing;
+  char tag[64];
+
+  if (decide(DEC_OWE, MURO_STEP_BYTES, req, max_body, code, word, name, &b, &first, &seen) < 0)
+    return -1;
+  owing = http_step_take(first);
+  if (!seen.bytes || !seen.len) {
+    box_free(&b);
+    return fail(name);
+  }
+
+  snprintf(tag, sizeof tag, "%s-over", name);
+  set_fact(&b, MURO_STEP_WROTE, seen.len + 8);
+  memset(&o, 0, sizeof o);
+  if (muro_http_step(&b.st, &b.in, &o) < 0) {
+    box_free(&b);
+    fprintf(stderr, "%s: host step failed\n", tag);
+    return -1;
+  }
+  bk = http_step_stepFact(owing, MURO_STEP_WROTE, sl_of(req), max_body, (uint64_t)seen.len + 8,
+                          (uint64_t)seen.len);
+  if (check_shape(DEC_QUIET, &o, bk, &b, code, NULL, tag) < 0) {
+    box_free(&b);
+    return -1;
+  }
+  box_free(&b);
+
+  snprintf(tag, sizeof tag, "%s-owed0", name);
+  if (decide(DEC_OWE, MURO_STEP_BYTES, req, max_body, code, word, tag, &b, &first, &seen) < 0)
+    return -1;
+  owing = http_step_take(first);
+  bk = http_step_stepFact(owing, MURO_STEP_WROTE, sl_of(req), max_body, (uint64_t)0, (uint64_t)0);
+  if (book_is(bk, 2, code, 1, 0, 0, 0, 0, 0, tag) < 0) {
+    box_free(&b);
+    return -1;
+  }
+  box_free(&b);
+
+  snprintf(tag, sizeof tag, "%s-zero", name);
+  if (decide(DEC_OWE, MURO_STEP_BYTES, req, max_body, code, word, tag, &b, &first, &seen) < 0)
+    return -1;
+  owing = http_step_take(first);
+  if (!seen.bytes || !seen.len) {
+    box_free(&b);
+    return fail(tag);
+  }
+  set_fact(&b, MURO_STEP_WROTE, 0);
+  memset(&o, 0, sizeof o);
+  if (muro_http_step(&b.st, &b.in, &o) < 0) {
+    box_free(&b);
+    fprintf(stderr, "%s: host step failed\n", tag);
+    return -1;
+  }
+  bk = http_step_stepFact(owing, MURO_STEP_WROTE, sl_of(req), max_body, (uint64_t)0,
+                          (uint64_t)seen.len);
+  if (check_shape(DEC_OUT, &o, bk, &b, 0, NULL, tag) < 0) {
+    box_free(&b);
+    return -1;
+  }
+  if (!o.write_more || o.close_conn || o.read_more || o.status_now) {
+    fprintf(stderr, "%s: host close=%d read=%d write=%d status_now=%d\n", tag, o.close_conn,
+            o.read_more, o.write_more, o.status_now);
     box_free(&b);
     return -1;
   }
@@ -510,6 +696,17 @@ int main(void) {
 
   if (owe_then(BAD, 10, 400, "malformed", "400") < 0) return 1;
   if (owe_failed(BAD, 10, 400, "malformed", "400-failed") < 0) return 1;
+  if (owe_short(BAD, 10, 400, "malformed", "400-short") < 0) return 1;
+  if (owe_edges(BAD, 10, 400, "malformed", "400-edges") < 0) return 1;
+
+  if (decide(DEC_OUT, MURO_STEP_PEER_CLOSED, GET, 10, 0, NULL, "fin-get", NULL, NULL, NULL) < 0)
+    return 1;
+  if (decide(DEC_OUT, MURO_STEP_PEER_CLOSED, POST_BODY, 10, 0, NULL, "fin-body", NULL, NULL,
+             NULL) < 0)
+    return 1;
+
+  if (cap_out(6, "cap-414") < 0) return 1;
+  if (cap_out(7, "cap-431") < 0) return 1;
 
   printf("handwritten-after-close-spans %d\n", after_spans);
   if (after_spans != 0) return 1;
