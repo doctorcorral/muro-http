@@ -13,7 +13,7 @@ bench/loadgen: bench/loadgen.c
 SAN_CFLAGS = -Wall -Wextra -Werror -std=c11 -D_GNU_SOURCE -I c -I c/generated -include c/shim.h -g -fno-omit-frame-pointer -fsanitize=address,undefined
 SAN_LDFLAGS = -fsanitize=address,undefined
 
-all: c/muro-httpd c/muro-hello c/muro-stream c/test_classify c/test_conn c/test_sess c/test_render c/test_e2e c/test_body c/test_jwt c/test_json c/test_store c/test_poll c/test_route c/test_tags c/test_hello c/test_serve c/test_workers c/test_http11 c/test_step c/test_scan_cache
+all: c/muro-httpd c/muro-hello c/muro-stream c/test_classify c/test_conn c/test_sess c/test_render c/test_e2e c/test_body c/test_jwt c/test_json c/test_store c/test_poll c/test_route c/test_tags c/test_hello c/test_serve c/test_workers c/test_http11 c/test_step c/test_scan_cache c/test_step_slice
 
 c/%.o: c/%.c
 	$(CC) $(CFLAGS) -c -o $@ $<
@@ -150,10 +150,16 @@ c/test_http11: c/test_http11.o
 c/test_step: c/mem_adapter.o $(HOST)
 	$(CC) $(LDFLAGS) -o $@ c/mem_adapter.o $(HOST)
 
+c/step_book.o: c/generated/step_slice.c c/shim.h
+	$(CC) $(CFLAGS) -c -o $@ c/generated/step_slice.c
+
+c/test_step_slice: c/test_step_slice.o c/step_book.o $(HOST)
+	$(CC) $(LDFLAGS) -o $@ c/test_step_slice.o c/step_book.o $(HOST)
+
 c-conformance: c/muro-hello
 	PYTHONDONTWRITEBYTECODE=1 python3 c/test_conformance.py c/muro-hello
 
-c-check: bench/loadgen c/test_classify c/test_conn c/test_scan_cache c/test_sess c/test_render c/test_body c/test_jwt c/test_json c/test_store c/test_poll c/test_route c/test_tags c/test_serve c/test_workers c/muro-httpd c/muro-hello c/muro-stream c/test_e2e c/test_hello c/test_http11 c/test_step
+c-check: bench/loadgen c/test_classify c/test_conn c/test_scan_cache c/test_sess c/test_render c/test_body c/test_jwt c/test_json c/test_store c/test_poll c/test_route c/test_tags c/test_serve c/test_workers c/muro-httpd c/muro-hello c/muro-stream c/test_e2e c/test_hello c/test_http11 c/test_step c/test_step_slice
 	./c/test_classify
 	./c/test_conn
 	./c/test_scan_cache
@@ -173,13 +179,17 @@ c-check: bench/loadgen c/test_classify c/test_conn c/test_scan_cache c/test_sess
 	./c/test_http11
 	sh c/check_step_pure.sh
 	./c/test_step
+	if grep -nE "\\<(read|write|accept|accept4|kqueue|kevent|epoll_wait|epoll_ctl|poll|ppoll|fork|sendmsg|recvmsg|socket|connect|listen|bind|close|send|recv|clock_gettime|gmtime|gettimeofday)[[:space:]]*\\([^0-9]" c/generated/step_slice.c c/generated/step_slice.h; then \
+	  echo "c/generated/step_slice calls the OS" >&2; exit 1; \
+	fi
+	./c/test_step_slice
 
 c-sanitize:
 	$(MAKE) clean
 	$(MAKE) c-check CFLAGS="$(SAN_CFLAGS)" LDFLAGS="$(SAN_LDFLAGS)"
 
 clean:
-	rm -f c/*.o c/conn.patched.c c/muro-httpd c/muro-hello c/muro-stream c/test_classify c/test_conn c/test_scan_cache c/test_sess c/test_render c/test_e2e c/test_admit c/test_body c/test_jwt c/test_json c/test_store c/test_poll c/test_route c/test_tags c/test_hello c/test_serve c/test_workers c/test_http11 c/test_step bench/loadgen fuzz/step_fuzz
+	rm -f c/*.o c/conn.patched.c c/muro-httpd c/muro-hello c/muro-stream c/test_classify c/test_conn c/test_scan_cache c/test_sess c/test_render c/test_e2e c/test_admit c/test_body c/test_jwt c/test_json c/test_store c/test_poll c/test_route c/test_tags c/test_hello c/test_serve c/test_workers c/test_http11 c/test_step c/test_step_slice bench/loadgen fuzz/step_fuzz
 
 # libFuzzer + ASan + UBSan. clang is fixed here so CC, c-check, and
 # c-sanitize keep using $(CC). Objects are not written into c/.

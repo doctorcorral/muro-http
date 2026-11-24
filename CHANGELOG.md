@@ -2,11 +2,31 @@
 
 ## 0.1.0-dev — unreleased
 
+- `priv/muro/http/step.muro` checks a read slice of one HTTP/1.1
+  connection: the request line, the headers, a Content-Length body,
+  and the 400 / 413 / 417 / 501 close while that read is still open.
+  `mix muro.gen` emits `c/generated/step_slice.c`. `c/step.c` stays
+  the function `c/host.c` calls. `c/test_step_slice` compares the
+  two on that slice. After the book closes, a later fact returns
+  no span. `priv/muro/http/neg/step_span.muro` claims a span after
+  the 413 close. `mix muro.check --fuel 5000000` on that file
+  refuses it. `mix test` does not load it. After a handwritten
+  `status_now` close, `c/step.c` now also returns close with no
+  new span, and the driver requires both sides to stay quiet.
+  414 and 431, 100 Continue, chunked bodies, pipelining, pulled
+  bodies, idle `MURO_STEP_NOW`, short writes, keep-alive consume,
+  fuel, and a handler 500 are not in the slice. The library
+  version stays `0.1.0-dev`.
+- Pin muro `0.22.19` from Hex (`{:muro, "~> 0.22.19"}` in
+  `mix.exs`, `muro: "0.22.19"` in `muro.exs`). The library version
+  stays `0.1.0-dev`. There is no path dependency. `mix muro.gen`
+  rewrites the committed C and Elixir headers for that pin. The
+  books are unchanged. 0.22.15 through 0.22.19 do not change the C
+  emitter this tree uses.
 - Closing an epoll connection always drops the cached interest for
   that fd, even when `EPOLL_CTL_DEL` fails. A reused fd with the
   same interest then gets a real `ADD` instead of a silent stall.
-  The library version stays `0.1.0-dev`. The pin stays muro
-  `0.22.14`.
+  The library version stays `0.1.0-dev`.
 
 - CI type-checks the unique books as a matrix of GitHub-hosted
   jobs, then `mix muro.gen --check --skip-check` compares the
