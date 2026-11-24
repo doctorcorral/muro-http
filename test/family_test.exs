@@ -22,7 +22,7 @@ defmodule MuroHttp.FamilyTest do
   # not a bound on live connections and it is not the Agda proof.
   test "mix muro.check accepts reply order, a free accept, and one drained turn" do
     assert {:ok, text, ""} = Muro.CLI.Check.run(["priv/muro/http/family.muro"])
-    assert text =~ "Muro v0.22.19\n"
+    assert text =~ "Muro v0.22.22\n"
     assert text =~ "family conns: turn per key of Act\n"
     assert text =~ "temporal drained: holds in 3 reachable states, 3 transitions\n"
     assert text =~ "temporal reply-order: holds in 3721 reachable states, 10521 transitions\n"
@@ -57,9 +57,11 @@ defmodule MuroHttp.FamilyTest do
     assert {:open, b_accept, state} = Conns.arrive(state, "b", :accept, 0)
     assert {:ok, [], state} = Conns.resolved(state, a_accept)
     assert {:ok, [], state} = Conns.resolved(state, b_accept)
-    assert {:open, a0, state} = Conns.arrive(state, "a", :reply, 0)
-    assert {:held, a1, state} = Conns.arrive(state, "a", :reply, 1)
-    assert {:open, b0, state} = Conns.arrive(state, "b", :reply, 0)
+    # 0.22.22 records a resolved index as departed, so a later
+    # reply on the same key must use a fresh creation index.
+    assert {:open, a0, state} = Conns.arrive(state, "a", :reply, 1)
+    assert {:held, a1, state} = Conns.arrive(state, "a", :reply, 2)
+    assert {:open, b0, state} = Conns.arrive(state, "b", :reply, 1)
 
     assert {:error, {:held, ^a1}} = Conns.resolved(state, a1)
     assert {:ok, [], state} = Conns.resolved(state, b0)
@@ -72,9 +74,9 @@ defmodule MuroHttp.FamilyTest do
                {:arrive, "b", :accept, 0},
                {:resolved, 0},
                {:resolved, 1},
-               {:arrive, "a", :reply, 0},
                {:arrive, "a", :reply, 1},
-               {:arrive, "b", :reply, 0},
+               {:arrive, "a", :reply, 2},
+               {:arrive, "b", :reply, 1},
                {:host, 4, {:recv, :ok}},
                {:peer, 4, {:send, :ok}},
                {:resolved, 4},
@@ -116,7 +118,7 @@ defmodule MuroHttp.FamilyTest do
              Conns.check_trace([
                {:arrive, "a", :accept, 0},
                {:resolved, 0},
-               {:arrive, "a", :reply, 0},
+               {:arrive, "a", :reply, 1},
                {:host, 1, {:recv, :ok}},
                {:peer, 1, {:send, :ok}}
              ])

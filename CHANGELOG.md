@@ -2,6 +2,24 @@
 
 ## 0.1.0-dev — unreleased
 
+- Pin muro `0.22.22` from Hex (`{:muro, "~> 0.22.22"}` in
+  `mix.exs`, `muro: "0.22.22"` in `muro.exs`). `priv/muro/http/step.muro`
+  marks a header block past 16384, and a short `WROTE` (`n` below the
+  outstanding span), as outside the slice rather than 400 or quiet.
+  A finished request on a peer close is proved `cover=1`.
+  `c/test_step_slice` checks those paths. After a `status_now` close
+  the handwritten step already stays quiet; the stale comment is
+  gone. `priv/muro/http/neg/step_span.muro` is still refused by
+  `mix muro.check --fuel 5000000`, and `test/conn_test.exs` gates
+  that refusal. `mix muro.gen` refreshes the committed C and Elixir
+  headers for 0.22.22. The family FSM emitter now records departed
+  instances and `skip_below` in `lib/muro_http/family_fsm.ex`;
+  `family.muro` is unchanged. `test/family_test.exs` now uses a
+  fresh creation index after a resolved accept, because 0.22.22
+  refuses a repeat of a departed index. The other generated files
+  only change the 0.22.22 banner. The library version stays
+  `0.1.0-dev`.
+
 - `priv/muro/http/step.muro` checks a read slice of one HTTP/1.1
   connection: the request line, the headers, a Content-Length body,
   and the 400 / 413 / 417 / 501 close while that read is still open.

@@ -157,4 +157,14 @@ defmodule MuroHttp.ConnTraceTest do
       assert message =~ "does not conform to end"
     end
   end
+
+  test "check refuses a span after a 413 close" do
+    path = Path.join(File.cwd!(), "priv/muro/http/neg/step_span.muro")
+
+    assert {:error, message} = Muro.check_file(path, fuel: 5_000_000),
+           "priv/muro/http/neg/step_span.muro was accepted"
+
+    assert message =~ "span-after-close"
+    assert message =~ "cannot convert"
+  end
 end

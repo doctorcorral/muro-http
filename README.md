@@ -6,7 +6,7 @@
     <td>
       <h3>An HTTP/1.1 core written in muro.<br>Checked, then served from C.</h3>
       <a href="https://github.com/doctorcorral/muro-http/actions/workflows/muro.yml"><img src="https://img.shields.io/github/actions/workflow/status/doctorcorral/muro-http/muro.yml?branch=main&style=flat-square&label=ci&labelColor=111111&color=e8e8e8" alt="CI"></a>
-      <a href="https://hex.pm/packages/muro"><img src="https://img.shields.io/badge/muro-0.22.19-e8e8e8?style=flat-square&labelColor=111111" alt="muro 0.22.19"></a>
+      <a href="https://hex.pm/packages/muro"><img src="https://img.shields.io/badge/muro-0.22.22-e8e8e8?style=flat-square&labelColor=111111" alt="muro 0.22.22"></a>
     </td>
   </tr>
 </table>
@@ -20,8 +20,8 @@ admission, and the response bytes, plus a C host that dispatches to a
 handler. The challenge server is an example on that core. This
 repository is version `0.1.0-dev`.
 
-It pins the released Hex package muro `0.22.19` (`{:muro, "~> 0.22.19"}`
-in `mix.exs`, `muro: "0.22.19"` in `muro.exs`). It does not depend on a
+It pins the released Hex package muro `0.22.22` (`{:muro, "~> 0.22.22"}`
+in `mix.exs`, `muro: "0.22.22"` in `muro.exs`). It does not depend on a
 compiler checkout.
 
 It is hosted at https://github.com/doctorcorral/muro-http. There is no Hex publish.
@@ -829,7 +829,7 @@ and the fixed date. That is a test. It does not sweep tag
 combinations. `c/test_tags` checks the decide `*From` helpers.
 
 muro 0.21.15 and 0.21.16 add a temporal check and a synthesis cover.
-They do not change response bytes or this loop. The pin is 0.22.19.
+They do not change response bytes or this loop. The pin is 0.22.22.
 The per-key reply-order check is `priv/muro/http/family.muro`. It is
 a hold rule over a fixed script, not this loop.
 
@@ -891,7 +891,7 @@ close while still reading. After that close the book and the
 handwritten step both ignore a later fact.
 `priv/muro/http/neg/step_span.muro` claims a span
 after the 413 close; `mix muro.check` refuses it, and `mix test`
-does not load that file. `docs/protocol-backend.md` lists what
+gates that refusal. `docs/protocol-backend.md` lists what
 the slice leaves out. The adapter stays.
 Hand-written challenge, under `examples/challenge/`: `httpd.c` (main),
 `app.c` (the handler), `route_glue.c`, `store.c` (SQLite), `jwt.c`

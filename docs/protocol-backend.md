@@ -296,17 +296,17 @@ those bytes.
 Once the book has closed, every later fact is ignored. No second
 span. `priv/muro/http/neg/step_span.muro` claims a span after the
 413 close. It is not in `muro.exs`. `mix muro.check --fuel 5000000`
-on that file refuses `span-after-close`. `mix test` does not load
-it: the load checks `step.muro`, then checks the flattened book
-again, and that second pass does not finish inside the suite.
-`c/test_step_slice` feeds the same buffer to both functions
-on that slice. After a `status_now` close, a later fact on
-`c/step.c` used to emit another span. The handwritten step now
+on that file refuses `span-after-close`, and `mix test` gates that
+refusal. `c/test_step_slice` feeds the same buffer to both functions
+on that slice. After a `status_now` close, the handwritten step
 marks the connection shut, and the driver requires both the book
 and `muro_http_step` to stay quiet.
 
-Not in this slice: 414 and 431, 100 Continue, chunked bodies,
-pipelining, a pulled body, an idle `MURO_STEP_NOW`, a short write,
+A header block past 16384 and a short `WROTE` (`n` below the
+outstanding span) are marked outside (`cover=1`) rather than 400
+or quiet. A finished request on a peer close is also outside.
+Not claimed by this slice: 100 Continue, chunked bodies,
+pipelining, a pulled body, an idle `MURO_STEP_NOW`,
 `WRITE_FAILED` of a handler response, keep-alive consume, fuel,
 and a handler 500. Chunked is outside the book even when the
 method would otherwise be 501.

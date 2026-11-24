@@ -14,26 +14,26 @@
 -- this slice decides.
 --
 -- Fact numbers are c/step.h: 1 accepted, 2 bytes, 3 peer closed,
--- 4 wrote, 5 write failed, 6 now. `n` on a wrote fact is not an
--- argument. A wrote while an error span is outstanding closes.
--- A short write is not this slice.
+-- 4 wrote, 5 write failed, 6 now. `n` is the wrote byte count and
+-- `owed` is the outstanding write span. A wrote that meets that
+-- span closes. A short write (`n < owed`) is outside this slice.
 --
 -- phase 0 is still reading. phase 1 owes a write span (400, or a
 -- 413/417/501 that classify already finished). phase 2 has closed.
 -- A closed step ignores every later fact: no read, no write, no
--- status span, no body span. That is the rule the handwritten step
--- misses when hand_status answers 413, 417, or 501 without moving
--- the image to phase 4.
+-- status span, no body span. The handwritten step now also stays
+-- quiet after a 413, 417, or 501 status_now close.
 --
 -- span 0 is nothing, 1 is the close status (status_now), 2 is a
 -- write span. cover 1 means this buffer is outside the slice
 -- (chunked, 100 Continue, a tick or a write while still reading,
--- a finished request that arrived on a peer close). Those are not
--- decisions this book claims.
+-- a finished request that arrived on a peer close, a header block
+-- past 16384, a short wrote). Those are not decisions this book
+-- claims.
 --
 -- Not covered, and not given a matching equation: pipelining, a
--- pulled body, idle MURO_STEP_NOW, a short write, WRITE_FAILED of a
--- handler response, keep-alive consume, fuel, and a handler 500.
+-- pulled body, idle MURO_STEP_NOW, WRITE_FAILED of a handler
+-- response, keep-alive consume, fuel, and a handler 500.
 import "request.muro"
 
 unboxed data St : Type where
@@ -182,7 +182,16 @@ def onStatus : run Π (+ st : Status) → Π (+ fin : U64) → Π (+ s : Slice) 
           (match (u64eq fin (toU64 1)) motive (λ _ → Out)
             | true => finOk (policy s max)
             | false => usePol (policy s max) (toU64 0))
-      | status-malformed => owe (toU64 400)
+      | status-malformed =>
+          (match (headersDone s) motive (λ _ → Out)
+            | true =>
+                (match (gt16384 (headerEnd s)) motive (λ _ → Out)
+                  | true => outside
+                  | false => owe (toU64 400))
+            | false =>
+                (match (gt16384 (sliceLen s)) motive (λ _ → Out)
+                  | true => outside
+                  | false => owe (toU64 400)))
       | status-need-more =>
           (match (u64eq fin (toU64 1)) motive (λ _ → Out)
             | true => owe (toU64 400)
@@ -197,10 +206,13 @@ def onBuf : run Π (+ fin : U64) → Π (+ s : Slice) → Π (+ max : U64) → O
     match (classify s) motive (λ _ → Out)
       | classified st _keep => onStatus st fin s max
 
-def oweFact : run Π (+ code : U64) → Π (+ fact : U64) → Out :=
-  λ (+ code : U64) → λ (+ fact : U64) →
+def oweFact : run Π (+ code : U64) → Π (+ fact : U64) → Π (+ n : U64) → Π (+ owed : U64) → Out :=
+  λ (+ code : U64) → λ (+ fact : U64) → λ (+ n : U64) → λ (+ owed : U64) →
     match (u64eq fact factWrote) motive (λ _ → Out)
-      | true => quiet code
+      | true =>
+          (match (u64lt n owed) motive (λ _ → Out)
+            | true => outside
+            | false => quiet code)
       | false =>
           (match (u64eq fact factFailed) motive (λ _ → Out)
             | true => quiet code
@@ -224,15 +236,15 @@ def readFact : run Π (+ fact : U64) → Π (+ s : Slice) → Π (+ max : U64) �
                         | false => onBuf (toU64 1) s max)
                   | false => outside))
 
-def stepFact : run Π (+ st : St) → Π (+ fact : U64) → Π (+ buf : Slice) → Π (+ max : U64) → Out :=
-  λ (+ st : St) → λ (+ fact : U64) → λ (+ buf : Slice) → λ (+ max : U64) →
+def stepFact : run Π (+ st : St) → Π (+ fact : U64) → Π (+ buf : Slice) → Π (+ max : U64) → Π (+ n : U64) → Π (+ owed : U64) → Out :=
+  λ (+ st : St) → λ (+ fact : U64) → λ (+ buf : Slice) → λ (+ max : U64) → λ (+ n : U64) → λ (+ owed : U64) →
     match st motive (λ _ → Out)
       | st phase code =>
           (match (u64eq phase (toU64 2)) motive (λ _ → Out)
             | true => quiet code
             | false =>
                 (match (u64eq phase (toU64 1)) motive (λ _ → Out)
-                  | true => oweFact code fact
+                  | true => oweFact code fact n owed
                   | false => readFact fact buf max))
 
 def lineBuf : run Slice :=
@@ -287,70 +299,70 @@ def maxBig : run U64 :=
   toU64 8388608
 
 def sawLine : run Out :=
-  stepFact readSt factBytes lineBuf max10
+  stepFact readSt factBytes lineBuf max10 (toU64 0) (toU64 0)
 
 def sawHdr : run Out :=
-  stepFact readSt factBytes hdrBuf max10
+  stepFact readSt factBytes hdrBuf max10 (toU64 0) (toU64 0)
 
 def sawGet : run Out :=
-  stepFact readSt factBytes getBuf max10
+  stepFact readSt factBytes getBuf max10 (toU64 0) (toU64 0)
 
 def sawShort : run Out :=
-  stepFact readSt factBytes postShort max10
+  stepFact readSt factBytes postShort max10 (toU64 0) (toU64 0)
 
 def sawBody : run Out :=
-  stepFact readSt factBytes postBody max10
+  stepFact readSt factBytes postBody max10 (toU64 0) (toU64 0)
 
 def saw413 : run Out :=
-  stepFact readSt factBytes tooBig max10
+  stepFact readSt factBytes tooBig max10 (toU64 0) (toU64 0)
 
 def saw413Body : run Out :=
-  stepFact readSt factBytes postBody (toU64 0)
+  stepFact readSt factBytes postBody (toU64 0) (toU64 0) (toU64 0)
 
 def saw417 : run Out :=
-  stepFact readSt factBytes expectBuf maxBig
+  stepFact readSt factBytes expectBuf maxBig (toU64 0) (toU64 0)
 
 def saw417Done : run Out :=
-  stepFact readSt factBytes expectDone maxBig
+  stepFact readSt factBytes expectDone maxBig (toU64 0) (toU64 0)
 
 def saw501 : run Out :=
-  stepFact readSt factBytes traceBuf maxBig
+  stepFact readSt factBytes traceBuf maxBig (toU64 0) (toU64 0)
 
 def saw501Done : run Out :=
-  stepFact readSt factBytes traceDone maxBig
+  stepFact readSt factBytes traceDone maxBig (toU64 0) (toU64 0)
 
 def sawGzip : run Out :=
-  stepFact readSt factBytes gzipBuf max10
+  stepFact readSt factBytes gzipBuf max10 (toU64 0) (toU64 0)
 
 def sawBad : run Out :=
-  stepFact readSt factBytes badBuf max10
+  stepFact readSt factBytes badBuf max10 (toU64 0) (toU64 0)
 
 def sawNoHost : run Out :=
-  stepFact readSt factBytes noHost max10
+  stepFact readSt factBytes noHost max10 (toU64 0) (toU64 0)
 
 def sawAccept : run Out :=
-  stepFact readSt factAccepted b"" max10
+  stepFact readSt factAccepted b"" max10 (toU64 0) (toU64 0)
 
 def sawFinEmpty : run Out :=
-  stepFact readSt factPeer b"" max10
+  stepFact readSt factPeer b"" max10 (toU64 0) (toU64 0)
 
 def sawFinPartial : run Out :=
-  stepFact readSt factPeer lineBuf max10
+  stepFact readSt factPeer lineBuf max10 (toU64 0) (toU64 0)
 
 def sawFinOver : run Out :=
-  stepFact readSt factPeer tooBig max10
+  stepFact readSt factPeer tooBig max10 (toU64 0) (toU64 0)
 
 def sawChunk : run Out :=
-  stepFact readSt factBytes chunkBuf max10
+  stepFact readSt factBytes chunkBuf max10 (toU64 0) (toU64 0)
 
 def sawCont : run Out :=
-  stepFact readSt factBytes contBuf max10
+  stepFact readSt factBytes contBuf max10 (toU64 0) (toU64 0)
 
 def sawNow : run Out :=
-  stepFact readSt factNow getBuf max10
+  stepFact readSt factNow getBuf max10 (toU64 0) (toU64 0)
 
 def sawWroteRead : run Out :=
-  stepFact readSt factWrote getBuf max10
+  stepFact readSt factWrote getBuf max10 (toU64 0) (toU64 0)
 
 def closed413 : run St :=
   take saw413
@@ -362,7 +374,7 @@ def closed501 : run St :=
   take saw501
 
 def closed400 : run St :=
-  take (stepFact (take sawBad) factWrote badBuf max10)
+  take (stepFact (take sawBad) factWrote badBuf max10 (toU64 1) (toU64 1))
 
 def line-more : evidence {sawLine ≡ more : Out} := refl
 
@@ -408,36 +420,48 @@ def now-outside : evidence {coverOf sawNow ≡ toU64 1 : U64} := refl
 
 def wrote-outside : evidence {coverOf sawWroteRead ≡ toU64 1 : U64} := refl
 
-def owe-wrote : evidence {stepFact (take sawBad) factWrote badBuf max10 ≡ quiet (toU64 400) : Out} := refl
+def owe-wrote : evidence {stepFact (take sawBad) factWrote badBuf max10 (toU64 1) (toU64 1) ≡ quiet (toU64 400) : Out} := refl
 
-def owe-failed : evidence {stepFact (take sawBad) factFailed badBuf max10 ≡ quiet (toU64 400) : Out} := refl
+def owe-failed : evidence {stepFact (take sawBad) factFailed badBuf max10 (toU64 0) (toU64 0) ≡ quiet (toU64 400) : Out} := refl
 
-def owe-peer : evidence {stepFact (take sawBad) factPeer badBuf max10 ≡ owe (toU64 400) : Out} := refl
+def owe-peer : evidence {stepFact (take sawBad) factPeer badBuf max10 (toU64 0) (toU64 0) ≡ owe (toU64 400) : Out} := refl
 
-def after-413-accept : evidence {stepFact closed413 factAccepted tooBig max10 ≡ quiet (toU64 413) : Out} := refl
+def after-413-accept : evidence {stepFact closed413 factAccepted tooBig max10 (toU64 0) (toU64 0) ≡ quiet (toU64 413) : Out} := refl
 
-def after-413-bytes : evidence {stepFact closed413 factBytes getBuf max10 ≡ quiet (toU64 413) : Out} := refl
+def after-413-bytes : evidence {stepFact closed413 factBytes getBuf max10 (toU64 0) (toU64 0) ≡ quiet (toU64 413) : Out} := refl
 
-def after-413-peer : evidence {stepFact closed413 factPeer tooBig max10 ≡ quiet (toU64 413) : Out} := refl
+def after-413-peer : evidence {stepFact closed413 factPeer tooBig max10 (toU64 0) (toU64 0) ≡ quiet (toU64 413) : Out} := refl
 
-def after-413-wrote : evidence {stepFact closed413 factWrote tooBig max10 ≡ quiet (toU64 413) : Out} := refl
+def after-413-wrote : evidence {stepFact closed413 factWrote tooBig max10 (toU64 0) (toU64 0) ≡ quiet (toU64 413) : Out} := refl
 
-def after-413-failed : evidence {stepFact closed413 factFailed tooBig max10 ≡ quiet (toU64 413) : Out} := refl
+def after-413-failed : evidence {stepFact closed413 factFailed tooBig max10 (toU64 0) (toU64 0) ≡ quiet (toU64 413) : Out} := refl
 
-def after-413-now : evidence {stepFact closed413 factNow tooBig max10 ≡ quiet (toU64 413) : Out} := refl
+def after-413-now : evidence {stepFact closed413 factNow tooBig max10 (toU64 0) (toU64 0) ≡ quiet (toU64 413) : Out} := refl
 
-def after-417-peer : evidence {stepFact closed417 factPeer expectBuf maxBig ≡ quiet (toU64 417) : Out} := refl
+def after-417-peer : evidence {stepFact closed417 factPeer expectBuf maxBig (toU64 0) (toU64 0) ≡ quiet (toU64 417) : Out} := refl
 
-def after-417-bytes : evidence {stepFact closed417 factBytes getBuf maxBig ≡ quiet (toU64 417) : Out} := refl
+def after-417-bytes : evidence {stepFact closed417 factBytes getBuf maxBig (toU64 0) (toU64 0) ≡ quiet (toU64 417) : Out} := refl
 
-def after-417-now : evidence {stepFact closed417 factNow expectBuf maxBig ≡ quiet (toU64 417) : Out} := refl
+def after-417-now : evidence {stepFact closed417 factNow expectBuf maxBig (toU64 0) (toU64 0) ≡ quiet (toU64 417) : Out} := refl
 
-def after-501-peer : evidence {stepFact closed501 factPeer traceBuf maxBig ≡ quiet (toU64 501) : Out} := refl
+def after-501-peer : evidence {stepFact closed501 factPeer traceBuf maxBig (toU64 0) (toU64 0) ≡ quiet (toU64 501) : Out} := refl
 
-def after-501-bytes : evidence {stepFact closed501 factBytes getBuf maxBig ≡ quiet (toU64 501) : Out} := refl
+def after-501-bytes : evidence {stepFact closed501 factBytes getBuf maxBig (toU64 0) (toU64 0) ≡ quiet (toU64 501) : Out} := refl
 
-def after-501-now : evidence {stepFact closed501 factNow traceBuf maxBig ≡ quiet (toU64 501) : Out} := refl
+def after-501-now : evidence {stepFact closed501 factNow traceBuf maxBig (toU64 0) (toU64 0) ≡ quiet (toU64 501) : Out} := refl
 
-def after-400-peer : evidence {stepFact closed400 factPeer badBuf max10 ≡ quiet (toU64 400) : Out} := refl
+def after-400-peer : evidence {stepFact closed400 factPeer badBuf max10 (toU64 0) (toU64 0) ≡ quiet (toU64 400) : Out} := refl
 
-def after-span : evidence {spanOf (stepFact closed413 factPeer tooBig max10) ≡ toU64 0 : U64} := refl
+def after-span : evidence {spanOf (stepFact closed413 factPeer tooBig max10 (toU64 0) (toU64 0)) ≡ toU64 0 : U64} := refl
+
+def sawFinGet : run Out :=
+  stepFact readSt factPeer getBuf max10 (toU64 0) (toU64 0)
+
+def sawFinBody : run Out :=
+  stepFact readSt factPeer postBody max10 (toU64 0) (toU64 0)
+
+def fin-get-outside : evidence {sawFinGet ≡ outside : Out} := refl
+
+def fin-body-outside : evidence {sawFinBody ≡ outside : Out} := refl
+
+def owe-wrote-short : evidence {coverOf (stepFact (take sawBad) factWrote badBuf max10 (toU64 1) (toU64 2)) ≡ toU64 1 : U64} := refl

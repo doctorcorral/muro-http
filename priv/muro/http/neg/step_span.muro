@@ -1,8 +1,6 @@
 -- A span after a 413 close. The step is quiet: span 0.
--- Not in muro.exs. mix test does not load this file: the load checks
--- step.muro, then checks the flattened book again.
--- Refuse it with:
---   mix muro.check --fuel 5000000 priv/muro/http/neg/step_span.muro
+-- Not in muro.exs. mix muro.check --fuel 5000000 refuses it.
+-- test/conn_test.exs gates that refusal.
 import "../step.muro"
 
-def span-after-close : evidence {spanOf (stepFact (take (stepFact readSt factBytes tooBig max10)) factPeer tooBig max10) ≡ toU64 1 : U64} := refl
+def span-after-close : evidence {spanOf (stepFact (take (stepFact readSt factBytes tooBig max10 (toU64 0) (toU64 0))) factPeer tooBig max10 (toU64 0) (toU64 0)) ≡ toU64 1 : U64} := refl
