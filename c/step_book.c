@@ -907,6 +907,9 @@ int muro_book_step(BookStep *st, const StepIn *in, StepOut *out) {
 
 #ifdef MURO_STEP_BOOK
 
+/* Mirrors PEND_SHUT = 3 in c/step.c (and TEST_PEND_SHUT in c/test_step_slice.c). */
+#define BOOK_PEND_SHUT 3
+
 static void load_http(BookStep *b, HttpStep *st) {
   memset(b, 0, sizeof *b);
   b->read_more = st->read_more;
@@ -920,7 +923,7 @@ static void load_http(BookStep *b, HttpStep *st) {
   b->out_off = st->out_off;
   b->rendered = st->rendered;
   b->owe = st->owe;
-  b->shut = st->pend_kind == 3;
+  b->shut = st->pend_kind == BOOK_PEND_SHUT;
   b->blind = st->pull_done;
   b->image = (int)st->st.muro__as.conn.muro__f_0;
   b->is_head = st->is_head;
@@ -959,7 +962,7 @@ static void store_http(HttpStep *st, const BookStep *b, StepOut *out) {
   st->out_off = b->out_off;
   st->rendered = b->rendered;
   st->owe = b->owe;
-  st->pend_kind = b->shut ? 3 : 0;
+  st->pend_kind = b->shut ? BOOK_PEND_SHUT : 0;
   st->pull_done = b->blind;
   st->is_head = b->is_head;
   st->ver11 = b->ver11;

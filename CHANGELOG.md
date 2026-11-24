@@ -24,8 +24,8 @@
   close must leave the image `CLOSED`, except a later fact after
   `status_now`, which the host answers from `PEND_SHUT` with its
   image still `READ`: the harness accepts `READ` only there, with
-  `PEND_SHUT`, `close_conn` 1, no interest and no bytes, and counts
-  those steps (`quiet-read-shut`). `book-skip` is 0. `c/muro-hello` and
+  `PEND_SHUT`, `close_conn` 1, no interest, no `status_now`, and no
+  bytes, and counts those steps (`quiet-read-shut`). `book-skip` is 0. `c/muro-hello` and
   `c/muro-hello-book` each pass 71 conformance cases.
   `make c-conformance-book` runs the book server and is not part of
   `c-check`. Versus `origin/main` the book adds 44 evidence
