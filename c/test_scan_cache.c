@@ -15,9 +15,11 @@
 
 HSt scan_uncached(muro__slice s);
 uint64_t crlfEnd_uncached(muro__slice s);
+uint64_t methodCode_uncached(muro__slice s);
 uint64_t teCode_uncached(muro__slice s);
 uint64_t framedEnd_uncached(muro__slice s);
 uint64_t streamTake_uncached(muro__slice s);
+muro__slice bodyView_uncached(muro__slice s);
 Conn step_uncached(Conn st, Ev ev);
 void step_memo_reset(void);
 void view_memo_reset(void);
@@ -70,12 +72,103 @@ static int field_u64(const char *name, const char *what, uint64_t u, uint64_t m,
   return 1;
 }
 
+static int points_at(const uint8_t *p, muro__slice buf) {
+  size_t i;
+  if (!p || !buf.p) return 0;
+  for (i = 0; i <= buf.n; i++) {
+    if (p == buf.p + i) return 1;
+  }
+  return 0;
+}
+
+/* Uncached, miss, and hit must agree, and a view that the book places
+   in the caller buffer must keep that offset. muro__slice_of(..., 0)
+   would hide a hit that fell back to the empty sentinel. */
+static int check_body(const char *name, muro__slice s, muro__slice u, muro__slice m,
+                      muro__slice h) {
+  if (u.n != m.n || u.n != h.n) {
+    bad(name, "bodyView n");
+    return 0;
+  }
+  if (points_at(u.p, s)) {
+    size_t off = (size_t)(u.p - s.p);
+    if (m.p != s.p + off || h.p != s.p + off) {
+      bad(name, "bodyView off");
+      return 0;
+    }
+    if (u.n > 0 && (memcmp(m.p, u.p, u.n) != 0 || memcmp(h.p, u.p, u.n) != 0)) {
+      bad(name, "bodyView bytes");
+      return 0;
+    }
+    return 1;
+  }
+  if (points_at(m.p, s) || points_at(h.p, s)) {
+    bad(name, "bodyView sentinel");
+    return 0;
+  }
+  return 1;
+}
+
+/* Same bytes in a second buffer must hit with an offset into that
+   buffer, not a stale pointer into the first. */
+static void check_body_rebind(const char *name, const char *raw) {
+  size_t n = strlen(raw);
+  uint8_t *a;
+  uint8_t *b;
+  muro__slice sa, sb, u, miss, hit, hit2;
+  size_t off;
+  a = malloc(n ? n : 1);
+  b = malloc(n ? n : 1);
+  if (!a || !b) {
+    bad(name, "alloc");
+    free(a);
+    free(b);
+    return;
+  }
+  if (n) {
+    memcpy(a, raw, n);
+    memcpy(b, raw, n);
+  }
+  sa = (muro__slice){a, n};
+  sb = (muro__slice){b, n};
+  view_memo_reset();
+  muro_http_reset();
+  u = bodyView_uncached(sa);
+  miss = bodyView(sa);
+  hit = bodyView(sa);
+  if (!check_body(name, sa, u, miss, hit)) {
+    free(a);
+    free(b);
+    return;
+  }
+  hit2 = bodyView(sb);
+  if (hit2.n != u.n) {
+    bad(name, "rebind n");
+    free(a);
+    free(b);
+    return;
+  }
+  if (points_at(u.p, sa)) {
+    off = (size_t)(u.p - sa.p);
+    if (hit2.p != sb.p + off) bad(name, "rebind off");
+    if (hit2.p == sa.p + off && a != b) bad(name, "rebind stale");
+  }
+  free(a);
+  free(b);
+}
+
 /* Uncached, then a miss, then a hit. The slot is cold so the first
    memo call fills it. */
 static int check_views(const char *name, muro__slice s) {
   uint64_t u, m, h;
+  muro__slice bu, bm, bh;
   view_memo_reset();
   muro_http_reset();
+  u = methodCode_uncached(s);
+  muro_http_reset();
+  m = methodCode(s);
+  h = methodCode(s);
+  if (!field_u64(name, "methodCode", u, m, h)) return 0;
   u = teCode_uncached(s);
   muro_http_reset();
   m = teCode(s);
@@ -91,6 +184,12 @@ static int check_views(const char *name, muro__slice s) {
   m = streamTake(s);
   h = streamTake(s);
   if (!field_u64(name, "streamTake", u, m, h)) return 0;
+  muro_http_reset();
+  bu = bodyView_uncached(s);
+  muro_http_reset();
+  bm = bodyView(s);
+  bh = bodyView(s);
+  if (!check_body(name, s, bu, bm, bh)) return 0;
   return 1;
 }
 
@@ -227,6 +326,14 @@ static int must_admit(const char *name, Proto *p, int phase, int ev, size_t n, i
   return 1;
 }
 
+static int proto_where_eq(Proto *a, Proto *b) {
+  char wa[256];
+  char wb[256];
+  proto_where(a, wa, sizeof wa);
+  proto_where(b, wb, sizeof wb);
+  return strcmp(wa, wb) == 0;
+}
+
 static int proto_moves_eq(Proto *a, Proto *b) {
   int n;
   int i;
@@ -284,6 +391,7 @@ static void check_session_memo(void) {
   if (!admit_read(p2)) goto done;
   if (sess_memo_misses() != before) bad("sess", "read hit called the book");
   if (!proto_moves_eq(p1, p2)) bad("sess", "read hit moves");
+  if (!proto_where_eq(p1, p2)) bad("sess", "read hit where");
   if (!admit_read(pbad)) goto done;
   before = sess_memo_misses();
   if (!admit_reply(pbad, 1)) goto done;
@@ -297,6 +405,7 @@ static void check_session_memo(void) {
   if (!admit_reply(p2, 0)) goto done;
   if (sess_memo_misses() != before) bad("sess", "reply hit called the book");
   if (!proto_moves_eq(p1, p2)) bad("sess", "reply hit moves");
+  if (!proto_where_eq(p1, p2)) bad("sess", "reply hit where");
   before = sess_memo_misses();
   if (!must_admit("sess-keep", p1, 2, 3, 0, -1, -1, 0)) goto done;
   if (sess_memo_misses() == before) bad("sess", "keep stored nothing");
@@ -305,6 +414,7 @@ static void check_session_memo(void) {
   if (!must_admit("sess-keep-hit", p2, 2, 3, 0, -1, -1, 0)) goto done;
   if (sess_memo_misses() != before) bad("sess", "keep hit called the book");
   if (!last_bit_is(p2, 0) || proto_done(p2)) bad("sess", "keep hit bit");
+  if (!proto_where_eq(p1, p2)) bad("sess", "keep hit where");
   if (!admit_read(p3) || !admit_reply(p3, 0)) goto done;
   before = sess_memo_misses();
   if (!must_admit("sess-close", p3, 2, 3, 0, -1, -1, 1)) goto done;
@@ -416,6 +526,7 @@ int main(void) {
   check_lit("empty", "");
   check_lit("get", "GET / HTTP/1.1\r\nHost: t\r\n\r\n");
   check_lit("post-slash", "POST / HTTP/1.1\r\nHost: t\r\nContent-Length: 4\r\n\r\nping");
+  check_lit("cl-zero", "POST / HTTP/1.1\r\nHost: t\r\nContent-Length: 0\r\n\r\n");
   check_lit("post-echo", "POST /echo HTTP/1.1\r\nHost: t\r\nContent-Length: 4\r\n\r\nping");
   check_lit("partial", "GET / HTTP/1.1\r\n");
   check_lit("chunk", "POST /echo HTTP/1.1\r\nHost: t\r\nTransfer-Encoding: chunked\r\n\r\n2\r\nhi\r\n0\r\n\r\n");
@@ -434,6 +545,9 @@ int main(void) {
   check_step_walk("walk-close", "GET / HTTP/1.1\r\nHost: t\r\nConnection: close\r\n\r\n");
   check_admit_memo();
   check_session_memo();
+  check_body_rebind("rebind-get", "GET / HTTP/1.1\r\nHost: t\r\n\r\n");
+  check_body_rebind("rebind-cl-zero", "POST / HTTP/1.1\r\nHost: t\r\nContent-Length: 0\r\n\r\n");
+  check_body_rebind("rebind-post", "POST / HTTP/1.1\r\nHost: t\r\nContent-Length: 4\r\n\r\nping");
 
   check_corpus("fuzz/corpus");
 

@@ -2,6 +2,11 @@
 
 ## 0.1.0-dev — unreleased
 
+- `bodyView` keeps the in-buffer offset of an empty body, including
+  `Content-Length: 0`, on a memo hit. A later call with the same
+  bytes in a new buffer points into that buffer, not at the
+  process-wide empty sentinel. The library version stays
+  `0.1.0-dev`.
 - `render_direct` refuses a response whose piece lengths do not fit
   in `size_t`, instead of wrapping the total and writing past the
   caller buffer. `sess_key_of` asserts that the session state has

@@ -41,6 +41,7 @@ struct view_slot {
   int has_take;
   uint64_t take;
   int has_body;
+  int body_in_buf;
   size_t body_off;
   size_t body_n;
 };
@@ -78,6 +79,7 @@ static struct view_slot *slot_for(muro__slice s) {
   sl->has_frame = 0;
   sl->has_take = 0;
   sl->has_body = 0;
+  sl->body_in_buf = 0;
   if (s.n) memcpy(sl->bytes, s.p, s.n);
   return sl;
 }
@@ -141,6 +143,23 @@ uint64_t streamTake(muro__slice s) {
   return sl->take;
 }
 
+/* r sits inside s, including a zero-length view at s.p + s.n.
+   Integer addresses only: r.p + r.n is undefined if that sum leaves
+   the object r.p points at. */
+static int body_in_slice(muro__slice s, muro__slice r, size_t *off) {
+  uintptr_t base;
+  uintptr_t start;
+  uintptr_t lim;
+  if (!s.p || !r.p || r.n > s.n) return 0;
+  base = (uintptr_t)s.p;
+  start = (uintptr_t)r.p;
+  lim = base + s.n;
+  if (start < base || start > lim) return 0;
+  if (start - base > s.n - r.n) return 0;
+  *off = (size_t)(start - base);
+  return 1;
+}
+
 muro__slice bodyView(muro__slice s) {
   struct view_slot *sl;
   muro__slice r;
@@ -148,27 +167,26 @@ muro__slice bodyView(muro__slice s) {
   if (s.n > VIEW_MAX || (s.n > 0 && !s.p)) return bodyView_uncached(s);
   sl = slot_for(s);
   if (sl->has_body) {
-    if (sl->body_n == 0) return muro__slice_empty();
-    return muro__slice_of(s.p + sl->body_off, sl->body_n);
+    /* muro__slice_of(..., 0) collapses to the TU-local empty
+       sentinel. An in-buffer empty view must keep its offset in s. */
+    if (sl->body_in_buf && s.p)
+      return (muro__slice){s.p + sl->body_off, sl->body_n};
+    return muro__slice_empty();
   }
   r = bodyView_uncached(s);
+  if (body_in_slice(s, r, &off)) {
+    sl->body_in_buf = 1;
+    sl->body_off = off;
+    sl->body_n = r.n;
+    sl->has_body = 1;
+    return r;
+  }
   if (r.n == 0) {
+    sl->body_in_buf = 0;
     sl->body_off = 0;
     sl->body_n = 0;
     sl->has_body = 1;
     return r;
   }
-  /* Integer addresses, not pointer compares. r.p + r.n is undefined
-     when that sum leaves the object r.p points at. */
-  if (!s.p || !r.p || r.n > s.n) return r;
-  {
-    uintptr_t base = (uintptr_t)s.p;
-    uintptr_t start = (uintptr_t)r.p;
-    if (start < base || start - base > s.n - r.n) return r;
-    off = (size_t)(start - base);
-  }
-  sl->body_off = off;
-  sl->body_n = r.n;
-  sl->has_body = 1;
   return r;
 }

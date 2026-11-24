@@ -10,6 +10,7 @@
 #include "conn.h"
 #include "proto.h"
 
+#include <stdint.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -273,9 +274,18 @@ static void check_keepalive(void) {
     muro_http_reset();
     body2 = bodyView(s);
     if (body2.n != body.n) bad("health", "body hit");
-    if (body.n > 0 && (body2.p != s.p + (size_t)(body.p - s.p) ||
-                       memcmp(body2.p, body.p, body.n) != 0))
-      bad("health", "body hit");
+    /* Empty bodies still point into the request buffer. Skipping
+       n == 0 used to miss a hit that returned the empty sentinel.
+       Compare addresses as integers: a sentinel pointer is not in s. */
+    {
+      uintptr_t base = (uintptr_t)s.p;
+      uintptr_t start = (uintptr_t)body.p;
+      uintptr_t hitp = (uintptr_t)body2.p;
+      if (!s.p || start < base || start > base + s.n ||
+          hitp != base + (start - base) ||
+          (body.n > 0 && memcmp(body2.p, body.p, body.n) != 0))
+        bad("health", "body hit");
+    }
   }
   n = take("reply-allocs", &st, proto, evReply(0));
   if (n != 0) bad("reply", "allocs");
