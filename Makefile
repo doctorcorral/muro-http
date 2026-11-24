@@ -155,6 +155,16 @@ c/muro-httpd: c/httpd.o c/app.o c/route_glue.o c/host_body.o c/body.o c/decide.o
 c/muro-hello: c/hello.o $(HOST)
 	$(CC) $(LDFLAGS) -o $@ c/hello.o $(HOST)
 
+# Opt-in host. The generated slice plus the buffer adapter replace
+# c/step.o. The default muro-hello target does not link either.
+BOOK_HOST = c/host.o c/step_book_host.o c/step_slice.o c/host_poll.o c/host_render.o c/host_date.o c/host_stream.o c/render.o $(CORE)
+
+c/step_book_host.o: c/step_book.c c/step_book.h c/step.h c/host_render.h c/host_stream.h c/generated/step_slice.h
+	$(CC) $(CFLAGS) -DMURO_STEP_BOOK -c -o $@ c/step_book.c
+
+c/muro-hello-book: c/hello.o $(BOOK_HOST)
+	$(CC) $(LDFLAGS) -o $@ c/hello.o $(BOOK_HOST)
+
 c/muro-stream: c/stream.o $(HOST)
 	$(CC) $(LDFLAGS) -o $@ c/stream.o $(HOST)
 
@@ -164,16 +174,16 @@ c/test_http11: c/test_http11.o
 c/test_step: c/mem_adapter.o $(HOST)
 	$(CC) $(LDFLAGS) -o $@ c/mem_adapter.o $(HOST)
 
-c/step_book.o: c/generated/step_slice.c c/shim.h
+c/step_slice.o: c/generated/step_slice.c c/shim.h
 	$(CC) $(CFLAGS) -c -o $@ c/generated/step_slice.c
 
-c/test_step_slice: c/test_step_slice.o c/step_book.o $(HOST)
-	$(CC) $(LDFLAGS) -o $@ c/test_step_slice.o c/step_book.o $(HOST)
+c/test_step_slice: c/test_step_slice.o c/step_slice.o c/step_book.o $(HOST)
+	$(CC) $(LDFLAGS) -o $@ c/test_step_slice.o c/step_slice.o c/step_book.o $(HOST)
 
 c-conformance: c/muro-hello
 	PYTHONDONTWRITEBYTECODE=1 python3 c/test_conformance.py c/muro-hello
 
-c-check: bench/loadgen c/test_classify c/test_conn c/test_scan_cache c/test_sess c/test_render c/test_body c/test_jwt c/test_json c/test_store c/test_poll c/test_route c/test_tags c/test_serve c/test_workers c/muro-httpd c/muro-hello c/muro-stream c/test_e2e c/test_hello c/test_http11 c/test_step c/test_step_slice
+c-check: bench/loadgen c/test_classify c/test_conn c/test_scan_cache c/test_sess c/test_render c/test_body c/test_jwt c/test_json c/test_store c/test_poll c/test_route c/test_tags c/test_serve c/test_workers c/muro-httpd c/muro-hello c/muro-hello-book c/muro-stream c/test_e2e c/test_hello c/test_http11 c/test_step c/test_step_slice
 	./c/test_classify
 	./c/test_conn
 	./c/test_scan_cache
@@ -203,7 +213,7 @@ c-sanitize:
 	$(MAKE) c-check CFLAGS="$(SAN_CFLAGS)" LDFLAGS="$(SAN_LDFLAGS)"
 
 clean:
-	rm -f c/*.o c/conn.patched.c c/muro-httpd c/muro-hello c/muro-stream c/test_classify c/test_conn c/test_scan_cache c/test_sess c/test_render c/test_e2e c/test_admit c/test_body c/test_jwt c/test_json c/test_store c/test_poll c/test_route c/test_tags c/test_hello c/test_serve c/test_workers c/test_http11 c/test_step c/test_step_slice bench/loadgen fuzz/step_fuzz
+	rm -f c/*.o c/conn.patched.c c/muro-httpd c/muro-hello c/muro-hello-book c/muro-stream c/test_classify c/test_conn c/test_scan_cache c/test_sess c/test_render c/test_e2e c/test_admit c/test_body c/test_jwt c/test_json c/test_store c/test_poll c/test_route c/test_tags c/test_hello c/test_serve c/test_workers c/test_http11 c/test_step c/test_step_slice bench/loadgen fuzz/step_fuzz
 
 # libFuzzer + ASan + UBSan. clang is fixed here so CC, c-check, and
 # c-sanitize keep using $(CC). Objects are not written into c/.

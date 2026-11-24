@@ -1,12 +1,15 @@
 -- Write slice of one HTTP/1.1 connection.
 --
--- c/step.c is still the step the host calls. This book decides one
--- read, the protocol write, the handler write, and the idle tick.
--- It does not call the kernel or the clock. It does not render
--- bytes. The handler, the admit wall, and host_copy_response stay
--- in C. `--backend c` emits c/generated/step_slice.c with c_prefix
--- http_step_. c/test_step_slice feeds the same fact and the same
--- buffer to http_step_stepFact and to muro_http_step.
+-- c/step.c is still the step the production host calls. This book
+-- decides one read, the protocol write, the handler write, and the
+-- idle tick. It does not call the kernel or the clock. It does not
+-- render bytes. The handler, the admit wall, and host_copy_response
+-- stay in C. c/step_book.c owns the buffers and calls this step.
+-- It is not linked into the production host. `--backend c` emits
+-- c/generated/step_slice.c with c_prefix http_step_.
+-- c/test_step_slice feeds the same fact and the same buffer to
+-- http_step_stepFact and to muro_http_step, and compares that host
+-- with the adapter on the covered paths.
 --
 -- Fact numbers are c/step.h: 1 accepted, 2 bytes, 3 peer closed,
 -- 4 wrote, 5 write failed, 6 now. `n` is the wrote count. `owed`
@@ -42,9 +45,10 @@
 --
 -- cover 1 is outside this slice: chunked, 100 Continue, a streamed
 -- body whose Content-Length is within max while the peer is still
--- open (the host pulls it), a wrote or a failure while the
--- connection is reading or idle (book phase 0 or book phase 4),
--- bytes or accept during a write, and accept while idle. A
+-- open (the host pulls it), accept during a write, and accept while
+-- idle. Bytes during a write park the same span. A wrote or a
+-- failure while reading stays on the read. The same facts while
+-- idle stay idle. The host holds those facts the same way. A
 -- finished buffered request on a peer close is a handler span
 -- with keep 1. The completing write closes. A within-max streamed
 -- body on a peer close is that same handler span
@@ -56,8 +60,9 @@
 -- input. It finishes from its own byte counter.
 -- Not claimed here: a pulled body, fuel, a handler 500,
 -- and the 100 Continue span.
--- Versus origin/main: 19 evidence theorems added, 2 removed,
--- net +17, 126 total. Each one is an equation mix muro.check reduces.
+-- Versus origin/main: 7 evidence names added, 5 removed (those
+-- five are the old cover-1 names for facts the host holds), net
+-- +2, 126 total. Each one is an equation mix muro.check reduces.
 import "request.muro"
 
 unboxed data St : Type where
@@ -357,7 +362,10 @@ def writeFact : run Π (+ phase : U64) → Π (+ code : U64) → Π (+ left : U6
                   | false =>
                       (match (u64eq fact factNow) motive (λ _ → Out)
                         | true => still phase code left keep
-                        | false => outside)))
+                        | false =>
+                            (match (u64eq fact factBytes) motive (λ _ → Out)
+                              | true => still phase code left keep
+                              | false => outside))))
 
 def readFact : run Π (+ fact : U64) → Π (+ s : Slice) → Π (+ max : U64) → Π (+ now : U64) → Π (+ dl : U64) → Π (+ idle : U64) → Out :=
   λ (+ fact : U64) → λ (+ s : Slice) → λ (+ max : U64) → λ (+ now : U64) → λ (+ dl : U64) → λ (+ idle : U64) →
@@ -375,7 +383,10 @@ def readFact : run Π (+ fact : U64) → Π (+ s : Slice) → Π (+ max : U64) �
                   | false =>
                       (match (u64eq fact factNow) motive (λ _ → Out)
                         | true => quiet (toU64 0)
-                        | false => outside)))
+                        | false =>
+                            (match (or (u64eq fact factWrote) (u64eq fact factFailed)) motive (λ _ → Out)
+                              | true => moreAt now dl idle
+                              | false => outside))))
 
 def idleFact : run Π (+ fact : U64) → Π (+ s : Slice) → Π (+ max : U64) → Π (+ now : U64) → Π (+ dl : U64) → Π (+ idle : U64) → Out :=
   λ (+ fact : U64) → λ (+ s : Slice) → λ (+ max : U64) → λ (+ now : U64) → λ (+ dl : U64) → λ (+ idle : U64) →
@@ -390,7 +401,10 @@ def idleFact : run Π (+ fact : U64) → Π (+ s : Slice) → Π (+ max : U64) �
             | false =>
                 (match (u64eq fact factNow) motive (λ _ → Out)
                   | true => quiet (toU64 0)
-                  | false => outside))
+                  | false =>
+                      (match (or (u64eq fact factWrote) (u64eq fact factFailed)) motive (λ _ → Out)
+                        | true => idleAt now dl idle
+                        | false => outside)))
 
 def stepFact : run Π (+ st : St) → Π (+ fact : U64) → Π (+ buf : Slice) → Π (+ max : U64) → Π (+ n : U64) → Π (+ owed : U64) → Π (+ now : U64) → Π (+ dl : U64) → Π (+ idle : U64) → Out :=
   λ (+ st : St) → λ (+ fact : U64) → λ (+ buf : Slice) → λ (+ max : U64) → λ (+ n : U64) → λ (+ owed : U64) → λ (+ now : U64) → λ (+ dl : U64) → λ (+ idle : U64) →
@@ -629,7 +643,7 @@ def continue-outside : evidence {coverOf sawCont ≡ toU64 1 : U64} := refl
 
 def now-read : evidence {sawNow ≡ quiet (toU64 0) : Out} := refl
 
-def wrote-outside : evidence {coverOf sawWroteRead ≡ toU64 1 : U64} := refl
+def wrote-read : evidence {sawWroteRead ≡ more : Out} := refl
 
 def owe-wrote : evidence {step0 owe400 factWrote badBuf max10 (toU64 1) (toU64 1) ≡ quiet (toU64 400) : Out} := refl
 
@@ -790,18 +804,18 @@ def stream-peer-reply : evidence {sawStreamPeer ≡ reply (toU64 1) : Out} := re
 
 def stream-peer-done : evidence {step0 (take sawStreamPeer) factWrote streamBuf maxBig (toU64 8) (toU64 8) ≡ quiet (toU64 0) : Out} := refl
 
-def write-bytes-outside : evidence {coverOf (step0 repGet factBytes getBuf max10 (toU64 0) (toU64 0)) ≡ toU64 1 : U64} := refl
+def write-bytes-holds : evidence {step0 repGet factBytes getBuf max10 (toU64 0) (toU64 0) ≡ reply (toU64 0) : Out} := refl
 
 def write-accept-outside : evidence {coverOf (step0 repGet factAccepted getBuf max10 (toU64 0) (toU64 0)) ≡ toU64 1 : U64} := refl
 
-def read-failed-outside : evidence {coverOf (step0 readSt factFailed getBuf max10 (toU64 0) (toU64 0)) ≡ toU64 1 : U64} := refl
+def read-failed-holds : evidence {step0 readSt factFailed getBuf max10 (toU64 0) (toU64 0) ≡ more : Out} := refl
 
 def idleSt : run St :=
   take (step0 repGet factWrote getBuf max10 (toU64 8) (toU64 8))
 
-def idle-wrote-outside : evidence {coverOf (step0 idleSt factWrote b"" max10 (toU64 0) (toU64 0)) ≡ toU64 1 : U64} := refl
+def idle-wrote-holds : evidence {step0 idleSt factWrote b"" max10 (toU64 0) (toU64 0) ≡ idle : Out} := refl
 
-def idle-failed-outside : evidence {coverOf (step0 idleSt factFailed b"" max10 (toU64 0) (toU64 0)) ≡ toU64 1 : U64} := refl
+def idle-failed-holds : evidence {step0 idleSt factFailed b"" max10 (toU64 0) (toU64 0) ≡ idle : Out} := refl
 
 def idle-peer : evidence {step0 idleSt factPeer b"" max10 (toU64 0) (toU64 0) ≡ quiet (toU64 0) : Out} := refl
 
