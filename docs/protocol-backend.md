@@ -14,7 +14,7 @@ name a socket. `c/proto.c` is still the hand-written admit map.
 buffer. `host_in_policy`, `host_in_bind`, `host_in_capture`,
 `host_in_after`, and `host_in_take_next` in `c/host_stream.c` still
 do not call the kernel. This split does not rewrite those pieces.
-What moved is the loop that used to sit in `c/host.c`: phase,
+What moved is the loop that used to sit in `c/host.c`: image phase,
 keep-alive or close, the body limit, 100 Continue, and the idle
 deadline. `c/host.c` now turns an accepted fd, arrived bytes, a
 finished write, a peer close, and the clock into `StepIn`, then
@@ -134,8 +134,9 @@ them when it parks (a short write, or the test stall). A 100 that
 the socket takes in one write leaves the previous read interest
 until the handler runs.
 
-Phases are the image phases: read 0, decide 1, write 2, idle 3,
-closed 4.
+Phases here are image phases: read 0, handle 1
+(`MURO_STEP_PH_DECIDE`), write 2, idle 3, closed 4. Book phases
+use other numbers for those roles. The mapping table is in Step 2.
 
 ## What moved, and what stayed
 
@@ -285,16 +286,27 @@ function in `c/step.c`. `c/host.c` is unchanged. The slice does not
 call the kernel or the clock, and it does not render bytes.
 
 The book decides one read, the protocol write, the handler write,
-and the idle tick. Phase 0 is reading. Phase 1 owes a protocol span
-and closes when that span finishes: 400, 413, 414, 417, 431, and
-501. A request line with no LF in the first 16384 bytes is 414. A
-header block past 16384 whose request line fit is 431. Phase 3 owes
+and the idle tick. The numbers in this section are book phases.
+Image phases are a different numbering:
+
+| Number | Book phase | Image phase |
+| --- | --- | --- |
+| 0 | read | read (`MURO_STEP_PH_READ`) |
+| 1 | protocol-error write | handle (`MURO_STEP_PH_DECIDE`) |
+| 2 | closed | write (`MURO_STEP_PH_WRITE`) |
+| 3 | handler write | idle (`MURO_STEP_PH_IDLE`) |
+| 4 | idle | closed (`MURO_STEP_PH_CLOSED`) |
+
+Book phase 0 is reading. Book phase 1 owes a protocol span and
+closes when that span finishes: 400, 413, 414, 417, 431, and 501.
+A request line with no LF in the first 16384 bytes is 414. A header
+block past 16384 whose request line fit is 431. Book phase 3 owes
 the handler span for a finished request the policy accepts. `keep` 0
-returns to phase 4 (idle) when that span finishes, and bytes past
-the request are classified in that same step. A leftover that is
-still a partial request reads again. `keep` 1 closes instead:
+returns to book phase 4 (idle) when that span finishes, and bytes
+past the request are classified in that same step. A leftover that
+is still a partial request reads again. `keep` 1 closes instead:
 `Connection: close`, HTTP/1.0, or a peer close during the write.
-That peer close drops a pipelined tail. Phase 2 has closed. A
+That peer close drops a pipelined tail. Book phase 2 has closed. A
 closed step ignores every later fact and disarms the deadline.
 
 `n` is the wrote count. `owed` is the outstanding span when `left`
@@ -302,8 +314,18 @@ is 0. A short write stores `left = owed - n`. The next wrote uses
 that stored remainder, so a stale `owed` does not move the span.
 `n` greater than or equal to that base finishes the span. The host
 clamps the same way. A wrote with `left` 0 and `owed` 0 finishes
-because the caller named an empty span. The host has no such input.
+because the caller named an empty span. That finish is in the book
+(`owe-empty-span`, `reply-empty-span`). The host has no such input.
 It finishes from its own byte counter.
+
+`finishWrite` sees only the unconsumed slice. That slice still
+starts with the request whose response just finished, and the book
+drops that framed prefix. The next write is given the tail, not the
+original buffer. Passing the full two-GET buffer again classifies
+the first request a second time. `pipe-full-again` is that second
+reply. `pipe-done` passes the tail and is idle. `pipe-again-differs`
+is that those spans are not equal. The full re-pass is outside the
+contract.
 
 `now`, `deadline`, and `idle` are the adapter clock. Accept arms
 `now+idle` and ignores a carried deadline. A read or an idle step
@@ -319,20 +341,27 @@ unknown transfer coding (501). A streamed body (Content-Length past
 (`cover=1`). The same body past max is an owed 413 span, because
 classify already finished.
 
-`cover` 1 stays outside: chunked bodies, 100 Continue, that streamed
-body, a finished request on a peer close, a wrote or a failure
-while nothing is owed, and bytes or accept during a write. Chunked
-is outside even when the method would otherwise be 501. Not claimed:
-a pulled body, fuel, a handler 500, and the 100 Continue span.
+`cover` 1 is outside this slice: chunked, 100 Continue, a streamed
+body whose Content-Length is within max (the host pulls it), a
+finished request that arrived on a peer close, a wrote or a failure
+while the connection is reading or idle (book phase 0 or book phase
+4), and bytes or accept during a write. Chunked is outside even
+when the method would otherwise be 501. Not claimed here: a pulled
+body, fuel, a handler 500, and the 100 Continue span.
 
 Every claim in the book header is an equation `mix muro.check`
-reduces. `c/test_step_slice` feeds the same fact and the same buffer
-to `http_step_stepFact` and to `muro_http_step` on those paths,
-including short writes, keep-alive, one pipelined leftover, idle
-`NOW`, and 414 / 431. It also sweeps small fact sequences.
-`ACCEPTED` is not in the sweep: the host resets, and the book does
-not. After a `status_now` close, the handwritten step marks the
-connection shut, and the driver requires both sides to stay quiet.
+reduces. Versus `main`, this book adds 69 evidence theorems and
+removes 4, a net of +65, 109 total. `c/test_step_slice` feeds the
+same fact and the same buffer to `http_step_stepFact` and to
+`muro_http_step` on those paths, including short writes,
+keep-alive, one pipelined leftover, idle `NOW`, and 414 / 431. It
+also sweeps small fact sequences: a `Connection: close` GET, two
+pipelined GETs, and a streamed body, along with the smaller
+buffers. After a quiet close (`Connection: close` or HTTP/1.0) a
+later fact stays quiet on both sides. `ACCEPTED` is not in the
+sweep: the host resets, and the book does not. After a `status_now`
+close, the handwritten step marks the connection shut, and the
+driver requires both sides to stay quiet.
 
 Once the book has closed, every later fact is ignored. No second
 span. `priv/muro/http/neg/step_span.muro` claims a span after the
