@@ -43,10 +43,15 @@
 -- and the two clocks produce the same close. NOW during a write
 -- parks that same span again.
 --
--- cover 1 is outside this slice: a streamed body whose
--- Content-Length is within max while the peer is still open (the
--- host pulls it), accept during a write, and accept while idle.
--- Chunked bodies are in the slice. The book scans the chunk framing
+-- cover 1 is an unknown fact. A streamed body whose
+-- Content-Length is within max while the peer is still open is a
+-- handler reply at the request keep (stream-open). The adapter
+-- then sets hclose when that body is still open and the response
+-- does not pull it, so the wire says Connection: close. Accept
+-- during a write (write-accept, owe-accept) and accept while idle
+-- (idle-accept) are a fresh read: now+idle, and the carried
+-- deadline is dropped. Chunked bodies are in the slice. The book
+-- scans the chunk framing
 -- (chunkScan) and decides the same status and close as
 -- host_in_policy: a bad size is 400, a size or total past max is
 -- 413, a finished body is a handler span, and a peer close before
@@ -95,12 +100,24 @@
 -- the interim is a fresh read on both sides. A later write can
 -- still re-park that interim on the host, because accept does not
 -- clear its bytes. The adapter drops them. That later write is
--- not claimed.
+-- not claimed. Bytes that complete the request while that interim
+-- is still outstanding, and the recv buffer was not empty, disarm
+-- the host and leave the book armed. The sweep rewinds an empty
+-- buffer instead, so that race is not in the differential. A
+-- response pull that leaves the request body open does not force
+-- Connection: close. The host then closes after the response
+-- because the body is still open. The book finishes at the
+-- request keep. The test handler does not pull, so that close is
+-- not claimed. An unknown fact is cover 1. The host returns -1.
+-- overStatus owes 400 and 413. Any other override is cover, and
+-- the adapter shuts with the stuck note. The body reader only
+-- produces 400 and 413.
 -- The C adapter admits each fact with proto_admit. This book does
 -- not. A refused admit is note 1 in that adapter.
--- Versus origin/main: 37 evidence names added, 2 removed
--- (chunk-outside, continue-outside), net +35, 178 total. Each one
--- is an equation mix muro.check reduces.
+-- Versus origin/main: 44 evidence names added, 5 removed
+-- (chunk-outside, continue-outside, stream-outside,
+-- write-accept-outside, idle-accept-outside), net +39, 182 total.
+-- Each one is an equation mix muro.check reduces.
 import "request.muro"
 
 unboxed data St : Type where
@@ -223,8 +240,10 @@ def expectIs : run Π (+ s : Slice) → Π (+ n : U64) → Bool :=
   λ (+ s : Slice) → λ (+ n : U64) → u64eq (expectCode s) n
 
 -- A body the host will stream: headers are done, the buffered body
--- is short, and Content-Length is past 16384. That pull is not this
--- slice. A complete body is not short, so it is not streamed.
+-- is short, and Content-Length is past 16384. The step is the
+-- handler reply at the request keep. The adapter sets hclose when
+-- that body stays open and the response pull does not own it.
+-- A complete body is not short, so it is not streamed.
 -- A chunked body is not this predicate.
 def streamed : run Π (+ s : Slice) → Bool :=
   λ (+ s : Slice) → and (bodyShort s) (gt16384 (contentLength s))
@@ -423,10 +442,7 @@ def onStatus : run Π (+ st : Status) → Π (+ fin : U64) → Π (+ sent : U64)
                   | true =>
                       (match (and (u64eq sent (toU64 0)) (wantCont s)) motive (λ _ → Out)
                         | true => contAt now dl idle
-                        | false =>
-                            (match (streamed s) motive (λ _ → Out)
-                              | true => outside
-                              | false => replyKeep (keepOf s)))
+                        | false => replyKeep (keepOf s))
                   | false => usePol (policy s max) (toU64 0) now dl idle))
       | status-malformed =>
           (match (headersDone s) motive (λ _ → Out)
@@ -510,7 +526,10 @@ def writeFact : run Π (+ phase : U64) → Π (+ code : U64) → Π (+ left : U6
                         | false =>
                             (match (u64eq fact factBytes) motive (λ _ → Out)
                               | true => still phase code left keep
-                              | false => outside))))
+                              | false =>
+                                  (match (u64eq fact factAccepted) motive (λ _ → Out)
+                                    | true => moreAt now (toU64 0) idle
+                                    | false => outside)))))
 
 def readFact : run Π (+ fact : U64) → Π (+ s : Slice) → Π (+ max : U64) → Π (+ now : U64) → Π (+ dl : U64) → Π (+ idle : U64) → Out :=
   λ (+ fact : U64) → λ (+ s : Slice) → λ (+ max : U64) → λ (+ now : U64) → λ (+ dl : U64) → λ (+ idle : U64) →
@@ -549,7 +568,10 @@ def idleFact : run Π (+ fact : U64) → Π (+ s : Slice) → Π (+ max : U64) �
                   | false =>
                       (match (or (u64eq fact factWrote) (u64eq fact factFailed)) motive (λ _ → Out)
                         | true => idleAt now dl idle
-                        | false => outside)))
+                        | false =>
+                            (match (u64eq fact factAccepted) motive (λ _ → Out)
+                              | true => moreAt now (toU64 0) idle
+                              | false => outside))))
 
 -- Phase 6 or 8: the 100 is still the span. A full wrote classifies
 -- the buffer. Phase 8 carries the peer close into that classification.
@@ -680,6 +702,15 @@ def hand : run Π (+ reqKeep : U64) → Π (+ hclose : U64) → Π (+ hbad : U64
                               | true => oweFit
                               | false => shutHandle (toU64 0))
                         | false => reply (keepHand reqKeep hclose hbad))))
+
+-- After a successful handler, 400 or 413 on the body reader is an
+-- owed protocol span. The host reader sets only those two. Any
+-- other code stays outside, and the adapter shuts.
+def overStatus : run Π (+ code : U64) → Out :=
+  λ (+ code : U64) →
+    match (or (u64eq code (toU64 400)) (u64eq code (toU64 413))) motive (λ _ → Out)
+      | true => owe code
+      | false => outside
 
 def lineBuf : run Slice :=
   b"GET / HT"
@@ -1269,7 +1300,7 @@ def pipe-partial : evidence {step0 (take sawPipe) factWrote pipePart max10 (toU6
 
 def frame-get : evidence {framedEnd getBuf ≡ sliceLen getBuf : U64} := refl
 
-def stream-outside : evidence {coverOf sawStream ≡ toU64 1 : U64} := refl
+def stream-open : evidence {sawStream ≡ reply (toU64 0) : Out} := refl
 
 def stream-413 : evidence {sawStream413 ≡ owe (toU64 413) : Out} := refl
 
@@ -1279,7 +1310,9 @@ def stream-peer-done : evidence {step0 (take sawStreamPeer) factWrote streamBuf 
 
 def write-bytes-holds : evidence {step0 repGet factBytes getBuf max10 (toU64 0) (toU64 0) ≡ reply (toU64 0) : Out} := refl
 
-def write-accept-outside : evidence {coverOf (step0 repGet factAccepted getBuf max10 (toU64 0) (toU64 0)) ≡ toU64 1 : U64} := refl
+def write-accept : evidence {stepFact repGet factAccepted getBuf max10 (toU64 0) (toU64 0) (toU64 1000) (toU64 424242) (toU64 60000) ≡ moreAt (toU64 1000) (toU64 0) (toU64 60000) : Out} := refl
+
+def owe-accept : evidence {stepFact owe400 factAccepted badBuf max10 (toU64 0) (toU64 0) (toU64 1000) (toU64 424242) (toU64 60000) ≡ moreAt (toU64 1000) (toU64 0) (toU64 60000) : Out} := refl
 
 def read-failed-holds : evidence {step0 readSt factFailed getBuf max10 (toU64 0) (toU64 0) ≡ more : Out} := refl
 
@@ -1416,7 +1449,7 @@ def after-close-failed : evidence {step0 closedClose factFailed closeBuf max10 (
 
 def after-close-accept : evidence {step0 closedClose factAccepted b"" max10 (toU64 0) (toU64 0) ≡ quiet (toU64 0) : Out} := refl
 
-def idle-accept-outside : evidence {coverOf (step0 idleSt factAccepted b"" max10 (toU64 0) (toU64 0)) ≡ toU64 1 : U64} := refl
+def idle-accept : evidence {stepFact idleSt factAccepted b"" max10 (toU64 0) (toU64 0) (toU64 1000) (toU64 424242) (toU64 60000) ≡ moreAt (toU64 1000) (toU64 0) (toU64 60000) : Out} := refl
 
 -- headersDone, and the header block ends past 16384. The request
 -- line fits, so capCode is 431. capHdr is the other arm: the header
@@ -1432,6 +1465,12 @@ def headers-done-431 : evidence {headersDone capHdrDone ≡ true : Bool} := refl
 def headers-end-431 : evidence {gt16384 (headerEnd capHdrDone) ≡ true : Bool} := refl
 
 def cap-hdr-done-431 : evidence {sawHdrDone ≡ owe (toU64 431) : Out} := refl
+
+def over-400 : evidence {overStatus (toU64 400) ≡ owe (toU64 400) : Out} := refl
+
+def over-413 : evidence {overStatus (toU64 413) ≡ owe (toU64 413) : Out} := refl
+
+def over-other : evidence {coverOf (overStatus (toU64 500)) ≡ toU64 1 : U64} := refl
 
 def hand-agree : evidence {hand (toU64 0) (toU64 0) (toU64 0) (toU64 0) (toU64 0) (toU64 0) (toU64 1) (toU64 0) (toU64 1) ≡ reply (toU64 0) : Out} := refl
 

@@ -327,7 +327,30 @@ static int render_handler(BookStep *b, const StepIn *in, uint64_t book_keep, int
      on a refused handler. */
   if (!href) {
     host_in_after(b->hin, resp.pull != NULL && !b->is_head, &force, &over);
-    if (over) return -1;
+    /* 400 and 413 are an owed span. overStatus leaves every other
+       code outside, and that stays the stuck note. A refusal never
+       reaches this call. */
+    if (over) {
+      http_step_Out ob;
+      uint64_t ophase;
+      uint64_t ocode;
+      uint64_t ocover;
+      muro_http_reset();
+      ob = http_step_overStatus((uint64_t)over);
+      muro_http_reset();
+      ophase = out_field(ob, 0);
+      ocode = out_field(ob, 1);
+      ocover = out_field(ob, 7);
+      if (ocover || ophase != 1) return -1;
+      clear_pull(b);
+      if (render_literal(b, in, 0, ocode, note) < 0) return -1;
+      remember(b, 1, ocode, 0, 1);
+      b->reply_on = 1;
+      b->reply_bit = 1;
+      b->reply_bad = 1;
+      b->owe = 0;
+      return 0;
+    }
     if (force) resp.close_after = 1;
   }
   hclose = resp.close_after ? 1u : 0u;
