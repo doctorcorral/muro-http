@@ -5,7 +5,7 @@ CFLAGS ?= -Wall -Wextra -Werror -std=c11 $(OPT) -D_GNU_SOURCE -I c -I c/generate
 LDFLAGS ?=
 CHALLENGE_INC = -I examples/challenge
 
-.PHONY: all c-check c-sanitize c-conformance clean fuzz fuzz-smoke books-check
+.PHONY: all c-check c-sanitize c-conformance c-conformance-book clean fuzz fuzz-smoke books-check
 
 bench/loadgen: bench/loadgen.c
 	$(CC) -Wall -Wextra -Werror -std=c11 -O2 -o $@ bench/loadgen.c -pthread
@@ -182,6 +182,10 @@ c/test_step_slice: c/test_step_slice.o c/step_slice.o c/step_book.o $(HOST)
 
 c-conformance: c/muro-hello
 	PYTHONDONTWRITEBYTECODE=1 python3 c/test_conformance.py c/muro-hello
+
+# Not part of c-check. The book server is opt-in.
+c-conformance-book: c/muro-hello-book
+	PYTHONDONTWRITEBYTECODE=1 python3 c/test_conformance.py c/muro-hello-book
 
 c-check: bench/loadgen c/test_classify c/test_conn c/test_scan_cache c/test_sess c/test_render c/test_body c/test_jwt c/test_json c/test_store c/test_poll c/test_route c/test_tags c/test_serve c/test_workers c/muro-httpd c/muro-hello c/muro-hello-book c/muro-stream c/test_e2e c/test_hello c/test_http11 c/test_step c/test_step_slice
 	./c/test_classify
