@@ -16,9 +16,11 @@
    A write parks with wake 0. NOW from read or idle closes. The book
    does not compare the two clocks.
 
-   cover 1 is outside the slice: chunked, 100 Continue, a streamed
-   body whose Content-Length is within max while the peer is still
-   open, accept during a write, and accept while idle. Bytes during
+   cover 1 is outside the slice: 100 Continue, a streamed body whose
+   Content-Length is within max while the peer is still open, accept
+   during a write, and accept while idle. Chunked bodies are in the
+   slice: a short tail reads again, a finished body is a handler
+   span, a bad size is 400, and a size past max is 413. Bytes during
    a write park the same span. A wrote or a failure while the book
    is reading or idle stays there. A finished request on a peer
    close is in the slice: a handler span with keep 1, and that fresh
@@ -69,6 +71,40 @@ static const char *GZIP = "GET / HTTP/1.1\r\nHost: h\r\nTransfer-Encoding: gzip\
 static const char *BAD = "GET/feed HTTP/1.1\r\n\r\n";
 static const char *NO_HOST = "GET / HTTP/1.1\r\n\r\n";
 static const char *CHUNK = "POST / HTTP/1.1\r\nHost: h\r\nTransfer-Encoding: chunked\r\n\r\n";
+static const char *CHUNK_ONE =
+    "POST / HTTP/1.1\r\nHost: h\r\nTransfer-Encoding: chunked\r\n\r\n2\r\nhi\r\n0\r\n\r\n";
+static const char *CHUNK_EXT =
+    "POST / HTTP/1.1\r\nHost: h\r\nTransfer-Encoding: chunked\r\n\r\n4;ext=1\r\nwiki\r\n0\r\n\r\n";
+static const char *CHUNK_TRAILER =
+    "POST / HTTP/1.1\r\nHost: h\r\nTransfer-Encoding: chunked\r\n\r\n2\r\nhi\r\n0\r\nX-A: b\r\n\r\n";
+static const char *CHUNK_BAD =
+    "POST / HTTP/1.1\r\nHost: h\r\nTransfer-Encoding: chunked\r\n\r\nzz\r\n";
+static const char *CHUNK_SPACE =
+    "POST / HTTP/1.1\r\nHost: h\r\nTransfer-Encoding: chunked\r\n\r\n4 \r\nwiki\r\n0\r\n\r\n";
+static const char *CHUNK_EXT_LF =
+    "POST / HTTP/1.1\r\nHost: h\r\nTransfer-Encoding: chunked\r\n\r\n4;bad\n\r\nwiki\r\n0\r\n\r\n";
+static const char *CHUNK_OVERFLOW =
+    "POST / HTTP/1.1\r\nHost: h\r\nTransfer-Encoding: chunked\r\n\r\n10000000000000000\r\n";
+static const char *CHUNK_TOO =
+    "POST / HTTP/1.1\r\nHost: h\r\nTransfer-Encoding: chunked\r\n\r\n1000000\r\n";
+static const char *CHUNK_PREM =
+    "POST / HTTP/1.1\r\nHost: h\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhi";
+static const char *CHUNK_CLOSE =
+    "POST / HTTP/1.1\r\nHost: h\r\nConnection: close\r\nTransfer-Encoding: chunked\r\n\r\n0\r\n\r\n";
+static const char *CHUNK_PIPE =
+    "POST / HTTP/1.1\r\nHost: h\r\nTransfer-Encoding: chunked\r\n\r\n0\r\n\r\nGET / HTTP/1.1\r\nHost: "
+    "h\r\n\r\n";
+static const char *CHUNK_MULTI =
+    "POST / HTTP/1.1\r\nHost: h\r\nTransfer-Encoding: chunked\r\n\r\n1\r\na\r\n1\r\nb\r\n0\r\n\r\n";
+static const char *CHUNK_EXPECT =
+    "POST / HTTP/1.1\r\nHost: h\r\nTransfer-Encoding: chunked\r\nExpect: foo\r\n\r\n";
+static const char *CHUNK_EXPECT_DONE =
+    "POST / HTTP/1.1\r\nHost: h\r\nTransfer-Encoding: chunked\r\nExpect: foo\r\n\r\n0\r\n\r\n";
+static const char *CHUNK_TRACE = "TRACE / HTTP/1.1\r\nHost: h\r\nTransfer-Encoding: chunked\r\n\r\n";
+static const char *CHUNK_TRACE_DONE =
+    "TRACE / HTTP/1.1\r\nHost: h\r\nTransfer-Encoding: chunked\r\n\r\n0\r\n\r\n";
+static const char *CHUNK_BARE =
+    "POST / HTTP/1.1\r\nHost: h\r\nTransfer-Encoding: chunked\r\n\r\n0\r\nNope\r\n\r\n";
 static const char *CONT =
     "POST / HTTP/1.1\r\nHost: h\r\nExpect: 100-continue\r\nContent-Length: 4\r\n\r\n";
 static const char *HEAD = "HEAD / HTTP/1.1\r\nHost: h\r\n\r\n";
@@ -1983,7 +2019,9 @@ static int match_covered(const StepOut *o, http_step_Out bk, const Box *b, int f
     }
   }
   /* Book phases are not image phases. status_now (book phase 2, status
-     1) closes while the image is still READ. A quiet close is CLOSED. */
+     1) closes while the image is still READ. The host then answers
+     every later fact from PEND_SHUT and leaves that image in READ.
+     A quiet close from a tick or a peer close is CLOSED. */
   img = muro_http_step_phase(&b->st);
   if (bo_phase(bk) == 0 && img != MURO_STEP_PH_READ) return fail(name);
   if ((bo_phase(bk) == 1 || bo_phase(bk) == 3) && img != MURO_STEP_PH_WRITE) return fail(name);
@@ -1991,7 +2029,9 @@ static int match_covered(const StepOut *o, http_step_Out bk, const Box *b, int f
     if (img != MURO_STEP_PH_IDLE) return fail(name);
     if (muro_http_step_in_len(&b->st) != 0) return fail(name);
   }
-  if (bo_phase(bk) == 2 && bo_status(bk) == 0 && img != MURO_STEP_PH_CLOSED) return fail(name);
+  if (bo_phase(bk) == 2 && bo_status(bk) == 0 && img != MURO_STEP_PH_CLOSED &&
+      img != MURO_STEP_PH_READ)
+    return fail(name);
   if (bo_phase(bk) == 2 && bo_status(bk) == 1 && img != MURO_STEP_PH_READ) return fail(name);
   return 0;
 }
@@ -2069,11 +2109,11 @@ static int sweep(void) {
   static const int facts5[5] = {MURO_STEP_BYTES, MURO_STEP_PEER_CLOSED, MURO_STEP_WROTE,
                                 MURO_STEP_WRITE_FAILED, MURO_STEP_NOW};
   /* Empty, a partial line, a GET, a malformed request, Connection:
-     close, two pipelined GETs, and a streamed body (Content-Length
-     past 16384). max stays 10, so the streamed shape is the owed
-     413. Depth 3 is 5^3 * 7. Then 256 sequences, depth 4, xorshift32
-     seed 0xC0FFEE. */
-  const char *bufs[7];
+     close, two pipelined GETs, a streamed body (Content-Length past
+     16384, so at max 10 the shape is the owed 413), chunked headers,
+     one finished chunk, a bad size, and a size past max. Depth 3 is
+     5^3 * 11. Then 256 sequences, depth 4, xorshift32 seed 0xC0FFEE. */
+  const char *bufs[11];
   int a, c, d, e;
   int seq[4];
   uint32_t xs = 0xC0FFEEu;
@@ -2085,7 +2125,11 @@ static int sweep(void) {
   bufs[4] = CLOSE;
   bufs[5] = TWO;
   bufs[6] = STREAM;
-  for (e = 0; e < 7; e++) {
+  bufs[7] = CHUNK;
+  bufs[8] = CHUNK_ONE;
+  bufs[9] = CHUNK_BAD;
+  bufs[10] = CHUNK_TOO;
+  for (e = 0; e < 11; e++) {
     for (a = 0; a < 5; a++) {
       for (c = 0; c < 5; c++) {
         for (d = 0; d < 5; d++) {
@@ -2108,7 +2152,7 @@ static int sweep(void) {
     xs ^= xs << 13;
     xs ^= xs >> 17;
     xs ^= xs << 5;
-    if (run_seq(bufs[xs % 7], seq, 4, 10) < 0) return -1;
+    if (run_seq(bufs[xs % 11], seq, 4, 10) < 0) return -1;
   }
   return 0;
 }
@@ -2682,9 +2726,10 @@ static int cover_stays_shut(void) {
   int rd = 1;
   int wr = 1;
   size_t n;
-  n = strlen(CHUNK);
+  /* Chunked headers are in the slice. 100-continue is still cover. */
+  n = strlen(CONT);
   if (n >= sizeof ibuf) return fail("cover-shut");
-  memcpy(ibuf, CHUNK, n);
+  memcpy(ibuf, CONT, n);
   memset(&b, 0, sizeof b);
   host_in_init(&hin, -1, 10);
   muro_book_bind(&b, ibuf, sizeof ibuf, obuf, sizeof obuf, &hin, &rd, &wr, on_req, NULL, 10, 60000);
@@ -2848,6 +2893,113 @@ static int admit_agrees(void) {
   return 0;
 }
 
+/* Chunked bodies. The book decides; the adapter renders the same
+   span the host does. A pipelined GET after a last-chunk is the
+   next reply, then idle. Connection: close finishes quiet. */
+static int chunk_cases(void) {
+  Box b;
+  StepOut seen;
+  StepOut o;
+  http_step_Out bk;
+  http_step_St st;
+  uint64_t wake = armed(1000, 0, 60000);
+  if (decide(DEC_REPLY, MURO_STEP_BYTES, CHUNK_ONE, 10, 0, NULL, 0, 0, 0, "chunk-one", NULL, NULL,
+             NULL) < 0)
+    return -1;
+  if (decide(DEC_REPLY, MURO_STEP_BYTES, CHUNK_EXT, 10, 0, NULL, 0, 0, 0, "chunk-ext", NULL, NULL,
+             NULL) < 0)
+    return -1;
+  if (decide(DEC_REPLY, MURO_STEP_BYTES, CHUNK_TRAILER, 10, 0, NULL, 0, 0, 0, "chunk-trailer", NULL,
+             NULL, NULL) < 0)
+    return -1;
+  if (decide(DEC_REPLY, MURO_STEP_BYTES, CHUNK_MULTI, 10, 0, NULL, 0, 0, 0, "chunk-multi", NULL,
+             NULL, NULL) < 0)
+    return -1;
+  if (decide(DEC_REPLY, MURO_STEP_BYTES, CHUNK_CLOSE, 10, 0, NULL, 0, 0, 1, "chunk-close", NULL,
+             NULL, NULL) < 0)
+    return -1;
+  if (decide(DEC_OWE, MURO_STEP_BYTES, CHUNK_BAD, 10, 400, "malformed", 0, 0, 1, "chunk-bad", NULL,
+             NULL, NULL) < 0)
+    return -1;
+  if (decide(DEC_OWE, MURO_STEP_BYTES, CHUNK_SPACE, 10, 400, "malformed", 0, 0, 1, "chunk-space",
+             NULL, NULL, NULL) < 0)
+    return -1;
+  if (decide(DEC_OWE, MURO_STEP_BYTES, CHUNK_EXT_LF, 10, 400, "malformed", 0, 0, 1, "chunk-ext-lf",
+             NULL, NULL, NULL) < 0)
+    return -1;
+  if (decide(DEC_OWE, MURO_STEP_BYTES, CHUNK_OVERFLOW, 10, 400, "malformed", 0, 0, 1,
+             "chunk-overflow", NULL, NULL, NULL) < 0)
+    return -1;
+  if (decide(DEC_OWE, MURO_STEP_BYTES, CHUNK_BARE, 10, 400, "malformed", 0, 0, 1, "chunk-bare",
+             NULL, NULL, NULL) < 0)
+    return -1;
+  if (decide(DEC_STATUS, MURO_STEP_BYTES, CHUNK_TOO, 8388608, 413, "too large", 0, 0, 0, "chunk-too",
+             NULL, NULL, NULL) < 0)
+    return -1;
+  if (decide(DEC_OWE, MURO_STEP_PEER_CLOSED, CHUNK_PREM, 8388608, 400, "malformed", 0, 0, 1,
+             "chunk-prem", NULL, NULL, NULL) < 0)
+    return -1;
+  if (decide(DEC_OWE, MURO_STEP_BYTES, CHUNK_ONE, 1, 413, "too large", 0, 0, 1, "chunk-over-done",
+             NULL, NULL, NULL) < 0)
+    return -1;
+  if (decide(DEC_STATUS, MURO_STEP_BYTES, CHUNK_EXPECT, 8388608, 417, "expectation", 0, 0, 0,
+             "chunk-expect", NULL, NULL, NULL) < 0)
+    return -1;
+  if (decide(DEC_OWE, MURO_STEP_BYTES, CHUNK_EXPECT_DONE, 8388608, 417, "expectation", 0, 0, 1,
+             "chunk-expect-done", NULL, NULL, NULL) < 0)
+    return -1;
+  if (decide(DEC_STATUS, MURO_STEP_BYTES, CHUNK_TRACE, 8388608, 501, "unimplemented", 0, 0, 0,
+             "chunk-trace", NULL, NULL, NULL) < 0)
+    return -1;
+  if (decide(DEC_OWE, MURO_STEP_BYTES, CHUNK_TRACE_DONE, 8388608, 501, "unimplemented", 0, 0, 1,
+             "chunk-trace-done", NULL, NULL, NULL) < 0)
+    return -1;
+
+  if (open_acc(&b, 10, 1000, 0) < 0) return -1;
+  st = http_step_readSt();
+  if (reply_bytes(&b, &st, CHUNK_ONE, 0, &seen, "chunk-one-reply") < 0 ||
+      full_write(&b, &st, seen, DEC_IDLE, 0, wake, "chunk-one-idle") < 0) {
+    box_free(&b);
+    return -1;
+  }
+  box_free(&b);
+
+  if (open_acc(&b, 10, 1000, 0) < 0) return -1;
+  st = http_step_readSt();
+  if (reply_bytes(&b, &st, CHUNK_CLOSE, 1, &seen, "chunk-close-reply") < 0 ||
+      full_write(&b, &st, seen, DEC_QUIET, 0, 0, "chunk-close-done") < 0) {
+    box_free(&b);
+    return -1;
+  }
+  box_free(&b);
+
+  if (open_acc(&b, 10, 1000, 0) < 0) return -1;
+  st = http_step_readSt();
+  if (reply_bytes(&b, &st, CHUNK_PIPE, 0, &seen, "chunk-pipe") < 0) {
+    box_free(&b);
+    return -1;
+  }
+  if (step_both(&b, &st, MURO_STEP_WROTE, NULL, (uint64_t)seen.len, (uint64_t)seen.len, &o, &bk,
+                "chunk-pipe-next") < 0 ||
+      check_shape(DEC_REPLY, &o, bk, &b, 0, NULL, 0, 0, 0, "chunk-pipe-next") < 0) {
+    box_free(&b);
+    return -1;
+  }
+  if (muro_http_step_in_len(&b.st) != strlen(GET)) {
+    fprintf(stderr, "chunk-pipe-next in_len %zu\n", muro_http_step_in_len(&b.st));
+    box_free(&b);
+    return -1;
+  }
+  seen = o;
+  st = http_step_take(bk);
+  if (full_write(&b, &st, seen, DEC_IDLE, 0, wake, "chunk-pipe-idle") < 0) {
+    box_free(&b);
+    return -1;
+  }
+  box_free(&b);
+  return 0;
+}
+
 int main(void) {
   uint64_t wake = 61000;
   if (decide(DEC_MORE, MURO_STEP_ACCEPTED, "", 10, 0, NULL, 0, wake, 0, "accept", NULL, NULL,
@@ -2902,8 +3054,10 @@ int main(void) {
   if (decide(DEC_OWE, MURO_STEP_PEER_CLOSED, TOO_BIG, 10, 400, "malformed", 0, 0, 1, "fin-oversize",
              NULL, NULL, NULL) < 0)
     return 1;
-  if (decide(DEC_OUT, MURO_STEP_BYTES, CHUNK, 10, 0, NULL, 0, 0, 0, "chunk", NULL, NULL, NULL) < 0)
+  if (decide(DEC_MORE, MURO_STEP_BYTES, CHUNK, 10, 0, NULL, 0, wake, 0, "chunk-more", NULL, NULL,
+             NULL) < 0)
     return 1;
+  if (chunk_cases() < 0) return 1;
   if (decide(DEC_OUT, MURO_STEP_BYTES, CONT, 10, 0, NULL, 0, 0, 0, "continue", NULL, NULL, NULL) < 0)
     return 1;
   if (decide(DEC_QUIET, MURO_STEP_NOW, GET, 10, 0, NULL, 0, 0, 0, "now", NULL, NULL, NULL) < 0)
