@@ -3,4 +3,4 @@
 -- test/conn_test.exs gates that refusal.
 import "../step.muro"
 
-def span-after-close : evidence {spanOf (stepFact (take (stepFact readSt factBytes tooBig max10 (toU64 0) (toU64 0))) factPeer tooBig max10 (toU64 0) (toU64 0)) ≡ toU64 1 : U64} := refl
+def span-after-close : evidence {spanOf (step0 (take (step0 readSt factBytes tooBig max10 (toU64 0) (toU64 0))) factPeer tooBig max10 (toU64 0) (toU64 0)) ≡ toU64 1 : U64} := refl

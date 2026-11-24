@@ -870,8 +870,8 @@ views, `findHeader`), `conn.muro`, `session.muro`, `admit.muro`, and
 `httpChunk`, `httpLastChunk`, `httpMalformed`, `httpInternal`,
 `httpNotImplemented`, `httpTooLarge`, `httpExpect`, `httpContinue`).
 `request.muro` also emits `streamTake` and `framedEnd`.
-`step.muro` emits `c/generated/step_slice.c`, the read slice
-`c/test_step_slice` compares with `c/step.c`. The same
+`step.muro` emits `c/generated/step_slice.c`, the read, write,
+and idle slice `c/test_step_slice` compares with `c/step.c`. The same
 backend emits the challenge books `decide.muro`, `route.muro`, and
 `body.muro` (`bodyClass`, `textOff`, `textLen`). `--backend fsm`
 emits `family.muro` as `MuroHttp.FamilyFsm`. That backend is the one
@@ -886,9 +886,9 @@ calls the books. It does not replace them.
 `priv/muro/http/step.muro` is a checked slice of that step, emitted
 as `c/generated/step_slice.c` (`http_step_stepFact`). The host does
 not call it. `c/test_step_slice` feeds the same bytes to both on
-the request line, the headers, a Content-Length body, and the
-close while still reading. After that close the book and the
-handwritten step both ignore a later fact.
+the read, the protocol write, the handler write, keep-alive, one
+pipelined leftover, and the idle tick. After a close the book and
+the handwritten step both ignore a later fact.
 `priv/muro/http/neg/step_span.muro` claims a span
 after the 413 close; `mix muro.check` refuses it, and `mix test`
 gates that refusal. `docs/protocol-backend.md` lists what

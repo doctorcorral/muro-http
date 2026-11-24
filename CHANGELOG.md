@@ -2,6 +2,33 @@
 
 ## 0.1.0-dev — unreleased
 
+- `priv/muro/http/step.muro` decides the write side of one HTTP/1.1
+  connection as well as the read. 414 and 431 are owed spans. A
+  full `WROTE` and a short `WROTE` share one rule: `left` stores
+  the remainder, and a later stale `owed` does not move it.
+  `WRITE_FAILED` closes. Keep-alive (`keep` 0) returns to idle, and
+  bytes past the request are classified in that same step, including
+  one partial leftover. `Connection: close`, HTTP/1.0, and a peer
+  close during the write close instead, and that peer close drops
+  a pipelined tail. Accept arms `now+idle` and ignores a carried
+  deadline. A write parks with wake 0. `NOW` from read or idle
+  closes without comparing the clocks. `c/test_step_slice` compares
+  the book with `c/step.c` on those paths and sweeps small fact
+  sequences, including a `Connection: close` GET, two pipelined
+  GETs, and a streamed body. The completing write is given only the
+  unconsumed slice. Passing the original two-GET buffer again is
+  outside that contract. `c/step.c` and `c/host.c` are unchanged.
+  The generated step is not the function the host calls: it does not
+  render, run the handler, or own the buffers. `cover` 1 is outside
+  this slice: chunked, 100 Continue, a streamed body whose
+  Content-Length is within max (the host pulls it), a finished
+  request that arrived on a peer close, a wrote or a failure while
+  the connection is reading or idle (book phase 0 or book phase 4),
+  and bytes or accept during a write. Not claimed here: a pulled
+  body, fuel, a handler 500, and the 100 Continue span. Versus
+  `main`, the book adds 69 evidence theorems and removes 4, a net
+  of +65, 109 total. The library version stays `0.1.0-dev`. The pin
+  stays muro `0.22.24`.
 - Pin muro `0.22.24` from Hex (`{:muro, "~> 0.22.24"}` in
   `mix.exs`, `muro: "0.22.24"` in `muro.exs`), after merging `#20`.
   `priv/muro/http/step.muro` marks a header block past 16384, and a
