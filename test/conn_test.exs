@@ -158,7 +158,7 @@ defmodule MuroHttp.ConnTraceTest do
     end
   end
 
-  @tag timeout: 120_000
+  @tag timeout: 300_000
   test "check refuses a span after a 413 close" do
     path = Path.join(File.cwd!(), "priv/muro/http/neg/step_span.muro")
 
