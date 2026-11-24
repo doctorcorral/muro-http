@@ -21,13 +21,15 @@
    open, a wrote or a failure while the book is reading or idle
    (book phase 0 or book phase 4), bytes or accept during a write,
    and accept while idle. A finished request on a peer close is in
-   the slice: a handler span with keep 1. Each scripted cover-1
-   case names which reason it is. The sweep allows cover 1 only
-   when the same predicate says so, and an in-slice step marked
-   cover 1 fails.
-   The host is still checked on that path. ACCEPTED is not part of
-   the sweep: the host resets, and the book does not. Idle accept
-   is a scripted case.
+   the slice: a handler span with keep 1, and that fresh reply says
+   Connection: close. A within-max streamed body on a peer close is
+   that same reply. Each scripted cover-1 case names which reason
+   it is. The sweep allows cover 1 only when the same predicate
+   says so, and an in-slice step marked cover 1 fails.
+   The host is still checked on that path. Bytes during a write
+   keep the parked span. Only accept resets it. ACCEPTED is not
+   part of the sweep. Idle accept, bytes or accept during a write,
+   and a wrote or a failure while idle are scripted cases.
 
    A wrote with left 0 and owed 0 during a write finishes in the
    book. That input is not a host fact. The owed-0 check is
@@ -292,9 +294,9 @@ enum {
   OUT_CHUNK = 1,
   OUT_CONT = 2,
   OUT_STREAM = 3,
-  OUT_BARE = 5,
-  OUT_WRITE_FACT = 6,
-  OUT_IDLE_ACCEPT = 7
+  OUT_BARE = 4,
+  OUT_WRITE_FACT = 5,
+  OUT_IDLE_ACCEPT = 6
 };
 
 static int named_out(const char *name) {
@@ -303,6 +305,10 @@ static int named_out(const char *name) {
   if (strcmp(name, "continue") == 0) return OUT_CONT;
   if (strcmp(name, "stream-outside") == 0) return OUT_STREAM;
   if (strcmp(name, "wrote-read") == 0) return OUT_BARE;
+  if (strcmp(name, "idle-wrote-outside") == 0) return OUT_BARE;
+  if (strcmp(name, "idle-failed-outside") == 0) return OUT_BARE;
+  if (strcmp(name, "write-bytes-outside") == 0) return OUT_WRITE_FACT;
+  if (strcmp(name, "write-accept-outside") == 0) return OUT_WRITE_FACT;
   if (strcmp(name, "idle-accept") == 0) return OUT_IDLE_ACCEPT;
   return OUT_NO;
 }
@@ -372,8 +378,8 @@ static int host_read_park(const StepOut *o, const Box *b, int phase, uint64_t wa
 
 /* Host shape for a cover-1 step. The book fields are the outside
    shape. These checks are the host's own answer. */
-static int host_outside(int why, const StepOut *o, const Box *b, int prev_phase, uint64_t owed,
-                        uint64_t now, uint64_t dl, const char *name) {
+static int host_outside(int why, const StepOut *o, const Box *b, int prev_phase, int fact,
+                        uint64_t owed, uint64_t now, uint64_t dl, const char *name) {
   uint64_t wake = armed(now, dl, (uint64_t)b->st.idle_ms);
   if (why == OUT_CHUNK) {
     return host_read_park(o, b, MURO_STEP_PH_READ, wake, name);
@@ -406,12 +412,14 @@ static int host_outside(int why, const StepOut *o, const Box *b, int prev_phase,
     return host_read_park(o, b, MURO_STEP_PH_READ, now + (uint64_t)b->st.idle_ms, name);
   }
   if (why == OUT_WRITE_FACT) {
-    /* Bytes hold the parked span. Accept resets the host; the book
-       does not, which is why that fact stays cover 1. The sweep does
-       not send accept. */
-    if (prev_phase == MURO_STEP_PH_WRITE && o->read_more && !o->write_more) {
+    /* Accept resets the host to a fresh read. The book does not,
+       which is why that fact stays cover 1. Bytes during a write
+       are not that reset: the parked span and its bytes stay. */
+    if (fact == MURO_STEP_ACCEPTED) {
+      if (prev_phase != MURO_STEP_PH_WRITE) return fail(name);
       return host_read_park(o, b, MURO_STEP_PH_READ, now + (uint64_t)b->st.idle_ms, name);
     }
+    if (fact != MURO_STEP_BYTES) return fail(name);
     if (phase_is(b, MURO_STEP_PH_WRITE, name) < 0) return -1;
     if (o->close_conn || o->status_now || o->read_more || !o->write_more || o->interim || o->cont)
       return fail(name);
@@ -579,7 +587,8 @@ static int decide(int kind, int fact, const char *buf, uint64_t max_body, uint64
       box_free(&b);
       return -1;
     }
-    if (host_outside(why, &o, &b, MURO_STEP_PH_READ, 0, b.in.now_ms, b.in.deadline, name) < 0) {
+    if (host_outside(why, &o, &b, MURO_STEP_PH_READ, fact, 0, b.in.now_ms, b.in.deadline, name) <
+        0) {
       box_free(&b);
       return -1;
     }
@@ -1401,7 +1410,7 @@ static int peer_drops(void) {
   }
   if (book_is(bk, 3, 0, 0, 0, 0, 1, 2, 0, 0, 0, 1, "drop-peer") < 0 ||
       host_flags(&o, 0, 0, 0, 1, "drop-peer") < 0 || wake_is(&o, 0, "drop-peer") < 0 ||
-      o.len != before) {
+      o.len != before || o.bytes != b.outb || !conn_is(o.bytes, o.len, 0)) {
     dump_book("drop-peer", bk);
     box_free(&b);
     return -1;
@@ -1608,8 +1617,8 @@ static int idle_edges(void) {
     box_free(&b);
     return -1;
   }
-  if (host_outside(OUT_IDLE_ACCEPT, &o, &b, MURO_STEP_PH_IDLE, 0, b.in.now_ms, b.in.deadline,
-                   "idle-accept") < 0) {
+  if (host_outside(OUT_IDLE_ACCEPT, &o, &b, MURO_STEP_PH_IDLE, MURO_STEP_ACCEPTED, 0, b.in.now_ms,
+                   b.in.deadline, "idle-accept") < 0) {
     box_free(&b);
     return -1;
   }
@@ -1764,7 +1773,7 @@ static int closes(void) {
 }
 
 static int match_covered(const StepOut *o, http_step_Out bk, const Box *b, int fact, uint64_t wrote_n,
-                          uint64_t owed, const char *name) {
+                          uint64_t owed, int prior_book, const char *name) {
   int img;
   uint64_t tok;
   if (bo_cover(bk) == 1) return 0;
@@ -1798,16 +1807,18 @@ static int match_covered(const StepOut *o, http_step_Out bk, const Box *b, int f
     }
     if (o->bytes == b->outb) {
       int keep_ok;
+      int finishing = fact == MURO_STEP_WROTE && owed != 0 && wrote_n >= owed;
       tok = bo_code(bk) == 0 ? 200 : bo_code(bk);
       keep_ok = conn_is(o->bytes, o->len, bo_keep(bk));
-      /* A peer close during a handler write sets book keep to 1 and
-         does not rewrite the span. NOW and a short write keep that
-         bit, so the parked bytes can still say keep-alive. A fresh
-         reply (bytes, or a write that finishes the previous span)
-         with keep 1 is rendered Connection: close. */
-      if (!keep_ok && bo_code(bk) == 0 && bo_keep(bk) == 1 && conn_is(o->bytes, o->len, 0) &&
-          fact != MURO_STEP_BYTES &&
-          !(fact == MURO_STEP_WROTE && owed != 0 && wrote_n >= owed))
+      /* A peer close during a handler write that is already parked
+         (book phase 3 before this fact) sets book keep to 1 and does
+         not rewrite the span. NOW and a short write keep that bit,
+         so the parked bytes can still say keep-alive. A fresh keep-1
+         reply, including a peer close of a finished request, is
+         rendered Connection: close. A write that finishes the parked
+         span and starts a new reply is fresh too. */
+      if (!keep_ok && prior_book == 3 && bo_code(bk) == 0 && bo_keep(bk) == 1 &&
+          conn_is(o->bytes, o->len, 0) && !finishing)
         keep_ok = 1;
       if (!status_token(o->bytes, o->len, tok) || !keep_ok) {
         fprintf(stderr, "%s: status/keep text code %llu keep %llu fact %d\n", name,
@@ -1889,7 +1900,7 @@ static int run_seq(const char *buf, const int *facts, int depth, uint64_t max_bo
         box_free(&b);
         return -1;
       }
-      if (host_outside(why, &o, &b, prev, owed, b.in.now_ms, b.in.deadline, "sweep") < 0) {
+      if (host_outside(why, &o, &b, prev, fact, owed, b.in.now_ms, b.in.deadline, "sweep") < 0) {
         fprintf(stderr, "sweep outside %d step %d fact %d\n", why, i, fact);
         box_free(&b);
         return -1;
@@ -1898,7 +1909,7 @@ static int run_seq(const char *buf, const int *facts, int depth, uint64_t max_bo
       box_free(&b);
       return 0;
     }
-    if (match_covered(&o, bk, &b, fact, n, owed, "sweep") < 0) {
+    if (match_covered(&o, bk, &b, fact, n, owed, book_ph, "sweep") < 0) {
       fprintf(stderr, "sweep step %d fact %d buflen %zu\n", i, fact, buf ? strlen(buf) : 0);
       box_free(&b);
       return -1;
@@ -1960,13 +1971,13 @@ static int sweep(void) {
 
 /* A finished request on a peer close is a handler span with keep 1.
    The completing write closes. */
-static int fin_reply(const char *buf, const char *name) {
+static int fin_reply(const char *buf, uint64_t max_body, const char *name) {
   Box b;
   StepOut seen;
   http_step_Out first;
   http_step_St st;
   char done[80];
-  if (decide(DEC_REPLY, MURO_STEP_PEER_CLOSED, buf, 10, 0, NULL, 0, 0, 1, name, &b, &first,
+  if (decide(DEC_REPLY, MURO_STEP_PEER_CLOSED, buf, max_body, 0, NULL, 0, 0, 1, name, &b, &first,
              &seen) < 0)
     return -1;
   st = http_step_take(first);
@@ -2015,6 +2026,90 @@ static int idle_peer_get(void) {
     box_free(&b);
     return -1;
   }
+  box_free(&b);
+  return 0;
+}
+
+/* cover 1 on a connection that already has a handler span, or that
+   has returned to idle. The name is the evidence name. Accept on a
+   live slot drops the previous Proto until take_fact frees it. */
+static int outside_live(int fact, int from_idle, const char *name) {
+  Box b;
+  StepOut seen;
+  StepOut o;
+  http_step_Out bk;
+  http_step_St st;
+  int why;
+  int prev_img;
+  int book_ph;
+  const char *deliver = NULL;
+  char setup[96];
+  uint8_t *saved = NULL;
+  size_t saved_n = 0;
+  snprintf(setup, sizeof setup, "%s-get", name);
+  if (open_acc(&b, 10, 1000, 0) < 0) return -1;
+  st = http_step_readSt();
+  if (reply_bytes(&b, &st, GET, 0, &seen, setup) < 0) {
+    box_free(&b);
+    return -1;
+  }
+  if (from_idle) {
+    snprintf(setup, sizeof setup, "%s-idle", name);
+    if (full_write(&b, &st, seen, DEC_IDLE, 0, armed(1000, 0, 60000), setup) < 0) {
+      box_free(&b);
+      return -1;
+    }
+  } else if (seen.bytes && seen.len && seen.bytes == b.outb) {
+    saved_n = seen.len;
+    saved = malloc(saved_n);
+    if (!saved) {
+      box_free(&b);
+      return fail(name);
+    }
+    memcpy(saved, b.outb, saved_n);
+  }
+  prev_img = muro_http_step_phase(&b.st);
+  book_ph = (int)st_phase(st);
+  if (fact == MURO_STEP_ACCEPTED) {
+    proto_free(b.st.proto);
+    b.st.proto = NULL;
+  }
+  if (fact == MURO_STEP_BYTES) deliver = GET;
+  if (step_both(&b, &st, fact, deliver, 0, from_idle ? 0 : (uint64_t)seen.len, &o, &bk, name) < 0) {
+    free(saved);
+    box_free(&b);
+    return -1;
+  }
+  if (bo_cover(bk) != 1) {
+    fprintf(stderr, "%s: expected cover 1\n", name);
+    dump_book(name, bk);
+    free(saved);
+    box_free(&b);
+    return -1;
+  }
+  why = outside_reason(fact, sl_of(deliver), b.st.max_body, book_ph);
+  if (why == OUT_NO || named_out(name) != why) {
+    fprintf(stderr, "%s: outside tag %d predicate %d\n", name, named_out(name), why);
+    free(saved);
+    box_free(&b);
+    return -1;
+  }
+  if (host_outside(why, &o, &b, prev_img, fact, from_idle ? 0 : (uint64_t)seen.len, b.in.now_ms,
+                   b.in.deadline, name) < 0) {
+    free(saved);
+    box_free(&b);
+    return -1;
+  }
+  if (fact == MURO_STEP_BYTES &&
+      (!saved || o.bytes != b.outb || o.len != saved_n || memcmp(b.outb, saved, saved_n) != 0 ||
+       !conn_is(o.bytes, o.len, 0))) {
+    fprintf(stderr, "%s: parked span changed\n", name);
+    free(saved);
+    box_free(&b);
+    return -1;
+  }
+  free(saved);
+  scripted += 1;
   box_free(&b);
   return 0;
 }
@@ -2082,8 +2177,9 @@ int main(void) {
   if (decide(DEC_OUT, MURO_STEP_WROTE, GET, 10, 0, NULL, 0, 0, 0, "wrote-read", NULL, NULL, NULL) <
       0)
     return 1;
-  if (fin_reply(GET, "fin-get") < 0) return 1;
-  if (fin_reply(POST_BODY, "fin-body") < 0) return 1;
+  if (fin_reply(GET, 10, "fin-get") < 0) return 1;
+  if (fin_reply(POST_BODY, 10, "fin-body") < 0) return 1;
+  if (fin_reply(STREAM, 8388608, "stream-peer") < 0) return 1;
   if (decide(DEC_OWE, MURO_STEP_BYTES, STREAM, 10, 413, "too large", 0, 0, 1, "stream-413", NULL,
              NULL, NULL) < 0)
     return 1;
@@ -2112,6 +2208,10 @@ int main(void) {
   if (leftover_append() < 0) return 1;
   if (idle_edges() < 0) return 1;
   if (idle_peer_get() < 0) return 1;
+  if (outside_live(MURO_STEP_BYTES, 0, "write-bytes-outside") < 0) return 1;
+  if (outside_live(MURO_STEP_ACCEPTED, 0, "write-accept-outside") < 0) return 1;
+  if (outside_live(MURO_STEP_WROTE, 1, "idle-wrote-outside") < 0) return 1;
+  if (outside_live(MURO_STEP_WRITE_FAILED, 1, "idle-failed-outside") < 0) return 1;
   if (reply_fail_and_now() < 0) return 1;
   if (closes() < 0) return 1;
   if (sweep() < 0) return 1;
