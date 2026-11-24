@@ -338,23 +338,35 @@ While a read is still open, 413, 417, and 501 are `status_now`.
 Once classify has finished they are an owed span, including an
 unknown transfer coding (501). A streamed body (Content-Length past
 16384, not yet in the buffer) whose length is within max is outside
-(`cover=1`). The same body past max is an owed 413 span, because
-classify already finished.
+(`cover=1`) while the peer is still open. The same body past max is
+an owed 413 span, because classify already finished. On a peer close
+the within-max body is the handler span with `keep` 1.
+
+A finished buffered request on a peer close is a handler span
+with `keep` 1 (`fin-get-reply`, `fin-body-reply`, `idle-peer-get`).
+The completing write closes. Chunked and 100 Continue on that
+close stay outside. A streamed body past 16384 is that handler
+span only when the peer has closed. While the peer is open and the
+length is within max, the host pulls the body and the step stays
+`cover=1`.
 
 `cover` 1 is outside this slice: chunked, 100 Continue, a streamed
-body whose Content-Length is within max (the host pulls it), a
-finished request that arrived on a peer close, a wrote or a failure
-while the connection is reading or idle (book phase 0 or book phase
-4), and bytes or accept during a write. Chunked is outside even
-when the method would otherwise be 501. Not claimed here: a pulled
-body, fuel, a handler 500, and the 100 Continue span.
+body whose Content-Length is within max while the peer is still
+open (the host pulls it), a wrote or a failure while the
+connection is reading or idle (book phase 0 or book phase 4),
+bytes or accept during a write, and accept while idle. Chunked is
+outside even when the method would otherwise be 501. Not claimed
+here: a pulled body, fuel, a handler 500, and the 100 Continue
+span.
 
 Every claim in the book header is an equation `mix muro.check`
-reduces. Versus `main`, this book adds 69 evidence theorems and
-removes 4, a net of +65, 109 total. `c/test_step_slice` feeds the
+reduces. Versus `origin/main`, this book adds 17 evidence theorems
+and removes 2, a net of +15, 124 total. `c/test_step_slice` feeds the
 same fact and the same buffer to `http_step_stepFact` and to
 `muro_http_step` on those paths, including short writes,
-keep-alive, one pipelined leftover, idle `NOW`, and 414 / 431. It
+keep-alive, one pipelined leftover, a peer close during a short
+write, bytes appended onto a leftover, idle `NOW`, a finished
+request on a peer close, and 414 / 431. It
 also sweeps small fact sequences: a `Connection: close` GET, two
 pipelined GETs, and a streamed body, along with the smaller
 buffers. After a quiet close (`Connection: close` or HTTP/1.0) a

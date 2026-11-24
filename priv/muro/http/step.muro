@@ -41,11 +41,12 @@
 -- parks that same span again.
 --
 -- cover 1 is outside this slice: chunked, 100 Continue, a streamed
--- body whose Content-Length is within max (the host pulls it),
--- a finished request that arrived on a peer close, a wrote or a
--- failure while the connection is reading or idle (book phase 0
--- or book phase 4), bytes or accept during a write, and accept
--- while idle. A streamed
+-- body whose Content-Length is within max while the peer is still
+-- open (the host pulls it), a wrote or a failure while the
+-- connection is reading or idle (book phase 0 or book phase 4),
+-- bytes or accept during a write, and accept while idle. A
+-- finished buffered request on a peer close is a handler span
+-- with keep 1. The completing write closes. A streamed
 -- body past max is an owed 413 span. Classify already finished, so
 -- that close is the write, not status_now. A wrote with left 0 and
 -- owed 0 finishes: the caller named an empty span. That finish is
@@ -53,8 +54,8 @@
 -- such input. It finishes from its own byte counter.
 -- Not claimed here: a pulled body, fuel, a handler 500,
 -- and the 100 Continue span.
--- Versus origin/main: 12 evidence theorems added, 0 removed,
--- net +12, 121 total. Each one is an equation mix muro.check reduces.
+-- Versus origin/main: 17 evidence theorems added, 2 removed,
+-- net +15, 124 total. Each one is an equation mix muro.check reduces.
 import "request.muro"
 
 unboxed data St : Type where
@@ -255,13 +256,14 @@ def usePol : run Π (+ code : U64) → Π (+ reading : U64) → Π (+ now : U64)
                   | true => statusNow code
                   | false => owe code))
 
--- A finished request on a peer close still goes to the handler.
--- That half-close is not this slice, unless policy already chose
--- 413, 417, or 501.
+-- A finished request on a peer close is the handler span with
+-- keep 1. The completing write closes and drops a pipelined tail.
+-- Policy 9 (chunked, or 100-continue) stays outside. A policy
+-- status is an owed span.
 def finOk : run Π (+ code : U64) → Out :=
   λ (+ code : U64) →
     match (isPol code (toU64 0)) motive (λ _ → Out)
-      | true => outside
+      | true => reply (toU64 1)
       | false =>
           (match (isPol code (toU64 9)) motive (λ _ → Out)
             | true => outside
@@ -666,9 +668,13 @@ def sawFinGet : run Out :=
 def sawFinBody : run Out :=
   step0 readSt factPeer postBody max10 (toU64 0) (toU64 0)
 
-def fin-get-outside : evidence {sawFinGet ≡ outside : Out} := refl
+def fin-get-reply : evidence {sawFinGet ≡ reply (toU64 1) : Out} := refl
 
-def fin-body-outside : evidence {sawFinBody ≡ outside : Out} := refl
+def fin-body-reply : evidence {sawFinBody ≡ reply (toU64 1) : Out} := refl
+
+def fin-get-done : evidence {step0 (take sawFinGet) factWrote getBuf max10 (toU64 8) (toU64 8) ≡ quiet (toU64 0) : Out} := refl
+
+def fin-body-done : evidence {step0 (take sawFinBody) factWrote postBody max10 (toU64 8) (toU64 8) ≡ quiet (toU64 0) : Out} := refl
 
 def oweShort : run Out :=
   step0 owe400 factWrote badBuf max10 (toU64 1) (toU64 4)
@@ -789,6 +795,8 @@ def idle-wrote-outside : evidence {coverOf (step0 idleSt factWrote b"" max10 (to
 def idle-failed-outside : evidence {coverOf (step0 idleSt factFailed b"" max10 (toU64 0) (toU64 0)) ≡ toU64 1 : U64} := refl
 
 def idle-peer : evidence {step0 idleSt factPeer b"" max10 (toU64 0) (toU64 0) ≡ quiet (toU64 0) : Out} := refl
+
+def idle-peer-get : evidence {step0 idleSt factPeer getBuf max10 (toU64 0) (toU64 0) ≡ reply (toU64 1) : Out} := refl
 
 def idle-second : evidence {step0 idleSt factBytes getBuf max10 (toU64 0) (toU64 0) ≡ reply (toU64 0) : Out} := refl
 

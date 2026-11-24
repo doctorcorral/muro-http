@@ -17,12 +17,14 @@
    does not compare the two clocks.
 
    cover 1 is outside the slice: chunked, 100 Continue, a streamed
-   body whose Content-Length is within max, a finished request on a
-   peer close, a wrote or a failure while the book is reading or
-   idle (book phase 0 or book phase 4), bytes or accept during a
-   write, and accept while idle. Each scripted case names which of
-   those it is. The sweep allows cover 1 only when the same
-   predicate says so, and an in-slice step marked cover 1 fails.
+   body whose Content-Length is within max while the peer is still
+   open, a wrote or a failure while the book is reading or idle
+   (book phase 0 or book phase 4), bytes or accept during a write,
+   and accept while idle. A finished request on a peer close is in
+   the slice: a handler span with keep 1. Each scripted cover-1
+   case names which reason it is. The sweep allows cover 1 only
+   when the same predicate says so, and an in-slice step marked
+   cover 1 fails.
    The host is still checked on that path. ACCEPTED is not part of
    the sweep: the host resets, and the book does not. Idle accept
    is a scripted case.
@@ -290,7 +292,6 @@ enum {
   OUT_CHUNK = 1,
   OUT_CONT = 2,
   OUT_STREAM = 3,
-  OUT_FIN = 4,
   OUT_BARE = 5,
   OUT_WRITE_FACT = 6,
   OUT_IDLE_ACCEPT = 7
@@ -301,7 +302,6 @@ static int named_out(const char *name) {
   if (strcmp(name, "chunk") == 0) return OUT_CHUNK;
   if (strcmp(name, "continue") == 0) return OUT_CONT;
   if (strcmp(name, "stream-outside") == 0) return OUT_STREAM;
-  if (strcmp(name, "fin-get") == 0 || strcmp(name, "fin-body") == 0) return OUT_FIN;
   if (strcmp(name, "wrote-read") == 0) return OUT_BARE;
   if (strcmp(name, "idle-accept") == 0) return OUT_IDLE_ACCEPT;
   return OUT_NO;
@@ -343,7 +343,7 @@ static int outside_reason(int fact, muro__slice sl, uint64_t max, int book_phase
   stag = http_step_statusOf(sl)->muro__field_tag;
   if (stag == http_step_muro__tag_Status_statuszdok) {
     if (fin) {
-      if (pol == 0) return OUT_FIN;
+      /* Policy 0 is a handler span with keep 1. That is in the slice. */
       if (pol == 9) return chunk ? OUT_CHUNK : OUT_CONT;
       return OUT_NO;
     }
@@ -388,7 +388,7 @@ static int host_outside(int why, const StepOut *o, const Box *b, int prev_phase,
     if (o->wake_at != wake) return fail(name);
     return 0;
   }
-  if (why == OUT_STREAM || why == OUT_FIN) {
+  if (why == OUT_STREAM) {
     if (phase_is(b, MURO_STEP_PH_WRITE, name) < 0) return -1;
     if (o->close_conn || o->status_now || o->read_more || !o->write_more || o->interim || o->cont)
       return fail(name);
@@ -1951,6 +1951,67 @@ static int sweep(void) {
   return 0;
 }
 
+/* A finished request on a peer close is a handler span with keep 1.
+   The completing write closes. */
+static int fin_reply(const char *buf, const char *name) {
+  Box b;
+  StepOut seen;
+  http_step_Out first;
+  http_step_St st;
+  char done[80];
+  if (decide(DEC_REPLY, MURO_STEP_PEER_CLOSED, buf, 10, 0, NULL, 0, 0, 1, name, &b, &first,
+             &seen) < 0)
+    return -1;
+  st = http_step_take(first);
+  snprintf(done, sizeof done, "%s-done", name);
+  if (full_write(&b, &st, seen, DEC_QUIET, 0, 0, done) < 0) {
+    box_free(&b);
+    return -1;
+  }
+  box_free(&b);
+  return 0;
+}
+
+static int idle_peer_get(void) {
+  Box b;
+  StepOut seen;
+  StepOut o;
+  http_step_Out bk;
+  http_step_St st;
+  size_t n;
+  if (open_acc(&b, 10, 1000, 0) < 0) return -1;
+  st = http_step_readSt();
+  if (reply_bytes(&b, &st, GET, 0, &seen, "idle-fin-get") < 0 ||
+      full_write(&b, &st, seen, DEC_IDLE, 0, armed(1000, 0, 60000), "idle-fin-idle") < 0) {
+    box_free(&b);
+    return -1;
+  }
+  n = strlen(GET);
+  memcpy(b.inb, GET, n);
+  muro_http_step_set_in_len(&b.st, n);
+  set_fact(&b, MURO_STEP_PEER_CLOSED, 0);
+  b.in.empty_before = 0;
+  memset(&o, 0, sizeof o);
+  bk = book_at(st, MURO_STEP_PEER_CLOSED, sl_of(GET), b.st.max_body, 0, 0, b.in.now_ms, b.in.deadline,
+               b.st.idle_ms);
+  if (muro_http_step(&b.st, &b.in, &o) < 0) {
+    box_free(&b);
+    return fail("idle-peer-get");
+  }
+  if (check_shape(DEC_REPLY, &o, bk, &b, 0, NULL, 0, 0, 1, "idle-peer-get") < 0) {
+    box_free(&b);
+    return -1;
+  }
+  st = http_step_take(bk);
+  seen = o;
+  if (full_write(&b, &st, seen, DEC_QUIET, 0, 0, "idle-peer-get-done") < 0) {
+    box_free(&b);
+    return -1;
+  }
+  box_free(&b);
+  return 0;
+}
+
 int main(void) {
   uint64_t wake = 61000;
   if (decide(DEC_MORE, MURO_STEP_ACCEPTED, "", 10, 0, NULL, 0, wake, 0, "accept", NULL, NULL,
@@ -2014,12 +2075,8 @@ int main(void) {
   if (decide(DEC_OUT, MURO_STEP_WROTE, GET, 10, 0, NULL, 0, 0, 0, "wrote-read", NULL, NULL, NULL) <
       0)
     return 1;
-  if (decide(DEC_OUT, MURO_STEP_PEER_CLOSED, GET, 10, 0, NULL, 0, 0, 0, "fin-get", NULL, NULL,
-             NULL) < 0)
-    return 1;
-  if (decide(DEC_OUT, MURO_STEP_PEER_CLOSED, POST_BODY, 10, 0, NULL, 0, 0, 0, "fin-body", NULL, NULL,
-             NULL) < 0)
-    return 1;
+  if (fin_reply(GET, "fin-get") < 0) return 1;
+  if (fin_reply(POST_BODY, "fin-body") < 0) return 1;
   if (decide(DEC_OWE, MURO_STEP_BYTES, STREAM, 10, 413, "too large", 0, 0, 1, "stream-413", NULL,
              NULL, NULL) < 0)
     return 1;
@@ -2047,6 +2104,7 @@ int main(void) {
   if (peer_short() < 0) return 1;
   if (leftover_append() < 0) return 1;
   if (idle_edges() < 0) return 1;
+  if (idle_peer_get() < 0) return 1;
   if (reply_fail_and_now() < 0) return 1;
   if (closes() < 0) return 1;
   if (sweep() < 0) return 1;
