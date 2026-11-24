@@ -43,10 +43,13 @@ static int which_of(uint64_t code) {
 static void note_head(BookStep *b) {
   muro__slice sl;
   muro__slice m;
+  muro__slice v;
   if (!b->in || b->in_len == 0) return;
   sl = muro__slice_of(b->in, b->in_len);
   m = http_step_methodView(sl);
+  v = http_step_versionView(sl);
   b->is_head = m.n == 4 && m.p && memcmp(m.p, "HEAD", 4) == 0;
+  b->ver11 = v.n == 8 && v.p && memcmp(v.p, "HTTP/1.1", 8) == 0;
   muro_http_reset();
 }
 
@@ -87,7 +90,8 @@ static void remember(BookStep *b, uint64_t phase, uint64_t code, uint64_t left, 
 }
 
 static void image_of(BookStep *b, uint64_t phase, int status_now) {
-  if (phase == 2 && status_now) b->image = MURO_STEP_PH_READ;
+  if (phase == 5) b->image = MURO_STEP_PH_DECIDE;
+  else if (phase == 2 && status_now) b->image = MURO_STEP_PH_READ;
   else if (phase == 2) b->image = MURO_STEP_PH_CLOSED;
   else if (phase == 0) b->image = MURO_STEP_PH_READ;
   else if (phase == 4) b->image = MURO_STEP_PH_IDLE;
@@ -128,9 +132,6 @@ static int render_literal(BookStep *b, const StepIn *in, int into_spare, uint64_
   return 0;
 }
 
-/* 0 when out holds the handler span. -1 outside the book (pull, a
-   forced close the book did not already say, bind status). -2 when
-   the handler refused and owe_status asked for the 500 literal. */
 /* Same place as c/step.c prepare_in: reset, then capture the bytes
    after a streamed header block. A complete buffered body leaves
    streamTake at 0, so capture copies nothing. */
@@ -141,20 +142,132 @@ static void prepare_in(BookStep *b) {
   if (b->in && b->in_len) host_in_capture(b->hin, b->in, b->in_len);
 }
 
+static void clear_pull(BookStep *b) {
+  b->resp_mode = 0;
+  b->pull = NULL;
+  b->pull_user = NULL;
+  b->pull_left = 0;
+  b->pull_until_end = 0;
+}
+
+/* The header span is already written. Same continuation as c/step.c
+   fill_pull: the next chunk, the last chunk, or a finished body.
+   0 when out_len is the next span, or 0 because the body is done.
+   -1 closes. The image stays in write either way. */
+static int fill_pull(BookStep *b) {
+  uint8_t tmp[8192];
+  int r;
+  size_t cap;
+  if (!b->pull || b->resp_mode == 0) return 0;
+  if (b->resp_mode == 2) {
+    r = b->pull(tmp, sizeof tmp, b->pull_user);
+    if (r < 0) return -1;
+    if (r == 0) {
+      b->out_len = host_copy_last(b->out, b->out_cap, NULL);
+      b->out_off = 0;
+      b->rendered = b->out_len > 0;
+      clear_pull(b);
+      return b->out_len > 0 ? 0 : -1;
+    }
+    b->out_len = host_copy_chunk(b->out, b->out_cap, tmp, (size_t)r, NULL);
+    b->out_off = 0;
+    b->rendered = b->out_len > 0;
+    return b->out_len > 0 ? 0 : -1;
+  }
+  if (!b->pull_until_end && b->pull_left == 0) {
+    clear_pull(b);
+    b->out_len = 0;
+    b->out_off = 0;
+    return 0;
+  }
+  cap = b->out_cap < sizeof tmp ? b->out_cap : sizeof tmp;
+  if (!b->pull_until_end && b->pull_left < cap) cap = (size_t)b->pull_left;
+  if (cap == 0) return -1;
+  r = b->pull(b->out, cap, b->pull_user);
+  if (r < 0) return -1;
+  if (r == 0) {
+    if (!b->pull_until_end && b->pull_left != 0) return -1;
+    clear_pull(b);
+    b->out_len = 0;
+    b->out_off = 0;
+    return 0;
+  }
+  if (!b->pull_until_end && (uint64_t)r > b->pull_left) return -1;
+  if (!b->pull_until_end) b->pull_left -= (uint64_t)r;
+  b->out_len = (size_t)r;
+  b->out_off = 0;
+  b->rendered = 1;
+  return 0;
+}
+
+static size_t copy_hand_span(BookStep *b, const StepIn *in, const MuroHttpResponse *resp,
+                             uint64_t span, uint64_t keep) {
+  char date[30];
+  size_t got = 0;
+  size_t n;
+  int omit = b->is_head ? 1 : 0;
+  const uint8_t *reason = resp->reason ? (const uint8_t *)resp->reason : NULL;
+  const uint8_t *extra = resp->headers ? (const uint8_t *)resp->headers : NULL;
+  const uint8_t *body = resp->body;
+  size_t reason_n = reason ? resp->reason_len : 0;
+  size_t extra_n = extra ? resp->headers_len : 0;
+  size_t body_n = body ? resp->body_len : 0;
+  copy_date(in, date);
+  clear_pull(b);
+  if (span == 3) {
+    n = host_copy_head(b->out, b->out_cap, (uint64_t)resp->status, reason, reason_n,
+                       (const uint8_t *)date, 29, extra, extra_n, resp->content_length, keep, &got);
+    if (n > 0 && !omit) {
+      b->resp_mode = 1;
+      b->pull = resp->pull;
+      b->pull_user = resp->pull_user;
+      b->pull_left = resp->content_length;
+    }
+  } else if (span == 4) {
+    n = host_copy_chunked(b->out, b->out_cap, (uint64_t)resp->status, reason, reason_n,
+                          (const uint8_t *)date, 29, extra, extra_n, keep, &got);
+    if (n > 0) {
+      b->resp_mode = 2;
+      b->pull = resp->pull;
+      b->pull_user = resp->pull_user;
+    }
+  } else if (span == 5) {
+    n = host_copy_delim(b->out, b->out_cap, (uint64_t)resp->status, reason, reason_n,
+                        (const uint8_t *)date, 29, extra, extra_n, &got);
+    if (n > 0 && !omit) {
+      b->resp_mode = 1;
+      b->pull = resp->pull;
+      b->pull_user = resp->pull_user;
+      b->pull_until_end = 1;
+    }
+  } else {
+    n = host_copy_response(b->out, b->out_cap, (uint64_t)resp->status, reason, reason_n,
+                           (const uint8_t *)date, 29, extra, extra_n, body, body_n, keep,
+                           (uint64_t)omit, &got);
+  }
+  return n;
+}
+
+/* http_step_hand decides close_after, a 4xx/5xx, a refused handler,
+   a pulled body, and a buffered body that does not fit. 0 parks the
+   span hand named. 2 is phase 5: the image stays in decide, the
+   span is not parked, and the caller shuts. -1 is an invariant
+   failure (MURO_BOOK_NOTE_STUCK). */
 static int render_handler(BookStep *b, const StepIn *in, uint64_t book_keep, int *note) {
   MuroHttpRequest req;
   MuroHttpResponse resp;
   int dec;
   int rc;
   int over = 0;
-  int keep;
-  int omit;
-  char date[30];
-  size_t n;
-  size_t got = 0;
-  const uint8_t *reason;
-  const uint8_t *extra;
-  const uint8_t *body;
+  int force = 0;
+  int fit = 1;
+  int href;
+  uint64_t hclose;
+  uint64_t hbad;
+  uint64_t howe;
+  uint64_t hpull;
+  uint64_t hver;
+  uint64_t hhead;
   if (!b->hin || !b->handler || !b->in) return -1;
   /* prepare_in already ran for a read or idle fact. Resetting again
      would drop that capture, so capture once more after this reset.
@@ -163,46 +276,96 @@ static int render_handler(BookStep *b, const StepIn *in, uint64_t book_keep, int
   if (b->in && b->in_len) host_in_capture(b->hin, b->in, b->in_len);
   dec = host_in_bind(b->hin, b->in, b->in_len, &req);
   if (dec) return -1;
-  note_head(b);
+  b->is_head = req.method.n == 4 && req.method.p && memcmp(req.method.p, "HEAD", 4) == 0;
+  b->ver11 = req.version.n == 8 && req.version.p && memcmp(req.version.p, "HTTP/1.1", 8) == 0;
   memset(&resp, 0, sizeof resp);
   rc = b->handler(&req, &resp, b->handler_user);
-  if (rc < 0) {
-    if (resp.owe_status) {
-      b->owe = 1;
-      if (render_literal(b, in, 0, 500, note) == 0) *note = MURO_STEP_NOTE_HANDLER_500;
-      return -2;
-    }
-    return -1;
-  }
-  if (resp.pull) return -1;
-  host_in_after(b->hin, 0, NULL, &over);
+  host_in_after(b->hin, resp.pull != NULL && !b->is_head, &force, &over);
   if (over) return -1;
-  keep = book_keep ? 1 : 0;
-  if (resp.close_after || (resp.status >= 400 && resp.status <= 599)) keep = 1;
-  if ((uint64_t)keep != book_keep) return -1;
-  omit = b->is_head ? 1 : 0;
-  copy_date(in, date);
-  reason = resp.reason ? (const uint8_t *)resp.reason : NULL;
-  extra = resp.headers ? (const uint8_t *)resp.headers : NULL;
-  body = resp.body;
-  n = host_copy_response(b->out, b->out_cap, (uint64_t)resp.status, reason,
-                         reason ? resp.reason_len : 0, (const uint8_t *)date, 29, extra,
-                         extra ? resp.headers_len : 0, body, body ? resp.body_len : 0,
-                         (uint64_t)keep, (uint64_t)omit, &got);
-  if (n == 0) {
-    if (resp.owe_status) {
-      b->owe = 1;
-      if (render_literal(b, in, 0, 500, note) == 0) *note = MURO_STEP_NOTE_TOO_BIG_COMMIT;
-      return -2;
+  if (force) resp.close_after = 1;
+  href = rc < 0 ? 1 : 0;
+  hclose = resp.close_after ? 1u : 0u;
+  hbad = (resp.status >= 400 && resp.status <= 599) ? 1u : 0u;
+  howe = resp.owe_status ? 1u : 0u;
+  hpull = (!href && resp.pull) ? (resp.has_length ? 1u : 2u) : 0u;
+  hver = b->ver11 ? 1u : 0u;
+  hhead = b->is_head ? 1u : 0u;
+  for (;;) {
+    http_step_Out bk;
+    uint64_t phase;
+    uint64_t code;
+    uint64_t span;
+    uint64_t keep;
+    size_t n;
+    muro_http_reset();
+    bk = http_step_hand(book_keep, hclose, hbad, howe, (uint64_t)href, hpull, hver, hhead,
+                        (uint64_t)fit);
+    muro_http_reset();
+    phase = out_field(bk, 0);
+    code = out_field(bk, 1);
+    span = out_field(bk, 6);
+    keep = out_field(bk, 10);
+    if (phase == 5) {
+      clear_pull(b);
+      remember(b, 5, code, 0, 1);
+      b->out_len = 0;
+      b->out_off = 0;
+      b->rendered = 0;
+      b->owe = 0;
+      *note = 0;
+      if (code == 500) {
+        if (render_literal(b, in, 0, 500, note) == 0) {
+          *note = MURO_STEP_NOTE_HANDLER_500;
+          b->owe = 1;
+        } else {
+          *note = 0;
+          b->rendered = 0;
+          b->out_len = 0;
+        }
+      } else if (!fit && !href) {
+        *note = MURO_STEP_NOTE_TOO_BIG;
+      }
+      return 2;
     }
-    *note = MURO_STEP_NOTE_TOO_BIG;
-    return -1;
+    if (phase == 3 && code == 500) {
+      clear_pull(b);
+      if (render_literal(b, in, 0, 500, note) < 0) {
+        *note = MURO_STEP_NOTE_TOO_BIG;
+        remember(b, 5, 0, 0, 1);
+        b->rendered = 0;
+        b->owe = howe ? 1 : 0;
+        return 2;
+      }
+      *note = MURO_STEP_NOTE_TOO_BIG_COMMIT;
+      b->owe = 1;
+      remember(b, 3, 500, 0, 1);
+      return 0;
+    }
+    if (phase != 3 || (span != 2 && span != 3 && span != 4 && span != 5)) return -1;
+    n = copy_hand_span(b, in, &resp, span, keep);
+    if (n > 0) {
+      b->out_len = n;
+      b->out_off = 0;
+      b->rendered = 1;
+      b->owe = resp.owe_status ? 1 : 0;
+      remember(b, 3, 0, 0, keep);
+      return 0;
+    }
+    clear_pull(b);
+    if (!fit) {
+      *note = MURO_STEP_NOTE_TOO_BIG;
+      remember(b, 5, 0, 0, 1);
+      b->rendered = 0;
+      b->out_len = 0;
+      b->owe = 0;
+      return 2;
+    }
+    /* The buffered body, or a pull header, did not fit. hand with
+       hfit 0 chooses the committed 500 span or a decide-shut. */
+    fit = 0;
+    href = 0;
+    hpull = 0;
   }
-  b->out_len = n;
-  b->out_off = 0;
-  b->rendered = 1;
-  b->owe = resp.owe_status ? 1 : 0;
-  return 0;
 }
 
 static void park(BookStep *b, StepOut *out) {
@@ -289,6 +452,32 @@ int muro_book_step(BookStep *st, const StepIn *in, StepOut *out) {
   prev_keep = st->bkeep;
   if ((in->kind == MURO_STEP_BYTES || in->kind == MURO_STEP_PEER_CLOSED) && !st->shut)
     prepare_in(st);
+  /* A pulled body stays in book phase 3 until the pull returns 0.
+     The header-finishing write, and each chunk write, parks the next
+     span here and does not ask stepFact to finish the response. */
+  if (st->resp_mode != 0 && in->kind == MURO_STEP_WROTE && (prev_phase == 1 || prev_phase == 3)) {
+    uint64_t base = prev_left == 0 ? owed : prev_left;
+    if ((uint64_t)in->n >= base) {
+      int fr = fill_pull(st);
+      if (fr < 0) {
+        clear_pull(st);
+        st->shut = 1;
+        st->image = MURO_STEP_PH_WRITE;
+        out->close_conn = 1;
+        interests(st, out, 0, 0);
+        return 0;
+      }
+      if (st->out_len > 0) {
+        remember(st, prev_phase, prev_code, 0, prev_keep);
+        st->image = MURO_STEP_PH_WRITE;
+        st->rendered = 1;
+        out->wake_at = 0;
+        interests(st, out, 0, 1);
+        park(st, out);
+        return 0;
+      }
+    }
+  }
   sl = muro__slice_of(st->in ? st->in : (const uint8_t *)"", st->in_len);
   muro_http_reset();
   bk = http_step_stepFact(book_st(st), (uint64_t)in->kind, sl, st->max_body, (uint64_t)in->n, owed,
@@ -326,6 +515,7 @@ int muro_book_step(BookStep *st, const StepIn *in, StepOut *out) {
   interests(st, out, rd ? 1 : 0, wr ? 1 : 0);
   if (close_b || status_b) st->shut = 1;
   if (phase == 0 || phase == 4) {
+    clear_pull(st);
     st->rendered = 0;
     st->owe = 0;
     st->out_len = 0;
@@ -361,7 +551,23 @@ int muro_book_step(BookStep *st, const StepIn *in, StepOut *out) {
   if (phase == 3 && code == 0) rendered_rc = render_handler(st, in, keep, &note);
   else if (phase == 1) rendered_rc = render_literal(st, in, 0, code, &note);
   else return closed_out(st, out, MURO_BOOK_NOTE_STUCK, 0);
+  /* Phase 5 shuts in decide. The 500 literal stays in the send
+     buffer for close_status and is not a parked span. */
+  if (rendered_rc == 2) {
+    image_of(st, st->bphase, 0);
+    st->shut = 1;
+    out->close_conn = 1;
+    out->note = note;
+    out->wake_at = 0;
+    out->status_now = 0;
+    out->bytes = NULL;
+    out->len = 0;
+    interests(st, out, 0, 0);
+    return 0;
+  }
   if (rendered_rc < 0) return closed_out(st, out, note ? note : MURO_BOOK_NOTE_STUCK, 0);
+  image_of(st, st->bphase, 0);
+  if (note) out->note = note;
   if (!st->rendered || st->out_off >= st->out_len) return closed_out(st, out, MURO_BOOK_NOTE_STUCK, 0);
   park(st, out);
   (void)prev_code;
@@ -387,6 +593,12 @@ static void load_http(BookStep *b, HttpStep *st) {
   b->blind = st->pull_done;
   b->image = (int)st->st.muro__as.conn.muro__f_0;
   b->is_head = st->is_head;
+  b->ver11 = st->ver11;
+  b->resp_mode = st->resp_mode;
+  b->pull_until_end = st->pull_until_end;
+  b->pull = st->pull;
+  b->pull_user = st->pull_user;
+  b->pull_left = st->pull_left;
   b->bphase = st->st.muro__as.conn.muro__f_1;
   b->bcode = st->st.muro__as.conn.muro__f_2;
   b->bleft = st->st.muro__as.conn.muro__f_3;
@@ -410,6 +622,12 @@ static void store_http(HttpStep *st, const BookStep *b, StepOut *out) {
   st->pend_kind = b->shut ? 3 : 0;
   st->pull_done = b->blind;
   st->is_head = b->is_head;
+  st->ver11 = b->ver11;
+  st->resp_mode = b->resp_mode;
+  st->pull_until_end = b->pull_until_end;
+  st->pull = b->pull;
+  st->pull_user = b->pull_user;
+  st->pull_left = b->pull_left;
   st->spare_len = b->spare_len;
   st->st.muro__as.conn.muro__f_0 = (uint64_t)b->image;
   st->st.muro__as.conn.muro__f_1 = b->bphase;

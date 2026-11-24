@@ -33,6 +33,12 @@ typedef struct BookStep {
   int blind;
   int image;
   int is_head;
+  int ver11;
+  int resp_mode;
+  int pull_until_end;
+  MuroHttpPull pull;
+  void *pull_user;
+  uint64_t pull_left;
   int last_cover;
   uint64_t bphase;
   uint64_t bcode;

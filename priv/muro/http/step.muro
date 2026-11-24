@@ -58,8 +58,24 @@
 -- finishes: the caller named an empty span. That finish is in the
 -- book (owe-empty-span, reply-empty-span). The host has no such
 -- input. It finishes from its own byte counter.
--- Not claimed here: a pulled body, fuel, a handler 500,
--- and the 100 Continue span.
+-- The adapter runs the handler, then feeds the result to `hand`.
+-- reqKeep is the keep the request already decided. hclose is
+-- close_after (the adapter also sets it when an open request body
+-- is not owned by the response pull). hbad is 1 for a status
+-- 400..599. howe is owe_status. href is 1 when the handler
+-- returned -1. hpull is 0 for a buffered body, 1 for a pull with
+-- a content length, and 2 for a pull with no length. hver is 1
+-- for HTTP/1.1. hhead is 1 for HEAD. hfit is 1 when a buffered
+-- body fits; a pull ignores it. A refused handler with owe_status
+-- is book phase 5: close now, no span, code 500. The image stays
+-- in handle. A buffered body that does not fit is the same shut
+-- when owe_status is clear, and a 500 write with keep 1 when it
+-- is set. A pull is a handler span whose span field is 3
+-- (content-length), 4 (chunked), or 5 (close-delimited). HEAD or
+-- a version other than HTTP/1.1 forces the delimited span and
+-- keep 1. cover stays 0 on all of these. A later fact on phase 5
+-- is quiet, the same as a close.
+-- Not claimed here: fuel, and the 100 Continue span.
 -- Versus origin/main: 7 evidence names added, 5 removed (those
 -- five are the old cover-1 names for facts the host holds), net
 -- +2, 126 total. Each one is an equation mix muro.check reduces.
@@ -410,7 +426,7 @@ def stepFact : run Π (+ st : St) → Π (+ fact : U64) → Π (+ buf : Slice) �
   λ (+ st : St) → λ (+ fact : U64) → λ (+ buf : Slice) → λ (+ max : U64) → λ (+ n : U64) → λ (+ owed : U64) → λ (+ now : U64) → λ (+ dl : U64) → λ (+ idle : U64) →
     match st motive (λ _ → Out)
       | st phase code left keep =>
-          (match (u64eq phase (toU64 2)) motive (λ _ → Out)
+          (match (or (u64eq phase (toU64 2)) (u64eq phase (toU64 5))) motive (λ _ → Out)
             | true => quiet code
             | false =>
                 (match (or (u64eq phase (toU64 1)) (u64eq phase (toU64 3))) motive (λ _ → Out)
@@ -423,6 +439,55 @@ def stepFact : run Π (+ st : St) → Π (+ fact : U64) → Π (+ buf : Slice) �
 def step0 : run Π (+ st : St) → Π (+ fact : U64) → Π (+ buf : Slice) → Π (+ max : U64) → Π (+ n : U64) → Π (+ owed : U64) → Out :=
   λ (+ st : St) → λ (+ fact : U64) → λ (+ buf : Slice) → λ (+ max : U64) → λ (+ n : U64) → λ (+ owed : U64) →
     stepFact st fact buf max n owed (toU64 0) (toU64 0) (toU64 0)
+
+-- Phase 5 is a handler that closed before a span was parked. The
+-- image stays in handle. A later fact is quiet, like phase 2.
+def shutHandle : run Π (+ code : U64) → Out :=
+  λ (+ code : U64) →
+    out (toU64 5) code (toU64 1) (toU64 0) (toU64 0) (toU64 0) (toU64 0) (toU64 0) (toU64 0) (toU64 0) (toU64 1)
+
+-- close_after or a 4xx/5xx forces keep 1. Otherwise the request keep stands.
+def keepHand : run Π (+ reqKeep : U64) → Π (+ hclose : U64) → Π (+ hbad : U64) → U64 :=
+  λ (+ reqKeep : U64) → λ (+ hclose : U64) → λ (+ hbad : U64) →
+    match (u64eq hbad (toU64 1)) motive (λ _ → U64)
+      | true => toU64 1
+      | false =>
+          (match (u64eq hclose (toU64 1)) motive (λ _ → U64)
+            | true => toU64 1
+            | false => reqKeep)
+
+-- span 3 content-length pull, 4 chunked pull, 5 close-delimited pull.
+def spanPull : run Π (+ keep : U64) → Π (+ span : U64) → Out :=
+  λ (+ keep : U64) → λ (+ span : U64) →
+    out (toU64 3) (toU64 0) (toU64 0) (toU64 0) (toU64 0) (toU64 1) span (toU64 0) (toU64 0) (toU64 0) keep
+
+-- A buffered body that does not fit, after a commit, is a 500 span.
+def oweFit : run Out :=
+  still (toU64 3) (toU64 500) (toU64 0) (toU64 1)
+
+def hand : run Π (+ reqKeep : U64) → Π (+ hclose : U64) → Π (+ hbad : U64) → Π (+ howe : U64) → Π (+ href : U64) → Π (+ hpull : U64) → Π (+ hver : U64) → Π (+ hhead : U64) → Π (+ hfit : U64) → Out :=
+  λ (+ reqKeep : U64) → λ (+ hclose : U64) → λ (+ hbad : U64) → λ (+ howe : U64) → λ (+ href : U64) → λ (+ hpull : U64) → λ (+ hver : U64) → λ (+ hhead : U64) → λ (+ hfit : U64) →
+    match (u64eq href (toU64 1)) motive (λ _ → Out)
+      | true =>
+          (match (u64eq howe (toU64 1)) motive (λ _ → Out)
+            | true => shutHandle (toU64 500)
+            | false => shutHandle (toU64 0))
+      | false =>
+          (match (u64eq hpull (toU64 1)) motive (λ _ → Out)
+            | true => spanPull (keepHand reqKeep hclose hbad) (toU64 3)
+            | false =>
+                (match (u64eq hpull (toU64 2)) motive (λ _ → Out)
+                  | true =>
+                      (match (or (u64eq hhead (toU64 1)) (u64eq hver (toU64 0))) motive (λ _ → Out)
+                        | true => spanPull (toU64 1) (toU64 5)
+                        | false => spanPull (keepHand reqKeep hclose hbad) (toU64 4))
+                  | false =>
+                      (match (u64eq hfit (toU64 0)) motive (λ _ → Out)
+                        | true =>
+                            (match (u64eq howe (toU64 1)) motive (λ _ → Out)
+                              | true => oweFit
+                              | false => shutHandle (toU64 0))
+                        | false => reply (keepHand reqKeep hclose hbad))))
 
 def lineBuf : run Slice :=
   b"GET / HT"
@@ -959,3 +1024,37 @@ def headers-done-431 : evidence {headersDone capHdrDone ≡ true : Bool} := refl
 def headers-end-431 : evidence {gt16384 (headerEnd capHdrDone) ≡ true : Bool} := refl
 
 def cap-hdr-done-431 : evidence {sawHdrDone ≡ owe (toU64 431) : Out} := refl
+
+def hand-agree : evidence {hand (toU64 0) (toU64 0) (toU64 0) (toU64 0) (toU64 0) (toU64 0) (toU64 1) (toU64 0) (toU64 1) ≡ reply (toU64 0) : Out} := refl
+
+def hand-close : evidence {hand (toU64 0) (toU64 1) (toU64 0) (toU64 0) (toU64 0) (toU64 0) (toU64 1) (toU64 0) (toU64 1) ≡ reply (toU64 1) : Out} := refl
+
+def hand-bad : evidence {hand (toU64 0) (toU64 0) (toU64 1) (toU64 0) (toU64 0) (toU64 0) (toU64 1) (toU64 0) (toU64 1) ≡ reply (toU64 1) : Out} := refl
+
+def hand-keep : evidence {hand (toU64 1) (toU64 0) (toU64 0) (toU64 0) (toU64 0) (toU64 0) (toU64 1) (toU64 0) (toU64 1) ≡ reply (toU64 1) : Out} := refl
+
+def hand-500 : evidence {hand (toU64 0) (toU64 0) (toU64 0) (toU64 1) (toU64 1) (toU64 0) (toU64 1) (toU64 0) (toU64 1) ≡ shutHandle (toU64 500) : Out} := refl
+
+def hand-refuse : evidence {hand (toU64 0) (toU64 0) (toU64 0) (toU64 0) (toU64 1) (toU64 0) (toU64 1) (toU64 0) (toU64 1) ≡ shutHandle (toU64 0) : Out} := refl
+
+def hand-pull-len : evidence {hand (toU64 0) (toU64 0) (toU64 0) (toU64 0) (toU64 0) (toU64 1) (toU64 1) (toU64 0) (toU64 1) ≡ spanPull (toU64 0) (toU64 3) : Out} := refl
+
+def hand-pull-len-bad : evidence {hand (toU64 0) (toU64 0) (toU64 1) (toU64 0) (toU64 0) (toU64 1) (toU64 1) (toU64 0) (toU64 1) ≡ spanPull (toU64 1) (toU64 3) : Out} := refl
+
+def hand-pull-chunk : evidence {hand (toU64 0) (toU64 0) (toU64 0) (toU64 0) (toU64 0) (toU64 2) (toU64 1) (toU64 0) (toU64 1) ≡ spanPull (toU64 0) (toU64 4) : Out} := refl
+
+def hand-pull-chunk-close : evidence {hand (toU64 0) (toU64 1) (toU64 0) (toU64 0) (toU64 0) (toU64 2) (toU64 1) (toU64 0) (toU64 1) ≡ spanPull (toU64 1) (toU64 4) : Out} := refl
+
+def hand-pull-delim : evidence {hand (toU64 0) (toU64 0) (toU64 0) (toU64 0) (toU64 0) (toU64 2) (toU64 0) (toU64 0) (toU64 1) ≡ spanPull (toU64 1) (toU64 5) : Out} := refl
+
+def hand-pull-head : evidence {hand (toU64 0) (toU64 0) (toU64 0) (toU64 0) (toU64 0) (toU64 2) (toU64 1) (toU64 1) (toU64 1) ≡ spanPull (toU64 1) (toU64 5) : Out} := refl
+
+def hand-toobig : evidence {hand (toU64 0) (toU64 0) (toU64 0) (toU64 0) (toU64 0) (toU64 0) (toU64 1) (toU64 0) (toU64 0) ≡ shutHandle (toU64 0) : Out} := refl
+
+def hand-toobig-owe : evidence {hand (toU64 0) (toU64 0) (toU64 0) (toU64 1) (toU64 0) (toU64 0) (toU64 1) (toU64 0) (toU64 0) ≡ oweFit : Out} := refl
+
+def hand-500-cover : evidence {coverOf (hand (toU64 0) (toU64 0) (toU64 0) (toU64 1) (toU64 1) (toU64 0) (toU64 1) (toU64 0) (toU64 1)) ≡ toU64 0 : U64} := refl
+
+def hand-pull-cover : evidence {coverOf (hand (toU64 0) (toU64 0) (toU64 0) (toU64 0) (toU64 0) (toU64 1) (toU64 1) (toU64 0) (toU64 1)) ≡ toU64 0 : U64} := refl
+
+def hand-500-later : evidence {step0 (take (shutHandle (toU64 500))) factBytes getBuf max10 (toU64 0) (toU64 0) ≡ quiet (toU64 500) : Out} := refl
