@@ -10,6 +10,7 @@
 #include "conn.h"
 #include "proto.h"
 
+#include <stdint.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -72,9 +73,18 @@ static void want(const char *name, Conn st, int i, uint64_t expect) {
   }
 }
 
+void step_memo_reset(void);
+void view_memo_reset(void);
+void admit_memo_reset(void);
+void sess_memo_reset(void);
+
 static int restart(Conn *st, Proto **proto) {
   proto_free(*proto);
   *proto = NULL;
+  step_memo_reset();
+  view_memo_reset();
+  admit_memo_reset();
+  sess_memo_reset();
   *st = begin();
   *proto = proto_begin();
   if (!*proto) {
@@ -85,7 +95,14 @@ static int restart(Conn *st, Proto **proto) {
 }
 
 static Proto *open_proto(const char *name) {
-  Proto *p = proto_begin();
+  Proto *p;
+  /* A repeated pure step does not classify again. Start each scenario
+     cold so the first bytes event still shows that one allocation. */
+  step_memo_reset();
+  view_memo_reset();
+  admit_memo_reset();
+  sess_memo_reset();
+  p = proto_begin();
   if (!p) bad(name, "session init");
   return p;
 }
@@ -134,12 +151,15 @@ static unsigned long take(const char *name, Conn *st, Proto *proto, Ev ev) {
     return 0;
   }
 
-  /* Build the event, then count only the step. Event builders are unboxed. */
+  /* Build the event, then count only the step. Event builders are unboxed.
+     The probe above may have remembered this buffer. Drop that memory
+     so this step still classifies once. */
   muro_http_reset();
   (void)ev;
   built = muro_http_allocs();
   if (built != 0) bad(name, "event allocated");
   muro_http_reset();
+  view_memo_reset();
   *st = step(*st, ev);
   n = muro_http_allocs();
   printf("%s %lu\n", name, n);
@@ -218,6 +238,55 @@ static void check_keepalive(void) {
   want("health", st, 4, ACT_DECIDE);
   want("health", st, 11, 33);
   want("health", st, 12, 0);
+  /* The same bytes and the same fields skip the book. The result matches. */
+  {
+    Conn hit;
+    muro_http_reset();
+    hit = step(begin(), evBytes(of(health)));
+    if (muro_http_allocs() != 0) bad("health", "repeat allocs");
+    if (!same(hit, st)) bad("health", "repeat result");
+  }
+  {
+    muro__slice s = of(health);
+    Classified *a;
+    Classified *b;
+    muro__slice body;
+    muro__slice body2;
+    uint64_t code;
+    unsigned long n0;
+    int status;
+    int keep;
+    view_memo_reset();
+    muro_http_reset();
+    a = classify(s);
+    status = a->muro__as.classified.muro__f_0->muro__field_tag;
+    keep = a->muro__as.classified.muro__f_1->muro__field_tag;
+    muro_http_reset();
+    n0 = muro_http_allocs();
+    b = classify(s);
+    if (muro_http_allocs() != n0) bad("health", "classify hit allocs");
+    if (b->muro__as.classified.muro__f_0->muro__field_tag != status) bad("health", "classify status");
+    if (b->muro__as.classified.muro__f_1->muro__field_tag != keep) bad("health", "classify keep");
+    code = methodCode(s);
+    muro_http_reset();
+    if (methodCode(s) != code) bad("health", "method hit");
+    body = bodyView(s);
+    muro_http_reset();
+    body2 = bodyView(s);
+    if (body2.n != body.n) bad("health", "body hit");
+    /* Empty bodies still point into the request buffer. Skipping
+       n == 0 used to miss a hit that returned the empty sentinel.
+       Compare addresses as integers: a sentinel pointer is not in s. */
+    {
+      uintptr_t base = (uintptr_t)s.p;
+      uintptr_t start = (uintptr_t)body.p;
+      uintptr_t hitp = (uintptr_t)body2.p;
+      if (!s.p || start < base || start > base + s.n ||
+          hitp != base + (start - base) ||
+          (body.n > 0 && memcmp(body2.p, body.p, body.n) != 0))
+        bad("health", "body hit");
+    }
+  }
   n = take("reply-allocs", &st, proto, evReply(0));
   if (n != 0) bad("reply", "allocs");
   want("db", st, 0, PH_WRITE);

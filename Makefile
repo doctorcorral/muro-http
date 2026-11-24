@@ -26,9 +26,23 @@ c/test_jwt.o c/test_body.o c/tag_pin.o c/test_store.o c/test_json.o c/test_e2e.o
 # The generated text stays as muro wrote it.
 c/conn.patched.c: c/generated/conn.c
 	sed -e 's/^HSt scan(/HSt scan_uncached(/' \
-	    -e 's/^uint64_t crlfEnd(/uint64_t crlfEnd_uncached(/' $< > $@
+	    -e 's/^uint64_t crlfEnd(/uint64_t crlfEnd_uncached(/' \
+	    -e 's/^Conn step(/Conn step_uncached(/' \
+	    -e 's/^Classified \*classify(/Classified *classify_uncached(/' \
+	    -e 's/^uint64_t methodCode(/uint64_t methodCode_uncached(/' \
+	    -e 's/^uint64_t teCode(/uint64_t teCode_uncached(/' \
+	    -e 's/^uint64_t framedEnd(/uint64_t framedEnd_uncached(/' \
+	    -e 's/^uint64_t streamTake(/uint64_t streamTake_uncached(/' \
+	    -e 's/^muro__slice bodyView(/muro__slice bodyView_uncached(/' $< > $@
 	grep -q '^HSt scan_uncached(muro__slice s)' $@
 	grep -q '^uint64_t crlfEnd_uncached(muro__slice s)' $@
+	grep -q '^Conn step_uncached(Conn st, Ev ev_2)' $@
+	grep -q '^Classified \*classify_uncached(muro__slice s)' $@
+	grep -q '^uint64_t methodCode_uncached(muro__slice s)' $@
+	grep -q '^uint64_t teCode_uncached(muro__slice s)' $@
+	grep -q '^uint64_t framedEnd_uncached(muro__slice s)' $@
+	grep -q '^uint64_t streamTake_uncached(muro__slice s)' $@
+	grep -q '^muro__slice bodyView_uncached(muro__slice s)' $@
 
 c/conn.o: c/conn.patched.c c/shim.h
 	$(CC) $(CFLAGS) -c -o $@ c/conn.patched.c
@@ -84,7 +98,7 @@ c/mem_adapter.o: examples/adapter/mem.c
 c/stream.o: examples/stream/stream.c
 	$(CC) $(CFLAGS) -c -o $@ examples/stream/stream.c
 
-CORE = c/shim.o c/proto.o c/admit_glue.o c/session.o c/admit.o c/conn.o c/scan_cache.o
+CORE = c/shim.o c/proto.o c/admit_glue.o c/session.o c/admit.o c/conn.o c/scan_cache.o c/step_memo.o c/view_memo.o
 HOST = c/host.o c/step.o c/host_poll.o c/host_render.o c/host_date.o c/host_stream.o c/render.o $(CORE)
 
 c/test_classify: c/test_classify.o c/request.o c/shim.o
@@ -196,9 +210,11 @@ clean:
 FUZZ_CC = clang
 FUZZ_SAN = -fsanitize=fuzzer,address,undefined
 FUZZ_CFLAGS = -std=c11 -g -O1 -fno-omit-frame-pointer -fno-sanitize-recover=undefined $(FUZZ_SAN) -Wall -Wextra -Werror -D_GNU_SOURCE -I c -I c/generated -include c/shim.h
-# conn.c already emits the request classifiers. Linking request.c
-# twice defines those symbols twice. render.c is separate.
-FUZZ_SRCS = fuzz/step_fuzz.c c/step.c c/shim.c c/proto.c c/admit_glue.c c/host_render.c c/host_stream.c c/generated/conn.c c/generated/session.c c/generated/admit.c c/generated/render.c
+# The server steps through c/conn.patched.c plus the scan cache and
+# the step and view memos. The fuzzer links that same path.
+# c/generated/conn.c and c/generated/request.c define those symbols
+# again. render.c is separate.
+FUZZ_SRCS = fuzz/step_fuzz.c c/step.c c/shim.c c/proto.c c/admit_glue.c c/host_render.c c/host_stream.c c/conn.patched.c c/scan_cache.c c/step_memo.c c/view_memo.c c/generated/session.c c/generated/admit.c c/generated/render.c
 
 fuzz/step_fuzz: $(FUZZ_SRCS) c/step.h c/shim.h c/host_stream.h c/host_render.h
 	$(FUZZ_CC) $(FUZZ_CFLAGS) -o $@ $(FUZZ_SRCS)

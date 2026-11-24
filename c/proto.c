@@ -58,6 +58,97 @@ static muro__sess_val data_val(const char *ctor) {
   return v;
 }
 
+/* One keep-alive GET applies five session moves. Each move is a pure
+   function of the session word and the value. The book still runs on
+   a miss, including a different pick bit or a different constructor,
+   so keep versus close stays a book result. A hit keeps the new
+   state and skips the stepper's expected-string fill. Nested values
+   are not remembered. The constructor is the literal pointer the
+   book passed; a different pointer is a miss even when the text
+   matches. Eight slots cover the hot cycle. One worker is one thread. */
+enum { SESS_SLOTS = 8 };
+
+struct sess_key {
+  uint16_t key;
+  uint16_t at;
+  uint8_t stuck;
+  uint8_t set0;
+  uint8_t tag;
+  uint8_t bit;
+  int dir;
+  uint64_t nat0;
+  uint64_t vnat;
+  uint64_t vn;
+  const char *ctor;
+};
+
+struct sess_slot {
+  int used;
+  struct sess_key key;
+  int status;
+  muro__sess_st state;
+};
+
+static struct sess_slot sess_slots[SESS_SLOTS];
+static unsigned sess_hand;
+
+static int sess_plain(const muro__sess_val *v) {
+  return v && !v->a && !v->b && !v->names;
+}
+
+/* nat[0] and set[0] are the whole state only while the book has one
+   slot. A wider header must not reuse this key. */
+_Static_assert(MURO__SESS_SLOTS == 1, "sess_key_of keys only set[0] and nat[0]");
+
+static unsigned sess_misses;
+
+/* Tests isolate moves. The server never calls these. */
+void sess_memo_reset(void) {
+  unsigned i;
+  for (i = 0; i < SESS_SLOTS; i++) sess_slots[i].used = 0;
+  sess_hand = 0;
+  sess_misses = 0;
+}
+
+unsigned sess_memo_misses(void) { return sess_misses; }
+
+static void sess_key_of(struct sess_key *k, const muro__sess_st *st, int dir,
+                        const muro__sess_val *v) {
+  memset(k, 0, sizeof *k);
+  k->key = st->key;
+  k->at = st->at;
+  k->stuck = st->stuck;
+  k->set0 = st->set[0];
+  k->tag = v->tag;
+  k->bit = v->bit;
+  k->dir = dir;
+  k->nat0 = st->nat[0];
+  k->vnat = v->nat;
+  k->vn = v->n;
+  k->ctor = v->ctor;
+}
+
+static int sess_find(const struct sess_key *k, muro__sess_res *out) {
+  unsigned i;
+  for (i = 0; i < SESS_SLOTS; i++) {
+    if (!sess_slots[i].used) continue;
+    if (memcmp(&sess_slots[i].key, k, sizeof *k) != 0) continue;
+    out->status = sess_slots[i].status;
+    out->state = sess_slots[i].state;
+    return 1;
+  }
+  return 0;
+}
+
+static void sess_store(const struct sess_key *k, int status, muro__sess_st state) {
+  struct sess_slot *s = &sess_slots[sess_hand % SESS_SLOTS];
+  sess_hand += 1;
+  s->used = 1;
+  s->key = *k;
+  s->status = status;
+  s->state = state;
+}
+
 static int remember(Proto *p, int dir, const muro__sess_val *v) {
   ProtoMove *m;
   if (p->nmove >= PROTO_MOVE_MAX) return 0;
@@ -77,7 +168,21 @@ static int remember(Proto *p, int dir, const muro__sess_val *v) {
 }
 
 static int step_val(Proto *p, int dir, muro__sess_val v) {
-  muro__sess_res res = muro__sess_conn_step(p->st, dir, &v);
+  muro__sess_res res;
+  struct sess_key key;
+  int hit = 0;
+  if (sess_plain(&v)) {
+    sess_key_of(&key, &p->st, dir, &v);
+    hit = sess_find(&key, &res);
+    if (!hit) {
+      sess_misses += 1;
+      res = muro__sess_conn_step(p->st, dir, &v);
+      if (res.status == MURO_SESS_OK) sess_store(&key, res.status, res.state);
+    }
+  } else {
+    sess_misses += 1;
+    res = muro__sess_conn_step(p->st, dir, &v);
+  }
   if (res.status != MURO_SESS_OK) return 0;
   if (!remember(p, dir, &v)) return 0;
   p->st = res.state;

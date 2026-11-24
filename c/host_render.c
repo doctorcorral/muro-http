@@ -6,6 +6,7 @@
 #include "shim.h"
 #include "render.h"
 
+#include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -42,7 +43,32 @@ static int owned_name(const uint8_t *p, size_t n) {
          name_is(p, n, "transfer-encoding") || name_is(p, n, "date");
 }
 
-/* 0 keeps *out (malloc'd, or NULL when nothing remains). -1 rejects. */
+/* A well-formed block that drops nothing is already the bytes httpRender
+   should see. The caller then does not free it. */
+static int extra_passthrough(const uint8_t *extra, size_t n) {
+  size_t i = 0;
+  if (!extra || n == 0) return 0;
+  while (i < n) {
+    size_t start = i;
+    size_t colon;
+    int saw = 0;
+    while (i < n && extra[i] != '\r' && extra[i] != '\n') i++;
+    if (i == start || i + 1 >= n || extra[i] != '\r' || extra[i + 1] != '\n') return 0;
+    for (colon = start; colon < i; colon++) {
+      if (extra[colon] == ':') {
+        saw = 1;
+        break;
+      }
+      if (extra[colon] == ' ' || extra[colon] == '\t') return 0;
+    }
+    if (!saw || colon == start || owned_name(extra + start, colon - start)) return 0;
+    i += 2;
+  }
+  return 1;
+}
+
+/* 0 keeps *out (malloc'd, the caller's bytes, or NULL when nothing
+   remains). -1 rejects. */
 static int filter_extra(const uint8_t *extra, size_t n, uint8_t **out, size_t *out_n) {
   size_t i = 0;
   size_t used = 0;
@@ -50,6 +76,11 @@ static int filter_extra(const uint8_t *extra, size_t n, uint8_t **out, size_t *o
   *out = NULL;
   *out_n = 0;
   if (!extra || n == 0) return 0;
+  if (extra_passthrough(extra, n)) {
+    *out = (uint8_t *)extra;
+    *out_n = n;
+    return 0;
+  }
   buf = malloc(n + 2);
   if (!buf) return -1;
   while (i < n) {
@@ -108,6 +139,117 @@ static muro__slice as_slice(const uint8_t *p, size_t n) {
   return muro__slice_of(p, n);
 }
 
+static size_t copy_out(uint8_t *dst, size_t cap, muro__slice msg, size_t *got);
+
+static int size_add(size_t *acc, size_t n) {
+  if (n > SIZE_MAX - *acc) return 0;
+  *acc += n;
+  return 1;
+}
+
+/* n bytes at o must fit in cap. A zero length copies nothing. */
+static int put_bytes(uint8_t *dst, size_t cap, size_t *o, const uint8_t *p, size_t n) {
+  if (n == 0) return 1;
+  if (!dst || !p || *o > cap || n > cap - *o) return 0;
+  memcpy(dst + *o, p, n);
+  *o += n;
+  return 1;
+}
+
+/* One pass into dst. httpConn still chooses keep-alive versus close,
+   and httpCode still chooses the status digits, including rdShow for
+   a code the book does not spell. The date bytes are the slice the
+   caller handed the book. Nothing here remembers a finished response. */
+static size_t render_direct(uint8_t *dst, size_t cap, uint64_t status, muro__slice reason,
+                            muro__slice date, muro__slice extra, muro__slice body, uint64_t keep,
+                            uint64_t omit, size_t *got) {
+  static const uint8_t http[] = "HTTP/1.1 ";
+  static const uint8_t spc[] = " ";
+  static const uint8_t crlf[] = "\r\n";
+  static const uint8_t date_name[] = "Date: ";
+  static const uint8_t cl_name[] = "Content-Length: ";
+  muro__slice code = httpCode(status);
+  muro__slice conn = httpConn(keep);
+  uint8_t code_buf[24];
+  uint8_t cl_buf[20];
+  size_t cl_n;
+  size_t total;
+  size_t o = 0;
+  size_t body_n;
+  uint64_t nlen;
+  if (code.n == 0 || !code.p || code.n > sizeof code_buf || conn.n == 0 || !conn.p) {
+    return copy_out(dst, cap, httpRender(status, reason, date, extra, body, keep, omit), got);
+  }
+  memcpy(code_buf, code.p, code.n);
+  nlen = (uint64_t)body.n;
+  cl_n = 0;
+  do {
+    if (cl_n == sizeof cl_buf) {
+      return copy_out(dst, cap, httpRender(status, reason, date, extra, body, keep, omit), got);
+    }
+    cl_buf[cl_n++] = (uint8_t)('0' + (unsigned)(nlen % 10u));
+    nlen /= 10u;
+  } while (nlen > 0);
+  body_n = omit == 1 ? 0 : body.n;
+  /* A wrapping sum is not a length. The book's concat aborts on it,
+     so refuse instead of copying a short total past dst. */
+  total = 0;
+  if (!size_add(&total, sizeof http - 1) || !size_add(&total, code.n) ||
+      !size_add(&total, sizeof spc - 1) || !size_add(&total, reason.n) ||
+      !size_add(&total, sizeof crlf - 1) || !size_add(&total, sizeof date_name - 1) ||
+      !size_add(&total, date.n) || !size_add(&total, sizeof crlf - 1) ||
+      !size_add(&total, conn.n) || !size_add(&total, sizeof cl_name - 1) ||
+      !size_add(&total, cl_n) || !size_add(&total, sizeof crlf - 1) ||
+      !size_add(&total, extra.n) || !size_add(&total, sizeof crlf - 1) ||
+      !size_add(&total, body_n)) {
+    if (got) *got = 0;
+    muro_http_reset();
+    return 0;
+  }
+  if (got) *got = total;
+  if (!dst || total == 0 || total > cap) {
+    muro_http_reset();
+    return 0;
+  }
+  if (!put_bytes(dst, cap, &o, http, sizeof http - 1) ||
+      !put_bytes(dst, cap, &o, code_buf, code.n) ||
+      !put_bytes(dst, cap, &o, spc, sizeof spc - 1) ||
+      !put_bytes(dst, cap, &o, reason.p, reason.n) ||
+      !put_bytes(dst, cap, &o, crlf, sizeof crlf - 1) ||
+      !put_bytes(dst, cap, &o, date_name, sizeof date_name - 1) ||
+      !put_bytes(dst, cap, &o, date.p, date.n) ||
+      !put_bytes(dst, cap, &o, crlf, sizeof crlf - 1) ||
+      !put_bytes(dst, cap, &o, conn.p, conn.n) ||
+      !put_bytes(dst, cap, &o, cl_name, sizeof cl_name - 1)) {
+    muro_http_reset();
+    if (got) *got = 0;
+    return 0;
+  }
+  while (cl_n > 0) {
+    if (o >= cap) {
+      muro_http_reset();
+      if (got) *got = 0;
+      return 0;
+    }
+    dst[o++] = cl_buf[--cl_n];
+  }
+  if (!put_bytes(dst, cap, &o, crlf, sizeof crlf - 1) ||
+      !put_bytes(dst, cap, &o, extra.p, extra.n) ||
+      !put_bytes(dst, cap, &o, crlf, sizeof crlf - 1) ||
+      (body_n != 0 && !put_bytes(dst, cap, &o, body.p, body_n))) {
+    muro_http_reset();
+    if (got) *got = 0;
+    return 0;
+  }
+  if (o != total) {
+    muro_http_reset();
+    if (got) *got = 0;
+    return 0;
+  }
+  muro_http_reset();
+  return total;
+}
+
 static size_t copy_out(uint8_t *dst, size_t cap, muro__slice msg, size_t *got) {
   size_t n = 0;
   if (got) *got = msg.n;
@@ -125,7 +267,6 @@ size_t host_copy_response(uint8_t *dst, size_t cap, uint64_t status, const uint8
                           uint64_t omit, size_t *got) {
   uint8_t *filtered = NULL;
   size_t filtered_n = 0;
-  muro__slice msg;
   size_t n;
   if (bytes_have(reason, reason_n, '\r', '\n') ||
       filter_extra(extra, extra_n, &filtered, &filtered_n) < 0) {
@@ -133,10 +274,9 @@ size_t host_copy_response(uint8_t *dst, size_t cap, uint64_t status, const uint8
     muro_http_reset();
     return 0;
   }
-  msg = httpRender(status, as_slice(reason, reason_n), as_slice(date, date_n),
-                   as_slice(filtered, filtered_n), as_slice(body, body_n), keep, omit);
-  n = copy_out(dst, cap, msg, got);
-  free(filtered);
+  n = render_direct(dst, cap, status, as_slice(reason, reason_n), as_slice(date, date_n),
+                    as_slice(filtered, filtered_n), as_slice(body, body_n), keep, omit, got);
+  if (filtered != extra) free(filtered);
   return n;
 }
 
@@ -210,7 +350,7 @@ size_t host_copy_head(uint8_t *dst, size_t cap, uint64_t status, const uint8_t *
   msg = httpHead(status, as_slice(reason, reason_n), as_slice(date, date_n), as_slice(filtered, filtered_n),
                  nlen, keep);
   n = copy_out(dst, cap, msg, got);
-  free(filtered);
+  if (filtered != extra) free(filtered);
   return n;
 }
 
@@ -228,7 +368,7 @@ size_t host_copy_chunked(uint8_t *dst, size_t cap, uint64_t status, const uint8_
   msg = httpChunked(status, as_slice(reason, reason_n), as_slice(date, date_n),
                     as_slice(filtered, filtered_n), keep);
   n = copy_out(dst, cap, msg, got);
-  free(filtered);
+  if (filtered != extra) free(filtered);
   return n;
 }
 
@@ -245,7 +385,7 @@ size_t host_copy_delim(uint8_t *dst, size_t cap, uint64_t status, const uint8_t 
   }
   msg = httpDelim(status, as_slice(reason, reason_n), as_slice(date, date_n), as_slice(filtered, filtered_n));
   n = copy_out(dst, cap, msg, got);
-  free(filtered);
+  if (filtered != extra) free(filtered);
   return n;
 }
 
