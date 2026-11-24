@@ -67,6 +67,13 @@ typedef struct BookStep {
   int idle_ms;
   uint8_t spare[512];
   size_t spare_len;
+  /* 100 Continue, the same bytes c/step.c keeps in HttpStep.cont.
+     The book decides when the interim is owed. This buffer only
+     renders that literal. */
+  int sent_100;
+  uint8_t cont[160];
+  size_t cont_len;
+  size_t cont_off;
 } BookStep;
 
 void muro_book_bind(BookStep *st, uint8_t *in, size_t in_cap, uint8_t *out, size_t out_cap,

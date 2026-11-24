@@ -94,7 +94,7 @@ static void image_of(BookStep *b, uint64_t phase, int status_now) {
   if (phase == 5) b->image = MURO_STEP_PH_DECIDE;
   else if (phase == 2 && status_now) b->image = MURO_STEP_PH_READ;
   else if (phase == 2) b->image = MURO_STEP_PH_CLOSED;
-  else if (phase == 0) b->image = MURO_STEP_PH_READ;
+  else if (phase == 0 || phase == 7) b->image = MURO_STEP_PH_READ;
   else if (phase == 4) b->image = MURO_STEP_PH_IDLE;
   else if (phase == 1 || phase == 3) b->image = MURO_STEP_PH_WRITE;
   else b->image = MURO_STEP_PH_CLOSED;
@@ -133,14 +133,55 @@ static int render_literal(BookStep *b, const StepIn *in, int into_spare, uint64_
   return 0;
 }
 
-/* Same place as c/step.c prepare_in: reset, then capture the bytes
-   after a streamed header block. A complete buffered body leaves
-   streamTake at 0, so capture copies nothing. */
-static void prepare_in(BookStep *b) {
-  if (!b->hin) return;
-  if (b->bphase != 0 && b->bphase != 4) return;
-  host_in_reset(b->hin);
-  if (b->in && b->in_len) host_in_capture(b->hin, b->in, b->in_len);
+/* Same place as c/step.c prepare_in: reset when the image is still
+   reading or idle, then capture the bytes after a streamed header
+   block. A complete buffered body leaves streamTake at 0, so capture
+   copies nothing. empty_before clears a pending 100, and the book
+   then classifies this buffer as a fresh read. */
+static void prepare_in(BookStep *b, const StepIn *in) {
+  int phase = b->img_phase;
+  if (phase != MURO_STEP_PH_READ && phase != MURO_STEP_PH_IDLE) return;
+  if (b->hin) host_in_reset(b->hin);
+  if (in && in->empty_before && (b->bphase == 6 || b->bphase == 7 || b->bphase == 8)) {
+    b->sent_100 = 0;
+    b->cont_len = 0;
+    b->cont_off = 0;
+    b->bphase = 0;
+    b->bcode = 0;
+    b->bleft = 0;
+    b->bkeep = 0;
+  }
+  if (b->hin && b->in && b->in_len) host_in_capture(b->hin, b->in, b->in_len);
+}
+
+/* 0 when out holds the interim. -1 when the literal does not fit.
+   left 0 is the full span. A positive left is the unwritten tail.
+   The image stays wherever admit left it: the 100 is not a reply. */
+static int park_cont(BookStep *b, const StepIn *in, StepOut *out, uint64_t left, uint64_t wake) {
+  if (b->cont_len == 0) {
+    char date[30];
+    size_t nlen;
+    copy_date(in, date);
+    nlen = host_copy_literal(b->cont, sizeof b->cont, 5, (const uint8_t *)date, 29, 0, NULL);
+    if (nlen == 0 || nlen > sizeof b->cont) return -1;
+    b->cont_len = nlen;
+    b->cont_off = 0;
+  }
+  if (left > 0 && left <= (uint64_t)b->cont_len) b->cont_off = b->cont_len - (size_t)left;
+  else b->cont_off = 0;
+  if (b->cont_off > b->cont_len) return -1;
+  out->bytes = b->cont + b->cont_off;
+  out->len = b->cont_len - b->cont_off;
+  out->interim = b->cont_off == 0;
+  out->cont = 1;
+  out->read_more = 0;
+  out->write_more = 1;
+  out->close_conn = 0;
+  out->status_now = 0;
+  out->wake_at = wake;
+  b->sent_100 = 0;
+  b->image = b->img_phase;
+  return 0;
 }
 
 static void clear_pull(BookStep *b) {
@@ -635,7 +676,7 @@ int muro_book_step(BookStep *st, const StepIn *in, StepOut *out) {
   prev_left = st->bleft;
   prev_keep = st->bkeep;
   if ((in->kind == MURO_STEP_BYTES || in->kind == MURO_STEP_PEER_CLOSED) && !st->shut)
-    prepare_in(st);
+    prepare_in(st, in);
   /* Progress is take_fact, before the pump fills another pull span.
      A refused progress is -1 and does not move the image. */
   if (in->kind == MURO_STEP_WROTE && (prev_phase == 1 || prev_phase == 3)) {
@@ -671,6 +712,12 @@ int muro_book_step(BookStep *st, const StepIn *in, StepOut *out) {
     }
   }
   sl = muro__slice_of(st->in ? st->in : (const uint8_t *)"", st->in_len);
+  /* The 100 is not in the response buffer, so the out-buffer owed
+     is 0 and every wrote would finish it. The remaining interim
+     bytes are the base. prepare_in has already cleared them when
+     empty_before rewinds phase 6, 7, or 8 to a fresh read. */
+  if ((st->bphase == 6 || st->bphase == 8) && st->cont_len > st->cont_off)
+    owed = (uint64_t)(st->cont_len - st->cont_off);
   muro_http_reset();
   bk = http_step_stepFact(book_st(st), (uint64_t)in->kind, sl, st->max_body, (uint64_t)in->n, owed,
                           in->now_ms, in->deadline, (uint64_t)st->idle_ms);
@@ -744,13 +791,22 @@ int muro_book_step(BookStep *st, const StepIn *in, StepOut *out) {
       }
     }
   }
+  /* Span 6 is the interim. Admit already moved the image. Do not
+     map book phase 6 onto that image, and do not admit a reply. */
+  if (span == 6) {
+    if (park_cont(st, in, out, left, wake) < 0) return closed_out(st, out, MURO_STEP_NOTE_TOO_BIG, 0);
+    return 0;
+  }
+  st->cont_len = 0;
+  st->cont_off = 0;
+  if (phase == 7) st->sent_100 = 1;
   image_of(st, phase, status_b == 1);
   out->wake_at = wake;
   out->close_conn = close_b ? 1 : 0;
   out->status_now = status_b ? 1 : 0;
   interests(st, out, rd ? 1 : 0, wr ? 1 : 0);
   if (close_b || status_b) st->shut = 1;
-  if (phase == 0 || phase == 4) {
+  if (phase == 0 || phase == 4 || phase == 7) {
     clear_pull(st);
     st->rendered = 0;
     st->owe = 0;
@@ -862,6 +918,12 @@ static void load_http(BookStep *b, HttpStep *st) {
   b->spare_len = st->spare_len;
   if (st->spare_len > sizeof b->spare) b->spare_len = sizeof b->spare;
   if (b->spare_len) memcpy(b->spare, st->spare, b->spare_len);
+  b->sent_100 = st->sent_100;
+  b->cont_len = st->cont_len;
+  b->cont_off = st->cont_off;
+  if (b->cont_len > sizeof b->cont) b->cont_len = sizeof b->cont;
+  if (b->cont_off > b->cont_len) b->cont_off = b->cont_len;
+  if (b->cont_len) memcpy(b->cont, st->cont, b->cont_len);
 }
 
 static void store_http(HttpStep *st, const BookStep *b, StepOut *out) {
@@ -889,9 +951,18 @@ static void store_http(HttpStep *st, const BookStep *b, StepOut *out) {
   st->st.muro__as.conn.muro__f_3 = b->bleft;
   st->st.muro__as.conn.muro__f_4 = b->bkeep;
   if (b->spare_len && b->spare_len <= sizeof st->spare) memcpy(st->spare, b->spare, b->spare_len);
+  st->sent_100 = b->sent_100;
+  st->cont_len = b->cont_len;
+  st->cont_off = b->cont_off;
+  if (st->cont_len > sizeof st->cont) st->cont_len = sizeof st->cont;
+  if (st->cont_len) memcpy(st->cont, b->cont, st->cont_len);
   if (out && out->status && b->spare_len && out->status >= b->spare &&
       out->status < b->spare + sizeof b->spare) {
     out->status = st->spare + (size_t)(out->status - b->spare);
+  }
+  if (out && out->bytes && b->cont_len && out->bytes >= b->cont &&
+      out->bytes < b->cont + sizeof b->cont) {
+    out->bytes = st->cont + (size_t)(out->bytes - b->cont);
   }
 }
 

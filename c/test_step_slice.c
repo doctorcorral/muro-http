@@ -5,9 +5,11 @@
 
    A finished request is a handler span in the book (book phase 3)
    and a rendered response in the host. Those bytes must lie in the
-   caller send buffer. The status text is not compared field for
-   field. Book phases are not image phases: book 0 read, 1 protocol
-   write, 2 closed, 3 handler write, 4 idle; image 0 read, 1 handle,
+   caller send buffer, or in the interim buffer when the span is
+   the 100. The status text is not compared field for field. Book
+   phases are not image phases: book 0 read, 1 protocol write, 2
+   closed, 3 handler write, 4 idle, 6 interim, 7 read after the
+   interim, 8 interim after a peer close; image 0 read, 1 handle,
    2 write, 3 idle, 4 closed.
 
    Clocks are the adapter's. idle_ms is the value passed to bind.
@@ -16,11 +18,14 @@
    A write parks with wake 0. NOW from read or idle closes. The book
    does not compare the two clocks.
 
-   cover 1 is outside the slice: 100 Continue, a streamed body whose
+   cover 1 is outside the slice: a streamed body whose
    Content-Length is within max while the peer is still open, accept
    during a write, and accept while idle. Chunked bodies are in the
    slice: a short tail reads again, a finished body is a handler
-   span, a bad size is 400, and a size past max is 413. Bytes during
+   span, a bad size is 400, and a size past max is 413. 100 Continue
+   is in the slice. Book phase 6 owes the interim (span 6). Phase 8
+   is that interim after the peer has closed. Phase 7 is the read
+   after the interim was sent. Bytes during
    a write park the same span. A wrote or a failure while the book
    is reading or idle stays there. A finished request on a peer
    close is in the slice: a handler span with keep 1, and that fresh
@@ -107,6 +112,18 @@ static const char *CHUNK_BARE =
     "POST / HTTP/1.1\r\nHost: h\r\nTransfer-Encoding: chunked\r\n\r\n0\r\nNope\r\n\r\n";
 static const char *CONT =
     "POST / HTTP/1.1\r\nHost: h\r\nExpect: 100-continue\r\nContent-Length: 4\r\n\r\n";
+static const char *CONT_FULL =
+    "POST / HTTP/1.1\r\nHost: h\r\nExpect: 100-continue\r\nContent-Length: 4\r\n\r\nping";
+static const char *CONT_10 =
+    "POST / HTTP/1.0\r\nContent-Length: 4\r\nExpect: 100-continue\r\n\r\n";
+static const char *CONT_HEAD =
+    "HEAD / HTTP/1.1\r\nHost: h\r\nExpect: 100-continue\r\nContent-Length: 4\r\n\r\n";
+static const char *CONT_BIG =
+    "POST / HTTP/1.1\r\nHost: h\r\nExpect: 100-continue\r\nContent-Length: 100\r\n\r\n";
+static const char *CONT_CHUNK =
+    "POST / HTTP/1.1\r\nHost: h\r\nTransfer-Encoding: chunked\r\nExpect: 100-continue\r\n\r\n";
+static const char *CONT_CHUNK_DONE =
+    "POST / HTTP/1.1\r\nHost: h\r\nTransfer-Encoding: chunked\r\nExpect: 100-continue\r\n\r\n0\r\n\r\n";
 static const char *HEAD = "HEAD / HTTP/1.1\r\nHost: h\r\n\r\n";
 static const char *CLOSE = "GET / HTTP/1.1\r\nHost: h\r\nConnection: close\r\n\r\n";
 static const char *HTTP10 = "GET / HTTP/1.0\r\n\r\n";
@@ -350,8 +367,6 @@ static int conn_is(const uint8_t *p, size_t n, uint64_t keep) {
    is no bare-write reason. */
 enum {
   OUT_NO = 0,
-  OUT_CHUNK = 1,
-  OUT_CONT = 2,
   OUT_STREAM = 3,
   OUT_WRITE_FACT = 4,
   OUT_IDLE_ACCEPT = 5
@@ -359,8 +374,6 @@ enum {
 
 static int named_out(const char *name) {
   if (!name) return OUT_NO;
-  if (strcmp(name, "chunk") == 0) return OUT_CHUNK;
-  if (strcmp(name, "continue") == 0) return OUT_CONT;
   if (strcmp(name, "stream-outside") == 0) return OUT_STREAM;
   if (strcmp(name, "write-accept-outside") == 0) return OUT_WRITE_FACT;
   if (strcmp(name, "idle-accept") == 0) return OUT_IDLE_ACCEPT;
@@ -382,11 +395,10 @@ static uint64_t st_phase(http_step_St st) { return st.muro__as.st.muro__f_0; }
 static int outside_reason(int fact, muro__slice sl, uint64_t max, int book_phase) {
   uint64_t pol;
   int stag;
-  int chunk;
   int stream;
-  int done;
   int fin;
-  if (book_phase == 2) return OUT_NO;
+  /* Phases 6, 7, and 8 are the interim. They are in the slice. */
+  if (book_phase == 2 || book_phase == 6 || book_phase == 7 || book_phase == 8) return OUT_NO;
   if (book_phase == 1 || book_phase == 3) {
     if (fact == MURO_STEP_ACCEPTED) return OUT_WRITE_FACT;
     return OUT_NO;
@@ -397,22 +409,9 @@ static int outside_reason(int fact, muro__slice sl, uint64_t max, int book_phase
   if (fin && sl.n == 0) return OUT_NO;
   muro_http_reset();
   pol = http_step_policy(sl, max);
-  chunk = flag_true(http_step_chunked(sl));
   stream = flag_true(http_step_streamed(sl));
-  done = flag_true(http_step_headersDone(sl));
   stag = http_step_statusOf(sl)->muro__field_tag;
-  if (stag == http_step_muro__tag_Status_statuszdok) {
-    if (fin) {
-      /* Policy 0 is a handler span with keep 1. That is in the slice. */
-      if (pol == 9) return chunk ? OUT_CHUNK : OUT_CONT;
-      return OUT_NO;
-    }
-    if (pol == 0 && stream) return OUT_STREAM;
-    if (pol == 9) return chunk ? OUT_CHUNK : OUT_CONT;
-    return OUT_NO;
-  }
-  if (stag == http_step_muro__tag_Status_statuszdneedzdmore && !fin && done && pol == 9)
-    return chunk ? OUT_CHUNK : OUT_CONT;
+  if (stag == http_step_muro__tag_Status_statuszdok && !fin && pol == 0 && stream) return OUT_STREAM;
   return OUT_NO;
 }
 
@@ -434,20 +433,7 @@ static int host_read_park(const StepOut *o, const Box *b, int phase, uint64_t wa
    shape. These checks are the host's own answer. */
 static int host_outside(int why, const StepOut *o, const Box *b, int prev_phase, int fact,
                         uint64_t owed, uint64_t now, uint64_t dl, const char *name) {
-  uint64_t wake = armed(now, dl, (uint64_t)b->st.idle_ms);
-  if (why == OUT_CHUNK) {
-    return host_read_park(o, b, MURO_STEP_PH_READ, wake, name);
-  }
-  if (why == OUT_CONT) {
-    if (phase_is(b, MURO_STEP_PH_READ, name) < 0) return -1;
-    if (o->close_conn || o->status_now || o->read_more || !o->write_more || !o->cont || !o->interim)
-      return fail(name);
-    if (!o->bytes || !o->len || !in_range(o->bytes, o->len, b->st.cont, sizeof b->st.cont))
-      return fail(name);
-    if (!status_token(o->bytes, o->len, 100)) return fail(name);
-    if (o->wake_at != wake) return fail(name);
-    return 0;
-  }
+  (void)dl;
   if (why == OUT_STREAM) {
     if (phase_is(b, MURO_STEP_PH_WRITE, name) < 0) return -1;
     if (o->close_conn || o->status_now || o->read_more || !o->write_more || o->interim || o->cont)
@@ -606,6 +592,22 @@ static int same_span(const StepOut *h, const uint8_t *hb, const StepOut *a, cons
   return memcmp(h->bytes, a->bytes, h->len) == 0;
 }
 
+/* A response span lives in the send buffer. The 100 lives in cont.
+   Offsets are compared inside one of those regions, not across them. */
+static int same_out_bytes(const StepOut *h, const Box *b, const StepOut *a) {
+  int hlive = h->bytes && h->len;
+  int alive = a->bytes && a->len;
+  if (!hlive && !alive) return 1;
+  if (in_range(h->bytes, h->len, b->outb, OUT_CAP) && in_range(a->bytes, a->len, b->bout, OUT_CAP) &&
+      same_span(h, b->outb, a, b->bout))
+    return 1;
+  if (in_range(h->bytes, h->len, b->st.cont, sizeof b->st.cont) &&
+      in_range(a->bytes, a->len, b->bk.cont, sizeof b->bk.cont) &&
+      same_span(h, b->st.cont, a, b->bk.cont))
+    return 1;
+  return 0;
+}
+
 static int same_status(const StepOut *h, const StepOut *a) {
   int hlive = h->status && h->status_len;
   int alive = a->status && a->status_len;
@@ -691,7 +693,7 @@ static int host_and_book(HttpStep *st, const StepIn *in, StepOut *out) {
       out->read_more != bo.read_more || out->write_more != bo.write_more ||
       out->close_conn != bo.close_conn || out->status_now != bo.status_now ||
       out->interim != bo.interim || out->cont != bo.cont || out->wake_at != bo.wake_at ||
-      out->note != bo.note || out->note2 != bo.note2 || !same_span(out, b->outb, &bo, b->bout) ||
+      out->note != bo.note || out->note2 != bo.note2 || !same_out_bytes(out, b, &bo) ||
       !same_status(out, &bo)) {
     fprintf(stderr,
             "book adapter fact %d phase host %d book %d in %zu/%zu close %d/%d read %d/%d "
@@ -1226,6 +1228,16 @@ static int cap_span(int which, const char *name) {
   return 0;
 }
 
+/* prepare_in drops a pending interim when the recv buffer was empty.
+   step_both always sets that flag. The book has no such input, so
+   this call rewinds phase 6, 7, or 8 to a fresh read before stepFact.
+   A kept interim is a handwritten empty_before of 0. */
+static http_step_St interim_cleared(http_step_St st) {
+  uint64_t ph = st_phase(st);
+  if (ph == 6 || ph == 7 || ph == 8) return http_step_readSt();
+  return st;
+}
+
 /* Install buf when the fact carries bytes. Otherwise the book sees
    the host buffer as it stands before this call: the unconsumed
    slice. finishWrite drops one framed prefix from that slice.
@@ -1235,6 +1247,7 @@ static int cap_span(int which, const char *name) {
 static int step_both(Box *b, http_step_St *st, int fact, const char *buf, uint64_t wrote_n,
                      uint64_t owed, StepOut *o, http_step_Out *bk, const char *name) {
   muro__slice sl;
+  http_step_St use = *st;
   if (fact == MURO_STEP_BYTES || fact == MURO_STEP_PEER_CLOSED) {
     size_t n = buf ? strlen(buf) : 0;
     if (n > IN_CAP) return fail(name);
@@ -1245,8 +1258,11 @@ static int step_both(Box *b, http_step_St *st, int fact, const char *buf, uint64
     sl = sl_mem(b->inb, muro_http_step_in_len(&b->st));
   }
   set_fact(b, fact, (size_t)wrote_n);
-  if (fact == MURO_STEP_BYTES || fact == MURO_STEP_PEER_CLOSED) b->in.empty_before = 1;
-  *bk = book_at(*st, fact, sl, b->st.max_body, wrote_n, owed, b->in.now_ms, b->in.deadline,
+  if (fact == MURO_STEP_BYTES || fact == MURO_STEP_PEER_CLOSED) {
+    b->in.empty_before = 1;
+    use = interim_cleared(*st);
+  }
+  *bk = book_at(use, fact, sl, b->st.max_body, wrote_n, owed, b->in.now_ms, b->in.deadline,
                 b->st.idle_ms);
   memset(o, 0, sizeof *o);
   if (muro_http_step(&b->st, &b->in, o) < 0) {
@@ -1957,7 +1973,6 @@ static int match_covered(const StepOut *o, http_step_Out bk, const Box *b, int f
   int img;
   uint64_t tok;
   if (bo_cover(bk) == 1) return 0;
-  if (o->interim || o->cont) return fail(name);
   if ((uint64_t)o->close_conn != bo_close(bk) || (uint64_t)o->status_now != bo_status(bk) ||
       (uint64_t)o->read_more != bo_read(bk) || (uint64_t)o->write_more != bo_write(bk) ||
       o->wake_at != bo_wake(bk)) {
@@ -1966,6 +1981,29 @@ static int match_covered(const StepOut *o, http_step_Out bk, const Box *b, int f
     dump_book(name, bk);
     return -1;
   }
+  /* span 6 is the interim. The bytes live in cont, not the send
+     buffer. left 0 is the full literal. A positive left is the tail. */
+  if (bo_span(bk) == 6) {
+    img = muro_http_step_phase(&b->st);
+    if (bo_write(bk) != 1 || bo_read(bk) != 0 || bo_status(bk) != 0 || bo_close(bk) != 0)
+      return fail(name);
+    if (!o->cont || !o->bytes || !o->len) return fail(name);
+    if (!in_range(o->bytes, o->len, b->st.cont, sizeof b->st.cont)) return fail(name);
+    if (o->interim != (o->bytes == b->st.cont)) return fail(name);
+    if (o->bytes == b->st.cont && !status_token(o->bytes, o->len, 100)) return fail(name);
+    if (bo_left(bk) == 0) {
+      if (o->bytes != b->st.cont) return fail(name);
+    } else if (o->len != bo_left(bk)) {
+      fprintf(stderr, "%s: interim len %zu book left %llu\n", name, o->len,
+              (unsigned long long)bo_left(bk));
+      return -1;
+    }
+    if (bo_phase(bk) == 6 && img != MURO_STEP_PH_READ) return fail(name);
+    if (bo_phase(bk) == 8 && img != MURO_STEP_PH_WRITE) return fail(name);
+    if (bo_phase(bk) != 6 && bo_phase(bk) != 8) return fail(name);
+    return 0;
+  }
+  if (o->interim || o->cont) return fail(name);
   /* span 2 is the write, span 1 is status_now, span 0 is neither. */
   if (bo_span(bk) == 2 && bo_write(bk) != 1) return fail(name);
   if (bo_span(bk) == 1 && bo_status(bk) != 1) return fail(name);
@@ -2033,6 +2071,7 @@ static int match_covered(const StepOut *o, http_step_Out bk, const Box *b, int f
       img != MURO_STEP_PH_READ)
     return fail(name);
   if (bo_phase(bk) == 2 && bo_status(bk) == 1 && img != MURO_STEP_PH_READ) return fail(name);
+  if (bo_phase(bk) == 7 && img != MURO_STEP_PH_READ) return fail(name);
   return 0;
 }
 
@@ -2111,9 +2150,10 @@ static int sweep(void) {
   /* Empty, a partial line, a GET, a malformed request, Connection:
      close, two pipelined GETs, a streamed body (Content-Length past
      16384, so at max 10 the shape is the owed 413), chunked headers,
-     one finished chunk, a bad size, and a size past max. Depth 3 is
-     5^3 * 11. Then 256 sequences, depth 4, xorshift32 seed 0xC0FFEE. */
-  const char *bufs[11];
+     one finished chunk, a bad size, a size past max, and Expect:
+     100-continue with the body still short. Depth 3 is 5^3 * 12.
+     Then 256 sequences, depth 4, xorshift32 seed 0xC0FFEE. */
+  const char *bufs[12];
   int a, c, d, e;
   int seq[4];
   uint32_t xs = 0xC0FFEEu;
@@ -2129,7 +2169,8 @@ static int sweep(void) {
   bufs[8] = CHUNK_ONE;
   bufs[9] = CHUNK_BAD;
   bufs[10] = CHUNK_TOO;
-  for (e = 0; e < 11; e++) {
+  bufs[11] = CONT;
+  for (e = 0; e < 12; e++) {
     for (a = 0; a < 5; a++) {
       for (c = 0; c < 5; c++) {
         for (d = 0; d < 5; d++) {
@@ -2152,7 +2193,7 @@ static int sweep(void) {
     xs ^= xs << 13;
     xs ^= xs >> 17;
     xs ^= xs << 5;
-    if (run_seq(bufs[xs % 11], seq, 4, 10) < 0) return -1;
+    if (run_seq(bufs[xs % 12], seq, 4, 10) < 0) return -1;
   }
   return 0;
 }
@@ -2726,16 +2767,15 @@ static int cover_stays_shut(void) {
   int rd = 1;
   int wr = 1;
   size_t n;
-  /* Chunked headers are in the slice. 100-continue is still cover. */
-  n = strlen(CONT);
-  if (n >= sizeof ibuf) return fail("cover-shut");
-  memcpy(ibuf, CONT, n);
+  /* An unknown fact is outside the slice. The book fails closed.
+     Chunked bodies and 100-continue are in the slice. */
+  n = 0;
   memset(&b, 0, sizeof b);
   host_in_init(&hin, -1, 10);
   muro_book_bind(&b, ibuf, sizeof ibuf, obuf, sizeof obuf, &hin, &rd, &wr, on_req, NULL, 10, 60000);
   muro_book_set_in_len(&b, n);
   memset(&in, 0, sizeof in);
-  in.kind = MURO_STEP_BYTES;
+  in.kind = 0;
   in.now_ms = 1000;
   in.date = (const uint8_t *)DATE;
   in.date_n = 29;
@@ -3000,6 +3040,258 @@ static int chunk_cases(void) {
   return 0;
 }
 
+static int check_interim(const StepOut *o, http_step_Out bk, const Box *b, uint64_t phase,
+                         uint64_t left, int interim, uint64_t wake, int image, const char *name) {
+  if (book_is(bk, phase, 100, 0, 0, 0, 1, 6, 0, left, wake, 0, name) < 0) return -1;
+  if (o->close_conn || o->status_now || o->read_more || !o->write_more || !o->cont) return fail(name);
+  if ((int)o->interim != interim) {
+    fprintf(stderr, "%s: interim %d want %d len %zu\n", name, o->interim, interim, o->len);
+    return -1;
+  }
+  if (!o->bytes || !o->len || !in_range(o->bytes, o->len, b->st.cont, sizeof b->st.cont))
+    return fail(name);
+  /* A short write points into the middle of the literal. The status
+     token is only at the first byte. */
+  if (o->bytes == b->st.cont && !status_token(o->bytes, o->len, 100)) return fail(name);
+  if (left == 0) {
+    if (o->bytes != b->st.cont) return fail(name);
+  } else if (o->len != left) {
+    fprintf(stderr, "%s: interim len %zu left %llu\n", name, o->len, (unsigned long long)left);
+    return -1;
+  }
+  if (wake_is(o, wake, name) < 0) return -1;
+  if (phase_is(b, image, name) < 0) return -1;
+  if (count_shape) scripted += 1;
+  return 0;
+}
+
+static int check_sent(const StepOut *o, http_step_Out bk, const Box *b, uint64_t wake,
+                      const char *name) {
+  if (book_is(bk, 7, 0, 0, 0, 1, 0, 0, 0, 0, wake, 0, name) < 0) return -1;
+  if (host_flags(o, 0, 0, 1, 0, name) < 0) return -1;
+  if ((o->bytes && o->len) || (o->status && o->status_len)) return fail(name);
+  if (wake_is(o, wake, name) < 0) return -1;
+  if (phase_is(b, MURO_STEP_PH_READ, name) < 0) return -1;
+  if (count_shape) scripted += 1;
+  return 0;
+}
+
+/* empty_before stays as given. step_both forces 1 and would drop a
+   pending interim. The book state is the one from the previous step. */
+static int feed_kept(Box *b, http_step_St *st, int fact, const char *buf, int empty, StepOut *o,
+                     http_step_Out *bk, const char *name) {
+  size_t n = buf ? strlen(buf) : 0;
+  if (n > IN_CAP) return fail(name);
+  if (n) memcpy(b->inb, buf, n);
+  muro_http_step_set_in_len(&b->st, n);
+  set_fact(b, fact, 0);
+  b->in.empty_before = empty;
+  *bk = book_at(*st, fact, sl_of(buf), b->st.max_body, 0, 0, b->in.now_ms, b->in.deadline,
+                b->st.idle_ms);
+  memset(o, 0, sizeof *o);
+  if (muro_http_step(&b->st, &b->in, o) < 0) {
+    fprintf(stderr, "%s: host step failed\n", name);
+    return -1;
+  }
+  return 0;
+}
+
+static int cont_open(const char *buf, uint64_t max_body, const char *name) {
+  Box b;
+  StepOut o;
+  http_step_Out bk;
+  http_step_St st;
+  uint64_t wake = armed(1000, 0, 60000);
+  if (open_acc(&b, max_body, 1000, 0) < 0) return -1;
+  st = http_step_readSt();
+  if (step_both(&b, &st, MURO_STEP_BYTES, buf, 0, 0, &o, &bk, name) < 0 ||
+      check_interim(&o, bk, &b, 6, 0, 1, wake, MURO_STEP_PH_READ, name) < 0) {
+    box_free(&b);
+    return -1;
+  }
+  box_free(&b);
+  return 0;
+}
+
+static int park_cont_case(Box *b, http_step_St *st, const char *buf, StepOut *seen, const char *name) {
+  StepOut o;
+  http_step_Out bk;
+  uint64_t wake = armed(1000, 0, 60000);
+  if (step_both(b, st, MURO_STEP_BYTES, buf, 0, 0, &o, &bk, name) < 0 ||
+      check_interim(&o, bk, b, 6, 0, 1, wake, MURO_STEP_PH_READ, name) < 0)
+    return -1;
+  *seen = o;
+  *st = http_step_take(bk);
+  return 0;
+}
+
+/* 100 Continue. The interim is owed only while the body is short.
+   A body already buffered, HTTP/1.0, HEAD, and a 413 do not owe it.
+   The final response follows the interim. A tick drops it. */
+static int cont_cases(void) {
+  Box b;
+  StepOut seen;
+  StepOut o;
+  http_step_Out bk;
+  http_step_St st;
+  uint64_t wake = armed(1000, 0, 60000);
+  if (decide(DEC_REPLY, MURO_STEP_BYTES, CONT_FULL, 10, 0, NULL, 0, 0, 0, "cont-have", NULL, NULL,
+             NULL) < 0)
+    return -1;
+  if (decide(DEC_MORE, MURO_STEP_BYTES, CONT_10, 10, 0, NULL, 0, wake, 0, "cont-10", NULL, NULL,
+             NULL) < 0)
+    return -1;
+  if (decide(DEC_MORE, MURO_STEP_BYTES, CONT_HEAD, 10, 0, NULL, 0, wake, 0, "cont-head", NULL, NULL,
+             NULL) < 0)
+    return -1;
+  if (decide(DEC_STATUS, MURO_STEP_BYTES, CONT_BIG, 10, 413, "too large", 0, 0, 0, "cont-413", NULL,
+             NULL, NULL) < 0)
+    return -1;
+  if (decide(DEC_REPLY, MURO_STEP_BYTES, CONT_CHUNK_DONE, 10, 0, NULL, 0, 0, 0, "cont-chunk-done",
+             NULL, NULL, NULL) < 0)
+    return -1;
+  if (cont_open(CONT_CHUNK, 10, "cont-chunk") < 0) return -1;
+
+  if (open_acc(&b, 10, 1000, 0) < 0) return -1;
+  st = http_step_readSt();
+  if (park_cont_case(&b, &st, CONT, &seen, "cont-owed") < 0) {
+    box_free(&b);
+    return -1;
+  }
+  if (step_both(&b, &st, MURO_STEP_WROTE, NULL, (uint64_t)seen.len, (uint64_t)seen.len, &o, &bk,
+                "cont-wrote") < 0 ||
+      check_sent(&o, bk, &b, wake, "cont-wrote") < 0) {
+    box_free(&b);
+    return -1;
+  }
+  st = http_step_take(bk);
+  if (feed_kept(&b, &st, MURO_STEP_BYTES, CONT, 0, &o, &bk, "cont-hold") < 0 ||
+      check_sent(&o, bk, &b, wake, "cont-hold") < 0) {
+    box_free(&b);
+    return -1;
+  }
+  box_free(&b);
+
+  if (open_acc(&b, 10, 1000, 0) < 0) return -1;
+  st = http_step_readSt();
+  if (park_cont_case(&b, &st, CONT, &seen, "cont-again-owed") < 0 ||
+      step_both(&b, &st, MURO_STEP_WROTE, NULL, (uint64_t)seen.len, (uint64_t)seen.len, &o, &bk,
+                "cont-again-sent") < 0 ||
+      check_sent(&o, bk, &b, wake, "cont-again-sent") < 0) {
+    box_free(&b);
+    return -1;
+  }
+  st = http_step_take(bk);
+  if (step_both(&b, &st, MURO_STEP_BYTES, CONT, 0, 0, &o, &bk, "cont-again") < 0 ||
+      check_interim(&o, bk, &b, 6, 0, 1, wake, MURO_STEP_PH_READ, "cont-again") < 0) {
+    box_free(&b);
+    return -1;
+  }
+  box_free(&b);
+
+  if (open_acc(&b, 10, 1000, 0) < 0) return -1;
+  st = http_step_readSt();
+  if (park_cont_case(&b, &st, CONT, &seen, "cont-body-owed") < 0 ||
+      step_both(&b, &st, MURO_STEP_WROTE, NULL, (uint64_t)seen.len, (uint64_t)seen.len, &o, &bk,
+                "cont-body-sent") < 0 ||
+      check_sent(&o, bk, &b, wake, "cont-body-sent") < 0) {
+    box_free(&b);
+    return -1;
+  }
+  st = http_step_take(bk);
+  if (feed_kept(&b, &st, MURO_STEP_BYTES, CONT_FULL, 0, &o, &bk, "cont-body") < 0 ||
+      check_shape(DEC_REPLY, &o, bk, &b, 0, NULL, 0, 0, 0, "cont-body") < 0) {
+    box_free(&b);
+    return -1;
+  }
+  seen = o;
+  st = http_step_take(bk);
+  if (full_write(&b, &st, seen, DEC_IDLE, 0, wake, "cont-body-idle") < 0) {
+    box_free(&b);
+    return -1;
+  }
+  box_free(&b);
+
+  if (open_acc(&b, 10, 1000, 0) < 0) return -1;
+  st = http_step_readSt();
+  if (park_cont_case(&b, &st, CONT, &seen, "cont-short-owed") < 0 ||
+      step_both(&b, &st, MURO_STEP_WROTE, NULL, 1, (uint64_t)seen.len, &o, &bk, "cont-short") < 0 ||
+      check_interim(&o, bk, &b, 6, (uint64_t)seen.len - 1, 0, wake, MURO_STEP_PH_READ,
+                    "cont-short") < 0) {
+    box_free(&b);
+    return -1;
+  }
+  seen = o;
+  st = http_step_take(bk);
+  if (step_both(&b, &st, MURO_STEP_WROTE, NULL, (uint64_t)seen.len, (uint64_t)seen.len, &o, &bk,
+                "cont-short-done") < 0 ||
+      check_sent(&o, bk, &b, wake, "cont-short-done") < 0) {
+    box_free(&b);
+    return -1;
+  }
+  box_free(&b);
+
+  if (open_acc(&b, 10, 1000, 0) < 0) return -1;
+  st = http_step_readSt();
+  if (park_cont_case(&b, &st, CONT, &seen, "cont-fail-owed") < 0 ||
+      step_both(&b, &st, MURO_STEP_WRITE_FAILED, NULL, 0, (uint64_t)seen.len, &o, &bk,
+                "cont-fail") < 0 ||
+      check_interim(&o, bk, &b, 6, 0, 1, wake, MURO_STEP_PH_READ, "cont-fail") < 0) {
+    box_free(&b);
+    return -1;
+  }
+  box_free(&b);
+
+  if (open_acc(&b, 10, 1000, 0) < 0) return -1;
+  st = http_step_readSt();
+  if (park_cont_case(&b, &st, CONT, &seen, "cont-now-owed") < 0 ||
+      step_both(&b, &st, MURO_STEP_NOW, NULL, 0, 0, &o, &bk, "cont-now") < 0 ||
+      check_shape(DEC_QUIET, &o, bk, &b, 0, NULL, 0, 0, 0, "cont-now") < 0) {
+    box_free(&b);
+    return -1;
+  }
+  box_free(&b);
+
+  if (open_acc(&b, 10, 1000, 0) < 0) return -1;
+  st = http_step_readSt();
+  if (park_cont_case(&b, &st, CONT, &seen, "cont-clear-owed") < 0 ||
+      step_both(&b, &st, MURO_STEP_PEER_CLOSED, CONT, 0, 0, &o, &bk, "cont-peer-clear") < 0 ||
+      check_shape(DEC_OWE, &o, bk, &b, 400, "malformed", 0, 0, 1, "cont-peer-clear") < 0) {
+    box_free(&b);
+    return -1;
+  }
+  box_free(&b);
+
+  if (open_acc(&b, 10, 1000, 0) < 0) return -1;
+  st = http_step_readSt();
+  if (park_cont_case(&b, &st, CONT, &seen, "cont-peer-owed") < 0 ||
+      feed_kept(&b, &st, MURO_STEP_PEER_CLOSED, CONT, 0, &o, &bk, "cont-peer") < 0 ||
+      check_interim(&o, bk, &b, 8, 0, 1, 0, MURO_STEP_PH_WRITE, "cont-peer") < 0) {
+    box_free(&b);
+    return -1;
+  }
+  seen = o;
+  st = http_step_take(bk);
+  if (step_both(&b, &st, MURO_STEP_WROTE, NULL, (uint64_t)seen.len, (uint64_t)seen.len, &o, &bk,
+                "cont-peer-done") < 0 ||
+      check_shape(DEC_OWE, &o, bk, &b, 400, "malformed", 0, 0, 1, "cont-peer-done") < 0) {
+    box_free(&b);
+    return -1;
+  }
+  box_free(&b);
+
+  if (open_acc(&b, 10, 1000, 0) < 0) return -1;
+  st = http_step_readSt();
+  if (park_cont_case(&b, &st, CONT, &seen, "cont-accept-owed") < 0 ||
+      step_both(&b, &st, MURO_STEP_ACCEPTED, NULL, 0, 0, &o, &bk, "cont-accept") < 0 ||
+      check_shape(DEC_MORE, &o, bk, &b, 0, NULL, 0, wake, 0, "cont-accept") < 0) {
+    box_free(&b);
+    return -1;
+  }
+  box_free(&b);
+  return 0;
+}
+
 int main(void) {
   uint64_t wake = 61000;
   if (decide(DEC_MORE, MURO_STEP_ACCEPTED, "", 10, 0, NULL, 0, wake, 0, "accept", NULL, NULL,
@@ -3058,8 +3350,7 @@ int main(void) {
              NULL) < 0)
     return 1;
   if (chunk_cases() < 0) return 1;
-  if (decide(DEC_OUT, MURO_STEP_BYTES, CONT, 10, 0, NULL, 0, 0, 0, "continue", NULL, NULL, NULL) < 0)
-    return 1;
+  if (cont_cases() < 0) return 1;
   if (decide(DEC_QUIET, MURO_STEP_NOW, GET, 10, 0, NULL, 0, 0, 0, "now", NULL, NULL, NULL) < 0)
     return 1;
   if (decide(DEC_MORE, MURO_STEP_WROTE, GET, 10, 0, NULL, 0, wake, 0, "wrote-read", NULL, NULL,
