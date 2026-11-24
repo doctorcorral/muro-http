@@ -2,6 +2,20 @@
 
 ## 0.1.0-dev — unreleased
 
+- `hand` decides the handler paths the book left open: `close_after`,
+  a 4xx or 5xx, a handler 500 (`owe_status`, book phase 5, the image
+  stays in handle), and a pulled body (span 3 content-length, 4
+  chunked, 5 close-delimited). `cover` stays 0 on those paths. A
+  buffered body that does not fit shuts in handle, or parks a 500
+  with `keep` 1 when `owe_status` is set. The opt-in adapter admits
+  each fact through `proto_admit`, with the same phase, status, and
+  reply `c/step.c` passes, and note 1 on a refusal. The slice harness
+  compares that session with the host. `c/muro-hello-book` passes 65
+  conformance cases and fails the six `cover=1` ones. Versus
+  `origin/main` the book adds 17 evidence theorems and removes none,
+  143 total. Not claimed here: fuel, and the 100 Continue span.
+  `c/step.c` and `c/host.c` are unchanged. The library version stays
+  `0.1.0-dev`. The pin stays muro `0.22.24`.
 - A second `ACCEPTED` on a live slot frees the previous `Proto`
   before `proto_begin`. `c/step_book.c` owns the recv buffer and
   the consume, calls the handler and `host_copy_response`, and
