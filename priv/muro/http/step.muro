@@ -1,46 +1,61 @@
--- Read slice of one HTTP/1.1 connection.
+-- Write slice of one HTTP/1.1 connection.
 --
--- c/step.c is still the step the host calls. This book is the slice
--- mix muro.check can see: the request line, the headers, a
--- Content-Length body, and the close that c/step.c takes while it is
--- still reading. It does not call the kernel or the clock. It does
--- not render bytes. The handler, the admit wall, and
--- host_copy_response stay in C.
---
--- `--backend c` emits this file as c/generated/step_slice.c with
--- c_prefix http_step_. The host does not link that object.
--- c/test_step_slice feeds the same fact and the same buffer to
--- http_step_stepFact and to muro_http_step and compares the fields
--- this slice decides.
+-- c/step.c is still the step the host calls. This book decides one
+-- read, the protocol write, the handler write, and the idle tick.
+-- It does not call the kernel or the clock. It does not render
+-- bytes. The handler, the admit wall, and host_copy_response stay
+-- in C. `--backend c` emits c/generated/step_slice.c with c_prefix
+-- http_step_. c/test_step_slice feeds the same fact and the same
+-- buffer to http_step_stepFact and to muro_http_step.
 --
 -- Fact numbers are c/step.h: 1 accepted, 2 bytes, 3 peer closed,
--- 4 wrote, 5 write failed, 6 now. `n` is the wrote byte count and
--- `owed` is the outstanding write span. A wrote that meets that
--- span closes. A short write (`n < owed`) is outside this slice.
+-- 4 wrote, 5 write failed, 6 now. `n` is the wrote count. `owed`
+-- is the outstanding span when `left` is 0. A short write stores
+-- `left = owed - n`, and the next wrote uses that stored remainder,
+-- so a stale `owed` does not move the span. `n` greater than or
+-- equal to that base finishes the span. The host clamps the same
+-- way. now, deadline, and idle are the adapter clock. idle is the
+-- connection's idle budget in milliseconds.
 --
--- phase 0 is still reading. phase 1 owes a write span (400, or a
--- 413/417/501 that classify already finished). phase 2 has closed.
--- A closed step ignores every later fact: no read, no write, no
--- status span, no body span. The handwritten step now also stays
--- quiet after a 413, 417, or 501 status_now close.
+-- phase 0 is reading. phase 1 owes a protocol span and closes when
+-- that span finishes: 400, 413, 414, 417, 431, 501. A request line
+-- with no LF in the first 16384 bytes is 414. A header block past
+-- 16384 whose request line fit is 431. phase 3 owes the handler
+-- span for a finished request the policy accepts. keep 0 returns
+-- to phase 4 (idle) when that span finishes, and bytes past the
+-- request are classified in that same step. A leftover that is
+-- still a partial request reads again. keep 1 closes instead:
+-- Connection: close, HTTP/1.0, or a peer close during the write
+-- (that peer close drops a pipelined tail). phase 2 has closed.
+-- A closed step ignores every later fact and disarms the deadline.
 --
 -- span 0 is nothing, 1 is the close status (status_now), 2 is a
--- write span. cover 1 means this buffer is outside the slice
--- (chunked, 100 Continue, a tick or a write while still reading,
--- a finished request that arrived on a peer close, a header block
--- past 16384, a short wrote). Those are not decisions this book
--- claims.
+-- write span. wake 0 is disarmed. Accept arms now+idle and ignores
+-- a carried deadline. A read or an idle step keeps a carried
+-- deadline, and arms now+idle when the deadline is 0. A write
+-- parks with wake 0. NOW from read or from idle closes. The book
+-- does not compare now with the deadline: the fact is the tick,
+-- and the two clocks produce the same close. NOW during a write
+-- parks that same span again.
 --
--- Not covered, and not given a matching equation: pipelining, a
--- pulled body, idle MURO_STEP_NOW, WRITE_FAILED of a handler
--- response, keep-alive consume, fuel, and a handler 500.
+-- cover 1 is outside this slice: chunked, 100 Continue, a streamed
+-- body whose Content-Length is within max (the host pulls it),
+-- a finished request that arrived on a peer close, a wrote or a
+-- failure while nothing is owed, and bytes or accept during a
+-- write. A streamed body past max is an owed 413 span. Classify
+-- already finished, so that close is the write, not status_now.
+-- A wrote with left 0 and owed 0 finishes: the caller named an
+-- empty span. The host has no such input. It finishes from its
+-- own byte counter.
+-- Not claimed here: a pulled body, fuel, a handler 500,
+-- and the 100 Continue span.
 import "request.muro"
 
 unboxed data St : Type where
-  st : Π (+ phase : U64) → Π (+ code : U64) → St
+  st : Π (+ phase : U64) → Π (+ code : U64) → Π (+ left : U64) → Π (+ keep : U64) → St
 
 unboxed data Out : Type where
-  out : Π (+ phase : U64) → Π (+ code : U64) → Π (+ close : U64) → Π (+ statusNow : U64) → Π (+ readMore : U64) → Π (+ writeMore : U64) → Π (+ span : U64) → Π (+ cover : U64) → Out
+  out : Π (+ phase : U64) → Π (+ code : U64) → Π (+ close : U64) → Π (+ statusNow : U64) → Π (+ readMore : U64) → Π (+ writeMore : U64) → Π (+ span : U64) → Π (+ cover : U64) → Π (+ left : U64) → Π (+ wake : U64) → Π (+ keep : U64) → Out
 
 def factAccepted : run U64 :=
   toU64 1
@@ -61,44 +76,81 @@ def factNow : run U64 :=
   toU64 6
 
 def readSt : run St :=
-  st (toU64 0) (toU64 0)
+  st (toU64 0) (toU64 0) (toU64 0) (toU64 0)
+
+def arm : run Π (+ now : U64) → Π (+ dl : U64) → Π (+ idle : U64) → U64 :=
+  λ (+ now : U64) → λ (+ dl : U64) → λ (+ idle : U64) →
+    match (u64eq dl (toU64 0)) motive (λ _ → U64)
+      | true => addi now idle
+      | false => dl
+
+def moreAt : run Π (+ now : U64) → Π (+ dl : U64) → Π (+ idle : U64) → Out :=
+  λ (+ now : U64) → λ (+ dl : U64) → λ (+ idle : U64) →
+    out (toU64 0) (toU64 0) (toU64 0) (toU64 0) (toU64 1) (toU64 0) (toU64 0) (toU64 0) (toU64 0) (arm now dl idle) (toU64 0)
 
 def more : run Out :=
-  out (toU64 0) (toU64 0) (toU64 0) (toU64 0) (toU64 1) (toU64 0) (toU64 0) (toU64 0)
+  moreAt (toU64 0) (toU64 0) (toU64 0)
 
-def framed : run Out :=
-  out (toU64 0) (toU64 0) (toU64 0) (toU64 0) (toU64 0) (toU64 0) (toU64 0) (toU64 0)
+def idleAt : run Π (+ now : U64) → Π (+ dl : U64) → Π (+ idle : U64) → Out :=
+  λ (+ now : U64) → λ (+ dl : U64) → λ (+ idle : U64) →
+    out (toU64 4) (toU64 0) (toU64 0) (toU64 0) (toU64 1) (toU64 0) (toU64 0) (toU64 0) (toU64 0) (arm now dl idle) (toU64 0)
+
+def idle : run Out :=
+  idleAt (toU64 0) (toU64 0) (toU64 0)
 
 def outside : run Out :=
-  out (toU64 0) (toU64 0) (toU64 0) (toU64 0) (toU64 0) (toU64 0) (toU64 0) (toU64 1)
+  out (toU64 0) (toU64 0) (toU64 0) (toU64 0) (toU64 0) (toU64 0) (toU64 0) (toU64 1) (toU64 0) (toU64 0) (toU64 0)
 
 def quiet : run Π (+ code : U64) → Out :=
   λ (+ code : U64) →
-    out (toU64 2) code (toU64 1) (toU64 0) (toU64 0) (toU64 0) (toU64 0) (toU64 0)
+    out (toU64 2) code (toU64 1) (toU64 0) (toU64 0) (toU64 0) (toU64 0) (toU64 0) (toU64 0) (toU64 0) (toU64 0)
 
 def statusNow : run Π (+ code : U64) → Out :=
   λ (+ code : U64) →
-    out (toU64 2) code (toU64 1) (toU64 1) (toU64 0) (toU64 0) (toU64 1) (toU64 0)
+    out (toU64 2) code (toU64 1) (toU64 1) (toU64 0) (toU64 0) (toU64 1) (toU64 0) (toU64 0) (toU64 0) (toU64 0)
+
+def still : run Π (+ phase : U64) → Π (+ code : U64) → Π (+ left : U64) → Π (+ keep : U64) → Out :=
+  λ (+ phase : U64) → λ (+ code : U64) → λ (+ left : U64) → λ (+ keep : U64) →
+    out phase code (toU64 0) (toU64 0) (toU64 0) (toU64 1) (toU64 2) (toU64 0) left (toU64 0) keep
 
 def owe : run Π (+ code : U64) → Out :=
   λ (+ code : U64) →
-    out (toU64 1) code (toU64 0) (toU64 0) (toU64 0) (toU64 1) (toU64 2) (toU64 0)
+    still (toU64 1) code (toU64 0) (toU64 1)
+
+def reply : run Π (+ keep : U64) → Out :=
+  λ (+ keep : U64) →
+    still (toU64 3) (toU64 0) (toU64 0) keep
 
 def take : run Π (+ o : Out) → St :=
   λ (+ o : Out) →
     match o motive (λ _ → St)
-      | out phase code _close _statusNow _readMore _writeMore _span _cover =>
-          st phase code
+      | out phase code _close _statusNow _readMore _writeMore _span _cover left _wake keep =>
+          st phase code left keep
 
 def spanOf : run Π (+ o : Out) → U64 :=
   λ (+ o : Out) →
     match o motive (λ _ → U64)
-      | out _phase _code _close _statusNow _readMore _writeMore span _cover => span
+      | out _phase _code _close _statusNow _readMore _writeMore span _cover _left _wake _keep => span
 
 def coverOf : run Π (+ o : Out) → U64 :=
   λ (+ o : Out) →
     match o motive (λ _ → U64)
-      | out _phase _code _close _statusNow _readMore _writeMore _span cover => cover
+      | out _phase _code _close _statusNow _readMore _writeMore _span cover _left _wake _keep => cover
+
+def leftOf : run Π (+ o : Out) → U64 :=
+  λ (+ o : Out) →
+    match o motive (λ _ → U64)
+      | out _phase _code _close _statusNow _readMore _writeMore _span _cover left _wake _keep => left
+
+def wakeOf : run Π (+ o : Out) → U64 :=
+  λ (+ o : Out) →
+    match o motive (λ _ → U64)
+      | out _phase _code _close _statusNow _readMore _writeMore _span _cover _left wake _keep => wake
+
+def keepOut : run Π (+ o : Out) → U64 :=
+  λ (+ o : Out) →
+    match o motive (λ _ → U64)
+      | out _phase _code _close _statusNow _readMore _writeMore _span _cover _left _wake keep => keep
 
 def chunked : run Π (+ s : Slice) → Bool :=
   λ (+ s : Slice) → u64eq (teCode s) (toU64 1)
@@ -117,6 +169,12 @@ def ver11 : run Π (+ s : Slice) → Bool :=
 
 def expectIs : run Π (+ s : Slice) → Π (+ n : U64) → Bool :=
   λ (+ s : Slice) → λ (+ n : U64) → u64eq (expectCode s) n
+
+-- A body the host will stream: headers are done, the buffered body
+-- is short, and Content-Length is past 16384. That pull is not this
+-- slice. A complete body is not short, so it is not streamed.
+def streamed : run Π (+ s : Slice) → Bool :=
+  λ (+ s : Slice) → and (bodyShort s) (gt16384 (contentLength s))
 
 -- Chunked is outside this slice, before the status order, so a
 -- chunked TRACE is not claimed as 501. The rest matches
@@ -145,19 +203,48 @@ def policy : run Π (+ s : Slice) → Π (+ max : U64) → U64 :=
 def isPol : run Π (+ n : U64) → Π (+ c : U64) → Bool :=
   λ (+ n : U64) → λ (+ c : U64) → u64eq n c
 
+-- 1 when the first 16384 bytes hold no LF. limit_which in c/step.c
+-- returns 414 for that line and 431 once a line fits.
+def capLfStep : run Π (b : U8) → Π (+ acc : U64) → U64 :=
+  λ (b : U8) → λ (+ acc : U64) →
+    match (u64eq acc (toU64 0)) motive (λ _ → U64)
+      | true =>
+          (match (u8eq b (toU8 10)) motive (λ _ → U64)
+            | true => toU64 1
+            | false => toU64 0)
+      | false => acc
+
+def capHit : run Π (+ s : Slice) → U64 :=
+  λ (+ s : Slice) →
+    sliceFold U64 (toU64 0)
+      (λ (b : U8) → λ (_r : Slice) → λ (acc : U64) → capLfStep b acc)
+      (slice s (toU64 0) (toU64 16384))
+
+def capCode : run Π (+ s : Slice) → U64 :=
+  λ (+ s : Slice) →
+    match (u64eq (capHit s) (toU64 0)) motive (λ _ → U64)
+      | true => toU64 414
+      | false => toU64 431
+
+def replyKeep : run Π (k : Keep) → Out :=
+  λ (k : Keep) →
+    match k motive (λ _ → Out)
+      | keep-yes => reply (toU64 0)
+      | keep-no => reply (toU64 1)
+
 -- reading 1: classify still wants bytes, so a policy status is
 -- status_now and the step closes. reading 0: classify finished, so
 -- the handwritten step answers through the write span.
-def usePol : run Π (+ code : U64) → Π (+ reading : U64) → Out :=
-  λ (+ code : U64) → λ (+ reading : U64) →
+def usePol : run Π (+ code : U64) → Π (+ reading : U64) → Π (+ now : U64) → Π (+ dl : U64) → Π (+ idle : U64) → Out :=
+  λ (+ code : U64) → λ (+ reading : U64) → λ (+ now : U64) → λ (+ dl : U64) → λ (+ idle : U64) →
     match (isPol code (toU64 9)) motive (λ _ → Out)
       | true => outside
       | false =>
           (match (isPol code (toU64 0)) motive (λ _ → Out)
             | true =>
                 (match (u64eq reading (toU64 1)) motive (λ _ → Out)
-                  | true => more
-                  | false => framed)
+                  | true => moreAt now dl idle
+                  | false => reply (toU64 0))
             | false =>
                 (match (u64eq reading (toU64 1)) motive (λ _ → Out)
                   | true => statusNow code
@@ -175,77 +262,135 @@ def finOk : run Π (+ code : U64) → Out :=
             | true => outside
             | false => owe code)
 
-def onStatus : run Π (+ st : Status) → Π (+ fin : U64) → Π (+ s : Slice) → Π (+ max : U64) → Out :=
-  λ (+ st : Status) → λ (+ fin : U64) → λ (+ s : Slice) → λ (+ max : U64) →
+def onStatus : run Π (+ st : Status) → Π (+ fin : U64) → Π (+ s : Slice) → Π (+ max : U64) → Π (+ now : U64) → Π (+ dl : U64) → Π (+ idle : U64) → Out :=
+  λ (+ st : Status) → λ (+ fin : U64) → λ (+ s : Slice) → λ (+ max : U64) → λ (+ now : U64) → λ (+ dl : U64) → λ (+ idle : U64) →
     match st motive (λ _ → Out)
       | status-ok =>
           (match (u64eq fin (toU64 1)) motive (λ _ → Out)
             | true => finOk (policy s max)
-            | false => usePol (policy s max) (toU64 0))
+            | false =>
+                (match (isPol (policy s max) (toU64 0)) motive (λ _ → Out)
+                  | true =>
+                      (match (streamed s) motive (λ _ → Out)
+                        | true => outside
+                        | false => replyKeep (keepOf s))
+                  | false => usePol (policy s max) (toU64 0) now dl idle))
       | status-malformed =>
           (match (headersDone s) motive (λ _ → Out)
             | true =>
                 (match (gt16384 (headerEnd s)) motive (λ _ → Out)
-                  | true => outside
+                  | true => owe (capCode s)
                   | false => owe (toU64 400))
             | false =>
                 (match (gt16384 (sliceLen s)) motive (λ _ → Out)
-                  | true => outside
+                  | true => owe (capCode s)
                   | false => owe (toU64 400)))
       | status-need-more =>
           (match (u64eq fin (toU64 1)) motive (λ _ → Out)
             | true => owe (toU64 400)
             | false =>
                 (match (headersDone s) motive (λ _ → Out)
-                  | true => usePol (policy s max) (toU64 1)
-                  | false => more))
+                  | true => usePol (policy s max) (toU64 1) now dl idle
+                  | false => moreAt now dl idle))
       | status-unimplemented => owe (toU64 501)
 
-def onBuf : run Π (+ fin : U64) → Π (+ s : Slice) → Π (+ max : U64) → Out :=
-  λ (+ fin : U64) → λ (+ s : Slice) → λ (+ max : U64) →
+def onBuf : run Π (+ fin : U64) → Π (+ s : Slice) → Π (+ max : U64) → Π (+ now : U64) → Π (+ dl : U64) → Π (+ idle : U64) → Out :=
+  λ (+ fin : U64) → λ (+ s : Slice) → λ (+ max : U64) → λ (+ now : U64) → λ (+ dl : U64) → λ (+ idle : U64) →
     match (classify s) motive (λ _ → Out)
-      | classified st _keep => onStatus st fin s max
+      | classified st _keep => onStatus st fin s max now dl idle
 
-def oweFact : run Π (+ code : U64) → Π (+ fact : U64) → Π (+ n : U64) → Π (+ owed : U64) → Out :=
-  λ (+ code : U64) → λ (+ fact : U64) → λ (+ n : U64) → λ (+ owed : U64) →
+def baseOf : run Π (+ left : U64) → Π (+ owed : U64) → U64 :=
+  λ (+ left : U64) → λ (+ owed : U64) →
+    match (u64eq left (toU64 0)) motive (λ _ → U64)
+      | true => owed
+      | false => left
+
+def pastEnd : run Π (+ buf : Slice) → Bool :=
+  λ (+ buf : Slice) → u64lt (framedEnd buf) (sliceLen buf)
+
+def tailOf : run Π (+ buf : Slice) → Slice :=
+  λ (+ buf : Slice) →
+    slice buf (framedEnd buf) (subi (sliceLen buf) (framedEnd buf))
+
+-- keep 1 closes. keep 0 classifies bytes past this request, or
+-- returns to idle when the buffer holds nothing past it.
+def finishWrite : run Π (+ code : U64) → Π (+ keep : U64) → Π (+ buf : Slice) → Π (+ max : U64) → Π (+ now : U64) → Π (+ dl : U64) → Π (+ idle : U64) → Out :=
+  λ (+ code : U64) → λ (+ keep : U64) → λ (+ buf : Slice) → λ (+ max : U64) → λ (+ now : U64) → λ (+ dl : U64) → λ (+ idle : U64) →
+    match (u64eq keep (toU64 1)) motive (λ _ → Out)
+      | true => quiet code
+      | false =>
+          (match (pastEnd buf) motive (λ _ → Out)
+            | true => onBuf (toU64 0) (tailOf buf) max now dl idle
+            | false => idleAt now dl idle)
+
+def writeFact : run Π (+ phase : U64) → Π (+ code : U64) → Π (+ left : U64) → Π (+ keep : U64) → Π (+ fact : U64) → Π (+ n : U64) → Π (+ owed : U64) → Π (+ buf : Slice) → Π (+ max : U64) → Π (+ now : U64) → Π (+ dl : U64) → Π (+ idle : U64) → Out :=
+  λ (+ phase : U64) → λ (+ code : U64) → λ (+ left : U64) → λ (+ keep : U64) → λ (+ fact : U64) → λ (+ n : U64) → λ (+ owed : U64) → λ (+ buf : Slice) → λ (+ max : U64) → λ (+ now : U64) → λ (+ dl : U64) → λ (+ idle : U64) →
     match (u64eq fact factWrote) motive (λ _ → Out)
       | true =>
-          (match (u64lt n owed) motive (λ _ → Out)
-            | true => outside
-            | false => quiet code)
+          (match (u64lt n (baseOf left owed)) motive (λ _ → Out)
+            | true => still phase code (subi (baseOf left owed) n) keep
+            | false => finishWrite code keep buf max now dl idle)
       | false =>
           (match (u64eq fact factFailed) motive (λ _ → Out)
             | true => quiet code
             | false =>
                 (match (u64eq fact factPeer) motive (λ _ → Out)
-                  | true => owe code
-                  | false => outside))
+                  | true => still phase code left (toU64 1)
+                  | false =>
+                      (match (u64eq fact factNow) motive (λ _ → Out)
+                        | true => still phase code left keep
+                        | false => outside)))
 
-def readFact : run Π (+ fact : U64) → Π (+ s : Slice) → Π (+ max : U64) → Out :=
-  λ (+ fact : U64) → λ (+ s : Slice) → λ (+ max : U64) →
+def readFact : run Π (+ fact : U64) → Π (+ s : Slice) → Π (+ max : U64) → Π (+ now : U64) → Π (+ dl : U64) → Π (+ idle : U64) → Out :=
+  λ (+ fact : U64) → λ (+ s : Slice) → λ (+ max : U64) → λ (+ now : U64) → λ (+ dl : U64) → λ (+ idle : U64) →
     match (u64eq fact factAccepted) motive (λ _ → Out)
-      | true => more
+      | true => moreAt now (toU64 0) idle
       | false =>
           (match (u64eq fact factBytes) motive (λ _ → Out)
-            | true => onBuf (toU64 0) s max
+            | true => onBuf (toU64 0) s max now dl idle
             | false =>
                 (match (u64eq fact factPeer) motive (λ _ → Out)
                   | true =>
                       (match (u64eq (sliceLen s) (toU64 0)) motive (λ _ → Out)
                         | true => quiet (toU64 0)
-                        | false => onBuf (toU64 1) s max)
+                        | false => onBuf (toU64 1) s max now dl idle)
+                  | false =>
+                      (match (u64eq fact factNow) motive (λ _ → Out)
+                        | true => quiet (toU64 0)
+                        | false => outside)))
+
+def idleFact : run Π (+ fact : U64) → Π (+ s : Slice) → Π (+ max : U64) → Π (+ now : U64) → Π (+ dl : U64) → Π (+ idle : U64) → Out :=
+  λ (+ fact : U64) → λ (+ s : Slice) → λ (+ max : U64) → λ (+ now : U64) → λ (+ dl : U64) → λ (+ idle : U64) →
+    match (u64eq fact factBytes) motive (λ _ → Out)
+      | true => onBuf (toU64 0) s max now dl idle
+      | false =>
+          (match (u64eq fact factPeer) motive (λ _ → Out)
+            | true =>
+                (match (u64eq (sliceLen s) (toU64 0)) motive (λ _ → Out)
+                  | true => quiet (toU64 0)
+                  | false => onBuf (toU64 1) s max now dl idle)
+            | false =>
+                (match (u64eq fact factNow) motive (λ _ → Out)
+                  | true => quiet (toU64 0)
                   | false => outside))
 
-def stepFact : run Π (+ st : St) → Π (+ fact : U64) → Π (+ buf : Slice) → Π (+ max : U64) → Π (+ n : U64) → Π (+ owed : U64) → Out :=
-  λ (+ st : St) → λ (+ fact : U64) → λ (+ buf : Slice) → λ (+ max : U64) → λ (+ n : U64) → λ (+ owed : U64) →
+def stepFact : run Π (+ st : St) → Π (+ fact : U64) → Π (+ buf : Slice) → Π (+ max : U64) → Π (+ n : U64) → Π (+ owed : U64) → Π (+ now : U64) → Π (+ dl : U64) → Π (+ idle : U64) → Out :=
+  λ (+ st : St) → λ (+ fact : U64) → λ (+ buf : Slice) → λ (+ max : U64) → λ (+ n : U64) → λ (+ owed : U64) → λ (+ now : U64) → λ (+ dl : U64) → λ (+ idle : U64) →
     match st motive (λ _ → Out)
-      | st phase code =>
+      | st phase code left keep =>
           (match (u64eq phase (toU64 2)) motive (λ _ → Out)
             | true => quiet code
             | false =>
-                (match (u64eq phase (toU64 1)) motive (λ _ → Out)
-                  | true => oweFact code fact n owed
-                  | false => readFact fact buf max))
+                (match (or (u64eq phase (toU64 1)) (u64eq phase (toU64 3))) motive (λ _ → Out)
+                  | true => writeFact phase code left keep fact n owed buf max now dl idle
+                  | false =>
+                      (match (u64eq phase (toU64 4)) motive (λ _ → Out)
+                        | true => idleFact fact buf max now dl idle
+                        | false => readFact fact buf max now dl idle)))
+
+def step0 : run Π (+ st : St) → Π (+ fact : U64) → Π (+ buf : Slice) → Π (+ max : U64) → Π (+ n : U64) → Π (+ owed : U64) → Out :=
+  λ (+ st : St) → λ (+ fact : U64) → λ (+ buf : Slice) → λ (+ max : U64) → λ (+ n : U64) → λ (+ owed : U64) →
+    stepFact st fact buf max n owed (toU64 0) (toU64 0) (toU64 0)
 
 def lineBuf : run Slice :=
   b"GET / HT"
@@ -292,6 +437,24 @@ def chunkBuf : run Slice :=
 def contBuf : run Slice :=
   b"POST / HTTP/1.1\r\nHost: h\r\nExpect: 100-continue\r\nContent-Length: 4\r\n\r\n"
 
+def headBuf : run Slice :=
+  b"HEAD / HTTP/1.1\r\nHost: h\r\n\r\n"
+
+def closeBuf : run Slice :=
+  b"GET / HTTP/1.1\r\nHost: h\r\nConnection: close\r\n\r\n"
+
+def http10Buf : run Slice :=
+  b"GET / HTTP/1.0\r\n\r\n"
+
+def twoGet : run Slice :=
+  b"GET / HTTP/1.1\r\nHost: h\r\n\r\nGET / HTTP/1.1\r\nHost: h\r\n\r\n"
+
+def pipePart : run Slice :=
+  b"GET / HTTP/1.1\r\nHost: h\r\n\r\nGET / HT"
+
+def streamBuf : run Slice :=
+  b"POST / HTTP/1.1\r\nHost: h\r\nContent-Length: 16385\r\n\r\n"
+
 def max10 : run U64 :=
   toU64 10
 
@@ -299,70 +462,91 @@ def maxBig : run U64 :=
   toU64 8388608
 
 def sawLine : run Out :=
-  stepFact readSt factBytes lineBuf max10 (toU64 0) (toU64 0)
+  step0 readSt factBytes lineBuf max10 (toU64 0) (toU64 0)
 
 def sawHdr : run Out :=
-  stepFact readSt factBytes hdrBuf max10 (toU64 0) (toU64 0)
+  step0 readSt factBytes hdrBuf max10 (toU64 0) (toU64 0)
 
 def sawGet : run Out :=
-  stepFact readSt factBytes getBuf max10 (toU64 0) (toU64 0)
+  step0 readSt factBytes getBuf max10 (toU64 0) (toU64 0)
 
 def sawShort : run Out :=
-  stepFact readSt factBytes postShort max10 (toU64 0) (toU64 0)
+  step0 readSt factBytes postShort max10 (toU64 0) (toU64 0)
 
 def sawBody : run Out :=
-  stepFact readSt factBytes postBody max10 (toU64 0) (toU64 0)
+  step0 readSt factBytes postBody max10 (toU64 0) (toU64 0)
 
 def saw413 : run Out :=
-  stepFact readSt factBytes tooBig max10 (toU64 0) (toU64 0)
+  step0 readSt factBytes tooBig max10 (toU64 0) (toU64 0)
 
 def saw413Body : run Out :=
-  stepFact readSt factBytes postBody (toU64 0) (toU64 0) (toU64 0)
+  step0 readSt factBytes postBody (toU64 0) (toU64 0) (toU64 0)
 
 def saw417 : run Out :=
-  stepFact readSt factBytes expectBuf maxBig (toU64 0) (toU64 0)
+  step0 readSt factBytes expectBuf maxBig (toU64 0) (toU64 0)
 
 def saw417Done : run Out :=
-  stepFact readSt factBytes expectDone maxBig (toU64 0) (toU64 0)
+  step0 readSt factBytes expectDone maxBig (toU64 0) (toU64 0)
 
 def saw501 : run Out :=
-  stepFact readSt factBytes traceBuf maxBig (toU64 0) (toU64 0)
+  step0 readSt factBytes traceBuf maxBig (toU64 0) (toU64 0)
 
 def saw501Done : run Out :=
-  stepFact readSt factBytes traceDone maxBig (toU64 0) (toU64 0)
+  step0 readSt factBytes traceDone maxBig (toU64 0) (toU64 0)
 
 def sawGzip : run Out :=
-  stepFact readSt factBytes gzipBuf max10 (toU64 0) (toU64 0)
+  step0 readSt factBytes gzipBuf max10 (toU64 0) (toU64 0)
 
 def sawBad : run Out :=
-  stepFact readSt factBytes badBuf max10 (toU64 0) (toU64 0)
+  step0 readSt factBytes badBuf max10 (toU64 0) (toU64 0)
 
 def sawNoHost : run Out :=
-  stepFact readSt factBytes noHost max10 (toU64 0) (toU64 0)
+  step0 readSt factBytes noHost max10 (toU64 0) (toU64 0)
 
 def sawAccept : run Out :=
-  stepFact readSt factAccepted b"" max10 (toU64 0) (toU64 0)
+  step0 readSt factAccepted b"" max10 (toU64 0) (toU64 0)
 
 def sawFinEmpty : run Out :=
-  stepFact readSt factPeer b"" max10 (toU64 0) (toU64 0)
+  step0 readSt factPeer b"" max10 (toU64 0) (toU64 0)
 
 def sawFinPartial : run Out :=
-  stepFact readSt factPeer lineBuf max10 (toU64 0) (toU64 0)
+  step0 readSt factPeer lineBuf max10 (toU64 0) (toU64 0)
 
 def sawFinOver : run Out :=
-  stepFact readSt factPeer tooBig max10 (toU64 0) (toU64 0)
+  step0 readSt factPeer tooBig max10 (toU64 0) (toU64 0)
 
 def sawChunk : run Out :=
-  stepFact readSt factBytes chunkBuf max10 (toU64 0) (toU64 0)
+  step0 readSt factBytes chunkBuf max10 (toU64 0) (toU64 0)
 
 def sawCont : run Out :=
-  stepFact readSt factBytes contBuf max10 (toU64 0) (toU64 0)
+  step0 readSt factBytes contBuf max10 (toU64 0) (toU64 0)
 
 def sawNow : run Out :=
-  stepFact readSt factNow getBuf max10 (toU64 0) (toU64 0)
+  step0 readSt factNow getBuf max10 (toU64 0) (toU64 0)
 
 def sawWroteRead : run Out :=
-  stepFact readSt factWrote getBuf max10 (toU64 0) (toU64 0)
+  step0 readSt factWrote getBuf max10 (toU64 0) (toU64 0)
+
+def sawHead : run Out :=
+  step0 readSt factBytes headBuf max10 (toU64 0) (toU64 0)
+
+def sawClose : run Out :=
+  step0 readSt factBytes closeBuf max10 (toU64 0) (toU64 0)
+
+def sawHttp10 : run Out :=
+  step0 readSt factBytes http10Buf max10 (toU64 0) (toU64 0)
+
+def sawTwo : run Out :=
+  step0 readSt factBytes twoGet max10 (toU64 0) (toU64 0)
+
+def sawPipe : run Out :=
+  step0 readSt factBytes pipePart max10 (toU64 0) (toU64 0)
+
+def sawStream : run Out :=
+  step0 readSt factBytes streamBuf maxBig (toU64 0) (toU64 0)
+
+def sawStream413 : run Out :=
+  step0 readSt factBytes streamBuf max10 (toU64 0) (toU64 0)
 
 def closed413 : run St :=
   take saw413
@@ -374,17 +558,23 @@ def closed501 : run St :=
   take saw501
 
 def closed400 : run St :=
-  take (stepFact (take sawBad) factWrote badBuf max10 (toU64 1) (toU64 1))
+  take (step0 (take sawBad) factWrote badBuf max10 (toU64 1) (toU64 1))
+
+def owe400 : run St :=
+  take sawBad
+
+def repGet : run St :=
+  take sawGet
 
 def line-more : evidence {sawLine ≡ more : Out} := refl
 
 def headers-more : evidence {sawHdr ≡ more : Out} := refl
 
-def get-framed : evidence {sawGet ≡ framed : Out} := refl
+def get-reply : evidence {sawGet ≡ reply (toU64 0) : Out} := refl
 
 def cl-short : evidence {sawShort ≡ more : Out} := refl
 
-def cl-body : evidence {sawBody ≡ framed : Out} := refl
+def cl-body : evidence {sawBody ≡ reply (toU64 0) : Out} := refl
 
 def close-413 : evidence {saw413 ≡ statusNow (toU64 413) : Out} := refl
 
@@ -416,68 +606,249 @@ def chunk-outside : evidence {coverOf sawChunk ≡ toU64 1 : U64} := refl
 
 def continue-outside : evidence {coverOf sawCont ≡ toU64 1 : U64} := refl
 
-def now-outside : evidence {coverOf sawNow ≡ toU64 1 : U64} := refl
+def now-read : evidence {sawNow ≡ quiet (toU64 0) : Out} := refl
 
 def wrote-outside : evidence {coverOf sawWroteRead ≡ toU64 1 : U64} := refl
 
-def owe-wrote : evidence {stepFact (take sawBad) factWrote badBuf max10 (toU64 1) (toU64 1) ≡ quiet (toU64 400) : Out} := refl
+def owe-wrote : evidence {step0 owe400 factWrote badBuf max10 (toU64 1) (toU64 1) ≡ quiet (toU64 400) : Out} := refl
 
-def owe-failed : evidence {stepFact (take sawBad) factFailed badBuf max10 (toU64 0) (toU64 0) ≡ quiet (toU64 400) : Out} := refl
+def owe-failed : evidence {step0 owe400 factFailed badBuf max10 (toU64 0) (toU64 0) ≡ quiet (toU64 400) : Out} := refl
 
-def owe-peer : evidence {stepFact (take sawBad) factPeer badBuf max10 (toU64 0) (toU64 0) ≡ owe (toU64 400) : Out} := refl
+def owe-peer : evidence {step0 owe400 factPeer badBuf max10 (toU64 0) (toU64 0) ≡ owe (toU64 400) : Out} := refl
 
-def after-413-accept : evidence {stepFact closed413 factAccepted tooBig max10 (toU64 0) (toU64 0) ≡ quiet (toU64 413) : Out} := refl
+def owe-now : evidence {step0 owe400 factNow badBuf max10 (toU64 0) (toU64 0) ≡ owe (toU64 400) : Out} := refl
 
-def after-413-bytes : evidence {stepFact closed413 factBytes getBuf max10 (toU64 0) (toU64 0) ≡ quiet (toU64 413) : Out} := refl
+def after-413-accept : evidence {step0 closed413 factAccepted tooBig max10 (toU64 0) (toU64 0) ≡ quiet (toU64 413) : Out} := refl
 
-def after-413-peer : evidence {stepFact closed413 factPeer tooBig max10 (toU64 0) (toU64 0) ≡ quiet (toU64 413) : Out} := refl
+def after-413-bytes : evidence {step0 closed413 factBytes getBuf max10 (toU64 0) (toU64 0) ≡ quiet (toU64 413) : Out} := refl
 
-def after-413-wrote : evidence {stepFact closed413 factWrote tooBig max10 (toU64 0) (toU64 0) ≡ quiet (toU64 413) : Out} := refl
+def after-413-peer : evidence {step0 closed413 factPeer tooBig max10 (toU64 0) (toU64 0) ≡ quiet (toU64 413) : Out} := refl
 
-def after-413-failed : evidence {stepFact closed413 factFailed tooBig max10 (toU64 0) (toU64 0) ≡ quiet (toU64 413) : Out} := refl
+def after-413-wrote : evidence {step0 closed413 factWrote tooBig max10 (toU64 0) (toU64 0) ≡ quiet (toU64 413) : Out} := refl
 
-def after-413-now : evidence {stepFact closed413 factNow tooBig max10 (toU64 0) (toU64 0) ≡ quiet (toU64 413) : Out} := refl
+def after-413-failed : evidence {step0 closed413 factFailed tooBig max10 (toU64 0) (toU64 0) ≡ quiet (toU64 413) : Out} := refl
 
-def after-417-peer : evidence {stepFact closed417 factPeer expectBuf maxBig (toU64 0) (toU64 0) ≡ quiet (toU64 417) : Out} := refl
+def after-413-now : evidence {step0 closed413 factNow tooBig max10 (toU64 0) (toU64 0) ≡ quiet (toU64 413) : Out} := refl
 
-def after-417-bytes : evidence {stepFact closed417 factBytes getBuf maxBig (toU64 0) (toU64 0) ≡ quiet (toU64 417) : Out} := refl
+def after-417-peer : evidence {step0 closed417 factPeer expectBuf maxBig (toU64 0) (toU64 0) ≡ quiet (toU64 417) : Out} := refl
 
-def after-417-now : evidence {stepFact closed417 factNow expectBuf maxBig (toU64 0) (toU64 0) ≡ quiet (toU64 417) : Out} := refl
+def after-417-bytes : evidence {step0 closed417 factBytes getBuf maxBig (toU64 0) (toU64 0) ≡ quiet (toU64 417) : Out} := refl
 
-def after-501-peer : evidence {stepFact closed501 factPeer traceBuf maxBig (toU64 0) (toU64 0) ≡ quiet (toU64 501) : Out} := refl
+def after-417-now : evidence {step0 closed417 factNow expectBuf maxBig (toU64 0) (toU64 0) ≡ quiet (toU64 417) : Out} := refl
 
-def after-501-bytes : evidence {stepFact closed501 factBytes getBuf maxBig (toU64 0) (toU64 0) ≡ quiet (toU64 501) : Out} := refl
+def after-501-peer : evidence {step0 closed501 factPeer traceBuf maxBig (toU64 0) (toU64 0) ≡ quiet (toU64 501) : Out} := refl
 
-def after-501-now : evidence {stepFact closed501 factNow traceBuf maxBig (toU64 0) (toU64 0) ≡ quiet (toU64 501) : Out} := refl
+def after-501-bytes : evidence {step0 closed501 factBytes getBuf maxBig (toU64 0) (toU64 0) ≡ quiet (toU64 501) : Out} := refl
 
-def after-400-peer : evidence {stepFact closed400 factPeer badBuf max10 (toU64 0) (toU64 0) ≡ quiet (toU64 400) : Out} := refl
+def after-501-now : evidence {step0 closed501 factNow traceBuf maxBig (toU64 0) (toU64 0) ≡ quiet (toU64 501) : Out} := refl
 
-def after-span : evidence {spanOf (stepFact closed413 factPeer tooBig max10 (toU64 0) (toU64 0)) ≡ toU64 0 : U64} := refl
+def after-400-peer : evidence {step0 closed400 factPeer badBuf max10 (toU64 0) (toU64 0) ≡ quiet (toU64 400) : Out} := refl
+
+def after-span : evidence {spanOf (step0 closed413 factPeer tooBig max10 (toU64 0) (toU64 0)) ≡ toU64 0 : U64} := refl
 
 def sawFinGet : run Out :=
-  stepFact readSt factPeer getBuf max10 (toU64 0) (toU64 0)
+  step0 readSt factPeer getBuf max10 (toU64 0) (toU64 0)
 
 def sawFinBody : run Out :=
-  stepFact readSt factPeer postBody max10 (toU64 0) (toU64 0)
+  step0 readSt factPeer postBody max10 (toU64 0) (toU64 0)
 
 def fin-get-outside : evidence {sawFinGet ≡ outside : Out} := refl
 
 def fin-body-outside : evidence {sawFinBody ≡ outside : Out} := refl
 
-def owe-wrote-short : evidence {stepFact (take sawBad) factWrote badBuf max10 (toU64 1) (toU64 2) ≡ outside : Out} := refl
+def oweShort : run Out :=
+  step0 owe400 factWrote badBuf max10 (toU64 1) (toU64 4)
+
+def owe-wrote-short : evidence {oweShort ≡ still (toU64 1) (toU64 400) (toU64 3) (toU64 1) : Out} := refl
+
+def owe-left : evidence {leftOf oweShort ≡ toU64 3 : U64} := refl
+
+def owe-wrote-rest : evidence {step0 (take oweShort) factWrote badBuf max10 (toU64 3) (toU64 0) ≡ quiet (toU64 400) : Out} := refl
+
+def owe-wrote-over : evidence {step0 owe400 factWrote badBuf max10 (toU64 9) (toU64 8) ≡ quiet (toU64 400) : Out} := refl
+
+def oweZero : run Out :=
+  step0 owe400 factWrote badBuf max10 (toU64 0) (toU64 8)
+
+def owe-wrote-zero : evidence {oweZero ≡ still (toU64 1) (toU64 400) (toU64 8) (toU64 1) : Out} := refl
+
+def owe-stale-owed : evidence {step0 (take oweZero) factWrote badBuf max10 (toU64 8) (toU64 1) ≡ quiet (toU64 400) : Out} := refl
+
+def owe-empty-span : evidence {step0 owe400 factWrote badBuf max10 (toU64 0) (toU64 0) ≡ quiet (toU64 400) : Out} := refl
+
+def owe413Short : run Out :=
+  step0 (take saw413Body) factWrote postBody (toU64 0) (toU64 1) (toU64 4)
+
+def owe-413-short : evidence {owe413Short ≡ still (toU64 1) (toU64 413) (toU64 3) (toU64 1) : Out} := refl
+
+def head-reply : evidence {sawHead ≡ reply (toU64 0) : Out} := refl
+
+def head-done : evidence {step0 (take sawHead) factWrote headBuf max10 (toU64 8) (toU64 8) ≡ idle : Out} := refl
+
+def close-reply : evidence {sawClose ≡ reply (toU64 1) : Out} := refl
+
+def close-done : evidence {step0 (take sawClose) factWrote closeBuf max10 (toU64 8) (toU64 8) ≡ quiet (toU64 0) : Out} := refl
+
+def http10-reply : evidence {sawHttp10 ≡ reply (toU64 1) : Out} := refl
+
+def http10-done : evidence {step0 (take sawHttp10) factWrote http10Buf max10 (toU64 8) (toU64 8) ≡ quiet (toU64 0) : Out} := refl
+
+def reply-short : evidence {step0 repGet factWrote getBuf max10 (toU64 3) (toU64 8) ≡ still (toU64 3) (toU64 0) (toU64 5) (toU64 0) : Out} := refl
+
+def replyLeft : run Out :=
+  step0 repGet factWrote getBuf max10 (toU64 1) (toU64 8)
+
+def reply-left : evidence {leftOf replyLeft ≡ toU64 7 : U64} := refl
+
+def replyTwo : run Out :=
+  step0 (take replyLeft) factWrote getBuf max10 (toU64 2) (toU64 0)
+
+def reply-two-shorts : evidence {leftOf replyTwo ≡ toU64 5 : U64} := refl
+
+def reply-three-shorts : evidence {step0 (take replyTwo) factWrote getBuf max10 (toU64 5) (toU64 99) ≡ idle : Out} := refl
+
+def reply-done : evidence {step0 repGet factWrote getBuf max10 (toU64 8) (toU64 8) ≡ idle : Out} := refl
+
+def reply-over : evidence {step0 repGet factWrote getBuf max10 (toU64 9) (toU64 8) ≡ idle : Out} := refl
+
+def replyZero : run Out :=
+  step0 repGet factWrote getBuf max10 (toU64 0) (toU64 8)
+
+def reply-wrote-zero : evidence {replyZero ≡ still (toU64 3) (toU64 0) (toU64 8) (toU64 0) : Out} := refl
+
+def reply-stale-owed : evidence {step0 (take replyZero) factWrote getBuf max10 (toU64 8) (toU64 0) ≡ idle : Out} := refl
+
+def reply-empty-span : evidence {step0 repGet factWrote getBuf max10 (toU64 0) (toU64 0) ≡ idle : Out} := refl
+
+def reply-failed : evidence {step0 repGet factFailed getBuf max10 (toU64 0) (toU64 0) ≡ quiet (toU64 0) : Out} := refl
+
+def reply-failed-mid : evidence {step0 (take replyLeft) factFailed getBuf max10 (toU64 0) (toU64 0) ≡ quiet (toU64 0) : Out} := refl
+
+def reply-now : evidence {step0 repGet factNow getBuf max10 (toU64 0) (toU64 0) ≡ reply (toU64 0) : Out} := refl
+
+def reply-now-keeps-left : evidence {step0 (take replyLeft) factNow getBuf max10 (toU64 0) (toU64 0) ≡ still (toU64 3) (toU64 0) (toU64 7) (toU64 0) : Out} := refl
+
+def replyPeer : run Out :=
+  step0 (take sawTwo) factPeer twoGet max10 (toU64 0) (toU64 0)
+
+def peer-drops-tail : evidence {step0 (take replyPeer) factWrote twoGet max10 (toU64 4) (toU64 4) ≡ quiet (toU64 0) : Out} := refl
+
+def peer-keep : evidence {keepOut replyPeer ≡ toU64 1 : U64} := refl
+
+def pipe-one : evidence {sawTwo ≡ reply (toU64 0) : Out} := refl
+
+def pipe-tail : evidence {tailOf twoGet ≡ getBuf : Slice} := refl
+
+def pipe-second : evidence {step0 (take sawTwo) factWrote twoGet max10 (toU64 4) (toU64 4) ≡ reply (toU64 0) : Out} := refl
+
+def pipe-done : evidence {step0 (take (step0 (take sawTwo) factWrote twoGet max10 (toU64 4) (toU64 4))) factWrote getBuf max10 (toU64 4) (toU64 4) ≡ idle : Out} := refl
+
+def pipe-partial : evidence {step0 (take sawPipe) factWrote pipePart max10 (toU64 4) (toU64 4) ≡ more : Out} := refl
+
+def frame-get : evidence {framedEnd getBuf ≡ sliceLen getBuf : U64} := refl
+
+def stream-outside : evidence {coverOf sawStream ≡ toU64 1 : U64} := refl
+
+def stream-413 : evidence {sawStream413 ≡ owe (toU64 413) : Out} := refl
+
+def write-bytes-outside : evidence {coverOf (step0 repGet factBytes getBuf max10 (toU64 0) (toU64 0)) ≡ toU64 1 : U64} := refl
+
+def write-accept-outside : evidence {coverOf (step0 repGet factAccepted getBuf max10 (toU64 0) (toU64 0)) ≡ toU64 1 : U64} := refl
+
+def read-failed-outside : evidence {coverOf (step0 readSt factFailed getBuf max10 (toU64 0) (toU64 0)) ≡ toU64 1 : U64} := refl
+
+def idleSt : run St :=
+  take (step0 repGet factWrote getBuf max10 (toU64 8) (toU64 8))
+
+def idle-wrote-outside : evidence {coverOf (step0 idleSt factWrote b"" max10 (toU64 0) (toU64 0)) ≡ toU64 1 : U64} := refl
+
+def idle-failed-outside : evidence {coverOf (step0 idleSt factFailed b"" max10 (toU64 0) (toU64 0)) ≡ toU64 1 : U64} := refl
+
+def idle-peer : evidence {step0 idleSt factPeer b"" max10 (toU64 0) (toU64 0) ≡ quiet (toU64 0) : Out} := refl
+
+def idle-second : evidence {step0 idleSt factBytes getBuf max10 (toU64 0) (toU64 0) ≡ reply (toU64 0) : Out} := refl
+
+def idle-partial : evidence {step0 idleSt factBytes lineBuf max10 (toU64 0) (toU64 0) ≡ more : Out} := refl
+
+def nowBefore : run Out :=
+  stepFact readSt factNow getBuf max10 (toU64 0) (toU64 0) (toU64 1000) (toU64 61000) (toU64 60000)
+
+def nowAfter : run Out :=
+  stepFact readSt factNow getBuf max10 (toU64 0) (toU64 0) (toU64 70000) (toU64 61000) (toU64 60000)
+
+def now-before : evidence {nowBefore ≡ quiet (toU64 0) : Out} := refl
+
+def now-after : evidence {nowAfter ≡ quiet (toU64 0) : Out} := refl
+
+def now-clocks-agree : evidence {nowBefore ≡ nowAfter : Out} := refl
+
+def idleBefore : run Out :=
+  stepFact idleSt factNow b"" max10 (toU64 0) (toU64 0) (toU64 1000) (toU64 61000) (toU64 60000)
+
+def idleAfter : run Out :=
+  stepFact idleSt factNow b"" max10 (toU64 0) (toU64 0) (toU64 70000) (toU64 61000) (toU64 60000)
+
+def idle-now-before : evidence {idleBefore ≡ quiet (toU64 0) : Out} := refl
+
+def idle-now-after : evidence {idleAfter ≡ quiet (toU64 0) : Out} := refl
+
+def idle-clocks-agree : evidence {idleBefore ≡ idleAfter : Out} := refl
+
+def sawAcceptWake : run Out :=
+  stepFact readSt factAccepted b"" max10 (toU64 0) (toU64 0) (toU64 1000) (toU64 424242) (toU64 60000)
+
+def accept-wake : evidence {wakeOf sawAcceptWake ≡ toU64 61000 : U64} := refl
+
+def accept-drops-deadline : evidence {sawAcceptWake ≡ moreAt (toU64 1000) (toU64 0) (toU64 60000) : Out} := refl
+
+def sawLineKeep : run Out :=
+  stepFact readSt factBytes lineBuf max10 (toU64 0) (toU64 0) (toU64 1000) (toU64 424242) (toU64 60000)
+
+def line-wake-keeps : evidence {wakeOf sawLineKeep ≡ toU64 424242 : U64} := refl
+
+def sawLineArm : run Out :=
+  stepFact readSt factBytes lineBuf max10 (toU64 0) (toU64 0) (toU64 1000) (toU64 0) (toU64 60000)
+
+def line-wake-arms : evidence {wakeOf sawLineArm ≡ toU64 61000 : U64} := refl
+
+def replyWake : run Out :=
+  stepFact readSt factBytes getBuf max10 (toU64 0) (toU64 0) (toU64 1000) (toU64 424242) (toU64 60000)
+
+def reply-wake-zero : evidence {wakeOf replyWake ≡ toU64 0 : U64} := refl
+
+def backArm : run Out :=
+  stepFact repGet factWrote getBuf max10 (toU64 8) (toU64 8) (toU64 1000) (toU64 0) (toU64 60000)
+
+def idle-wake-arms : evidence {backArm ≡ idleAt (toU64 1000) (toU64 0) (toU64 60000) : Out} := refl
+
+def idle-wake : evidence {wakeOf backArm ≡ toU64 61000 : U64} := refl
+
+def backKeep : run Out :=
+  stepFact repGet factWrote getBuf max10 (toU64 8) (toU64 8) (toU64 1000) (toU64 424242) (toU64 60000)
+
+def idle-wake-keeps : evidence {wakeOf backKeep ≡ toU64 424242 : U64} := refl
+
+def closed-wake : evidence {wakeOf (stepFact closed413 factNow tooBig max10 (toU64 0) (toU64 0) (toU64 1000) (toU64 1) (toU64 60000)) ≡ toU64 0 : U64} := refl
 
 def capLine : run Slice :=
   b"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
-
 def capHdr : run Slice :=
   b"GET / HTTP/1.1\r\nyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy"
-
 def sawCapLine : run Out :=
-  stepFact readSt factBytes capLine maxBig (toU64 0) (toU64 0)
+  step0 readSt factBytes capLine maxBig (toU64 0) (toU64 0)
 
 def sawCapHdr : run Out :=
-  stepFact readSt factBytes capHdr maxBig (toU64 0) (toU64 0)
+  step0 readSt factBytes capHdr maxBig (toU64 0) (toU64 0)
 
-def cap-line-outside : evidence {sawCapLine ≡ outside : Out} := refl
+def cap-line-414 : evidence {sawCapLine ≡ owe (toU64 414) : Out} := refl
 
-def cap-hdr-outside : evidence {sawCapHdr ≡ outside : Out} := refl
+def cap-hdr-431 : evidence {sawCapHdr ≡ owe (toU64 431) : Out} := refl
+
+def capLineShort : run Out :=
+  step0 (take sawCapLine) factWrote capLine maxBig (toU64 1) (toU64 4)
+
+def cap-line-short : evidence {capLineShort ≡ still (toU64 1) (toU64 414) (toU64 3) (toU64 1) : Out} := refl
+
+def cap-line-done : evidence {step0 (take capLineShort) factWrote capLine maxBig (toU64 3) (toU64 0) ≡ quiet (toU64 414) : Out} := refl
+
+def cap-hdr-done : evidence {step0 (take sawCapHdr) factWrote capHdr maxBig (toU64 5) (toU64 5) ≡ quiet (toU64 431) : Out} := refl
