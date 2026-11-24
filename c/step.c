@@ -692,6 +692,7 @@ static int pump(HttpStep *st, const StepIn *in, StepOut *out) {
 static int take_fact(HttpStep *st, const StepIn *in, StepOut *out) {
   if (in->kind == MURO_STEP_ACCEPTED) {
     st->st = begin();
+    proto_free(st->proto);
     st->proto = proto_begin();
     st->ver11 = 1;
     st->pend_kind = PEND_NONE;
