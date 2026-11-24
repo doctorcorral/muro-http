@@ -19,16 +19,21 @@
   unconsumed slice. Passing the original two-GET buffer again is
   outside that contract. `c/step.c` and `c/host.c` are unchanged.
   The generated step is not the function the host calls: it does not
-  render, run the handler, or own the buffers. `cover` 1 is outside
-  this slice: chunked, 100 Continue, a streamed body whose
-  Content-Length is within max (the host pulls it), a finished
-  request that arrived on a peer close, a wrote or a failure while
-  the connection is reading or idle (book phase 0 or book phase 4),
-  and bytes or accept during a write. Not claimed here: a pulled
-  body, fuel, a handler 500, and the 100 Continue span. Versus
-  `main`, the book adds 69 evidence theorems and removes 4, a net
-  of +65, 109 total. The library version stays `0.1.0-dev`. The pin
-  stays muro `0.22.24`.
+  render, run the handler, or own the buffers. A finished buffered
+  request on a peer close is a handler span with `keep` 1, and the
+  completing write closes (`fin-get-reply`, `fin-body-reply`,
+  `idle-peer-get`). `cover` 1 is outside this slice: chunked, 100
+  Continue, a streamed body whose Content-Length is within max
+  while the peer is still open (the host pulls it), a wrote or a
+  failure while the connection is reading or idle (book phase 0 or
+  book phase 4), bytes or accept during a write, and accept while
+  idle. Not claimed here: a pulled body, fuel, a handler 500, and
+  the 100 Continue span. Versus `origin/main`, the book adds 17
+  evidence theorems and removes 2, a net of +15, 124 total. The
+  comparison harness names each `cover=1` reason, checks the host
+  on that path, and compares status text, `keep`, span, phase, and
+  the first-park length on covered steps. The library version stays
+  `0.1.0-dev`. The pin stays muro `0.22.24`.
 - Pin muro `0.22.24` from Hex (`{:muro, "~> 0.22.24"}` in
   `mix.exs`, `muro: "0.22.24"` in `muro.exs`), after merging `#20`.
   `priv/muro/http/step.muro` marks a header block past 16384, and a
