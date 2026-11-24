@@ -309,15 +309,16 @@ static int conn_is(const uint8_t *p, size_t n, uint64_t keep) {
   return has_lit(p, n, lit);
 }
 
-/* Reasons a step may be cover 1. OUT_NO means the step is in the slice. */
+/* Reasons a step may be cover 1. OUT_NO means the step is in the slice.
+   A wrote or a failure while reading or idle is in the slice, so there
+   is no bare-write reason. */
 enum {
   OUT_NO = 0,
   OUT_CHUNK = 1,
   OUT_CONT = 2,
   OUT_STREAM = 3,
-  OUT_BARE = 4,
-  OUT_WRITE_FACT = 5,
-  OUT_IDLE_ACCEPT = 6
+  OUT_WRITE_FACT = 4,
+  OUT_IDLE_ACCEPT = 5
 };
 
 static int named_out(const char *name) {
@@ -420,10 +421,6 @@ static int host_outside(int why, const StepOut *o, const Box *b, int prev_phase,
     if (!conn_is(o->bytes, o->len, 1)) return fail(name);
     if (o->wake_at != 0) return fail(name);
     return 0;
-  }
-  if (why == OUT_BARE) {
-    int phase = prev_phase == MURO_STEP_PH_IDLE ? MURO_STEP_PH_IDLE : MURO_STEP_PH_READ;
-    return host_read_park(o, b, phase, wake, name);
   }
   if (why == OUT_IDLE_ACCEPT) {
     return host_read_park(o, b, MURO_STEP_PH_READ, now + (uint64_t)b->st.idle_ms, name);
@@ -581,6 +578,42 @@ static int same_status(const StepOut *h, const StepOut *a) {
   return memcmp(h->status, a->status, h->status_len) == 0;
 }
 
+/* cover 1, and a later fact on that shut step. The host is not the
+   oracle here: the adapter's own shape is. want_note 0 means the
+   shut path, which sets no note. */
+static int adapter_shut(const StepOut *bo, const BookStep *bk, int brc, int want_note) {
+  if (brc != 0) return 0;
+  if (muro_book_phase(bk) != MURO_STEP_PH_CLOSED) return 0;
+  if (bo->note != want_note) return 0;
+  if (!bo->close_conn || bo->status_now || bo->wake_at) return 0;
+  if (bo->read_more || bo->write_more || bo->interim || bo->cont) return 0;
+  if ((bo->bytes && bo->len) || (bo->status && bo->status_len)) return 0;
+  if (bk->read_more && *bk->read_more) return 0;
+  if (bk->write_more && *bk->write_more) return 0;
+  return 1;
+}
+
+static int protos_agree(const Proto *h, const Proto *a) {
+  ProtoMove x, y;
+  int n;
+  int i;
+  int hl = h && proto_live(h);
+  int al = a && proto_live(a);
+  int hd = h && proto_done(h);
+  int ad = a && proto_done(a);
+  if (hl != al || hd != ad) return 0;
+  if (!h || !a) return h == a;
+  n = proto_move_count(h);
+  if (n != proto_move_count(a)) return 0;
+  for (i = 0; i < n; i++) {
+    if (!proto_move_at(h, i, &x) || !proto_move_at(a, i, &y)) return 0;
+    if (x.dir != y.dir || x.kind != y.kind || x.bit != y.bit) return 0;
+    if ((x.ctor == NULL) != (y.ctor == NULL)) return 0;
+    if (x.ctor && strcmp(x.ctor, y.ctor) != 0) return 0;
+  }
+  return 1;
+}
+
 static int host_and_book(HttpStep *st, const StepIn *in, StepOut *out) {
   Box *b = (Box *)((unsigned char *)st - offsetof(Box, st));
   StepOut bo;
@@ -597,8 +630,22 @@ static int host_and_book(HttpStep *st, const StepIn *in, StepOut *out) {
   rc = real_step(st, in, out);
   memset(&bo, 0, sizeof bo);
   brc = muro_book_step(&b->bk, in, &bo);
-  if (skip || b->bk.last_cover) {
+  if (b->bk.last_cover) {
     book_skip += 1;
+    if (!adapter_shut(&bo, &b->bk, brc, MURO_BOOK_NOTE_COVER)) {
+      fprintf(stderr, "book adapter cover fact %d note %d phase %d read %d write %d len %zu\n",
+              in->kind, bo.note, muro_book_phase(&b->bk), bo.read_more, bo.write_more, bo.len);
+      return -1;
+    }
+    return rc;
+  }
+  if (skip) {
+    book_skip += 1;
+    if (!adapter_shut(&bo, &b->bk, brc, 0)) {
+      fprintf(stderr, "book adapter shut fact %d note %d phase %d len %zu\n", in->kind, bo.note,
+              muro_book_phase(&b->bk), bo.len);
+      return -1;
+    }
     return rc;
   }
   book_cmp += 1;
@@ -608,14 +655,26 @@ static int host_and_book(HttpStep *st, const StepIn *in, StepOut *out) {
       out->read_more != bo.read_more || out->write_more != bo.write_more ||
       out->close_conn != bo.close_conn || out->status_now != bo.status_now ||
       out->interim != bo.interim || out->cont != bo.cont || out->wake_at != bo.wake_at ||
-      !same_span(out, b->outb, &bo, b->bout) || !same_status(out, &bo)) {
+      out->note != bo.note || out->note2 != bo.note2 || !same_span(out, b->outb, &bo, b->bout) ||
+      !same_status(out, &bo)) {
     fprintf(stderr,
             "book adapter fact %d phase host %d book %d in %zu/%zu close %d/%d read %d/%d "
-            "write %d/%d wake %llu/%llu len %zu/%zu rc %d/%d\n",
+            "write %d/%d wake %llu/%llu len %zu/%zu note %d/%d rc %d/%d\n",
             in->kind, muro_http_step_phase(st), muro_book_phase(&b->bk), muro_http_step_in_len(st),
             muro_book_in_len(&b->bk), out->close_conn, bo.close_conn, out->read_more, bo.read_more,
             out->write_more, bo.write_more, (unsigned long long)out->wake_at,
-            (unsigned long long)bo.wake_at, out->len, bo.len, rc, brc);
+            (unsigned long long)bo.wake_at, out->len, bo.len, out->note, bo.note, rc, brc);
+    return -1;
+  }
+  if (!protos_agree(st->proto, b->bk.proto)) {
+    ProtoMove mv;
+    int hn = st->proto ? proto_move_count(st->proto) : -1;
+    int an = b->bk.proto ? proto_move_count(b->bk.proto) : -1;
+    const char *hc = (hn > 0 && proto_move_at(st->proto, hn - 1, &mv) && mv.ctor) ? mv.ctor : "-";
+    fprintf(stderr,
+            "book admit fact %d live %d/%d done %d/%d moves %d/%d host-last %s\n", in->kind,
+            st->proto && proto_live(st->proto), b->bk.proto && proto_live(b->bk.proto),
+            st->proto && proto_done(st->proto), b->bk.proto && proto_done(b->bk.proto), hn, an, hc);
     return -1;
   }
   return rc;
@@ -2265,6 +2324,530 @@ static int holds(int fact, int from_idle, const char *name) {
   return 0;
 }
 
+typedef struct PullBuf {
+  const uint8_t *p;
+  size_t n;
+  size_t off;
+} PullBuf;
+
+static int pull_take(uint8_t *dst, size_t cap, void *user) {
+  PullBuf *b = user;
+  size_t left;
+  size_t k;
+  if (!b || b->off >= b->n) return 0;
+  left = b->n - b->off;
+  k = left < cap ? left : cap;
+  if (k && dst) memcpy(dst, b->p + b->off, k);
+  b->off += k;
+  return (int)k;
+}
+
+static int on_close_after(const MuroHttpRequest *req, MuroHttpResponse *resp, void *user) {
+  on_req(req, resp, user);
+  resp->close_after = 1;
+  return 0;
+}
+
+static int on_bad(const MuroHttpRequest *req, MuroHttpResponse *resp, void *user) {
+  (void)req;
+  (void)user;
+  resp->status = 400;
+  resp->reason = "Bad";
+  resp->reason_len = 3;
+  resp->body = (const uint8_t *)"no";
+  resp->body_len = 2;
+  return 0;
+}
+
+static int on_handler_500(const MuroHttpRequest *req, MuroHttpResponse *resp, void *user) {
+  (void)req;
+  (void)user;
+  resp->owe_status = 1;
+  return -1;
+}
+
+static int on_refuse(const MuroHttpRequest *req, MuroHttpResponse *resp, void *user) {
+  (void)req;
+  (void)resp;
+  (void)user;
+  return -1;
+}
+
+static int on_too_big(const MuroHttpRequest *req, MuroHttpResponse *resp, void *user) {
+  (void)req;
+  resp->status = 200;
+  resp->reason = "OK";
+  resp->reason_len = 2;
+  resp->body = user;
+  resp->body_len = 70000;
+  return 0;
+}
+
+static int on_too_big_owe(const MuroHttpRequest *req, MuroHttpResponse *resp, void *user) {
+  on_too_big(req, resp, user);
+  resp->owe_status = 1;
+  return 0;
+}
+
+static int on_pull_len(const MuroHttpRequest *req, MuroHttpResponse *resp, void *user) {
+  (void)req;
+  resp->status = 200;
+  resp->reason = "OK";
+  resp->reason_len = 2;
+  resp->pull = pull_take;
+  resp->pull_user = user;
+  resp->has_length = 1;
+  resp->content_length = 2;
+  return 0;
+}
+
+static int on_pull_open(const MuroHttpRequest *req, MuroHttpResponse *resp, void *user) {
+  (void)req;
+  resp->status = 200;
+  resp->reason = "OK";
+  resp->reason_len = 2;
+  resp->pull = pull_take;
+  resp->pull_user = user;
+  return 0;
+}
+
+static void use_handler(Box *b, MuroHttpHandler fn, void *host_user, void *book_user) {
+  b->st.handler = fn;
+  b->bk.handler = fn;
+  b->st.handler_user = host_user;
+  b->bk.handler_user = book_user;
+}
+
+static int put_req(Box *b, const char *buf, StepOut *o) {
+  size_t n = strlen(buf);
+  if (n > IN_CAP) return -1;
+  memcpy(b->inb, buf, n);
+  muro_http_step_set_in_len(&b->st, n);
+  set_fact(b, MURO_STEP_BYTES, 0);
+  b->in.empty_before = 1;
+  memset(o, 0, sizeof *o);
+  return muro_http_step(&b->st, &b->in, o);
+}
+
+static int wrote_span(Box *b, const StepOut *prev, StepOut *o) {
+  set_fact(b, MURO_STEP_WROTE, prev->len);
+  memset(o, 0, sizeof *o);
+  return muro_http_step(&b->st, &b->in, o);
+}
+
+/* Handler results the book used to leave to the adapter. Each call
+   goes through host_and_book, so the adapter and muro_http_step
+   agree on the span, the phase, and the note. */
+static int handler_paths(void) {
+  Box b;
+  StepOut o;
+  StepOut nxt;
+  PullBuf host_pull;
+  PullBuf book_pull;
+  uint8_t *big;
+  const uint8_t *msg = NULL;
+  size_t msg_n = 0;
+  int log_500 = 0;
+  static const uint8_t body[] = {'o', 'k'};
+
+  if (open_acc(&b, 10, 1000, 0) < 0) return -1;
+  use_handler(&b, on_close_after, NULL, NULL);
+  if (put_req(&b, GET, &o) < 0 || phase_is(&b, MURO_STEP_PH_WRITE, "hand-close") < 0 ||
+      !o.bytes || !conn_is(o.bytes, o.len, 1) || !status_token(o.bytes, o.len, 200)) {
+    box_free(&b);
+    return fail("hand-close");
+  }
+  scripted += 1;
+  if (wrote_span(&b, &o, &nxt) < 0 || phase_is(&b, MURO_STEP_PH_CLOSED, "hand-close-done") < 0 ||
+      !nxt.close_conn) {
+    box_free(&b);
+    return fail("hand-close-done");
+  }
+  scripted += 1;
+  box_free(&b);
+
+  if (open_acc(&b, 10, 1000, 0) < 0) return -1;
+  use_handler(&b, on_bad, NULL, NULL);
+  if (put_req(&b, GET, &o) < 0 || phase_is(&b, MURO_STEP_PH_WRITE, "hand-400") < 0 || !o.bytes ||
+      !conn_is(o.bytes, o.len, 1) || !status_token(o.bytes, o.len, 400)) {
+    box_free(&b);
+    return fail("hand-400");
+  }
+  scripted += 1;
+  if (wrote_span(&b, &o, &nxt) < 0 || phase_is(&b, MURO_STEP_PH_CLOSED, "hand-400-done") < 0 ||
+      !nxt.close_conn) {
+    box_free(&b);
+    return fail("hand-400-done");
+  }
+  scripted += 1;
+  box_free(&b);
+
+  if (open_acc(&b, 10, 1000, 0) < 0) return -1;
+  use_handler(&b, on_handler_500, NULL, NULL);
+  if (put_req(&b, GET, &o) < 0 || phase_is(&b, MURO_STEP_PH_DECIDE, "hand-500") < 0 ||
+      o.note != MURO_STEP_NOTE_HANDLER_500 || !o.close_conn || (o.bytes && o.len) ||
+      muro_book_phase(&b.bk) != MURO_STEP_PH_DECIDE) {
+    box_free(&b);
+    return fail("hand-500");
+  }
+  scripted += 1;
+  muro_http_step_close_status(&b.st, (const uint8_t *)DATE, 29, &msg, &msg_n, &log_500);
+  if (!msg || !status_token(msg, msg_n, 500)) {
+    box_free(&b);
+    return fail("hand-500-status");
+  }
+  scripted += 1;
+  if (!b.bk.owe || !b.bk.rendered || !status_token(b.bout, b.bk.out_len, 500)) {
+    box_free(&b);
+    return fail("hand-500-book");
+  }
+  scripted += 1;
+  set_fact(&b, MURO_STEP_NOW, 0);
+  memset(&nxt, 0, sizeof nxt);
+  if (muro_http_step(&b.st, &b.in, &nxt) < 0 || phase_is(&b, MURO_STEP_PH_DECIDE, "hand-500-later") < 0 ||
+      !nxt.close_conn || nxt.note || (nxt.bytes && nxt.len) ||
+      muro_book_phase(&b.bk) != MURO_STEP_PH_DECIDE) {
+    box_free(&b);
+    return fail("hand-500-later");
+  }
+  scripted += 1;
+  box_free(&b);
+
+  /* hand-refuse: a refused handler without owe_status shuts in
+     decide with no note and no 500. A later fact stays shut. */
+  if (open_acc(&b, 10, 1000, 0) < 0) return -1;
+  use_handler(&b, on_refuse, NULL, NULL);
+  if (put_req(&b, GET, &o) < 0 || phase_is(&b, MURO_STEP_PH_DECIDE, "hand-refuse") < 0 || o.note ||
+      !o.close_conn || (o.bytes && o.len) || muro_book_phase(&b.bk) != MURO_STEP_PH_DECIDE ||
+      b.bk.owe) {
+    box_free(&b);
+    return fail("hand-refuse");
+  }
+  scripted += 1;
+  set_fact(&b, MURO_STEP_NOW, 0);
+  memset(&nxt, 0, sizeof nxt);
+  if (muro_http_step(&b.st, &b.in, &nxt) < 0 || phase_is(&b, MURO_STEP_PH_DECIDE, "hand-refuse-later") < 0 ||
+      !nxt.close_conn || nxt.note || (nxt.bytes && nxt.len) ||
+      muro_book_phase(&b.bk) != MURO_STEP_PH_DECIDE) {
+    box_free(&b);
+    return fail("hand-refuse-later");
+  }
+  scripted += 1;
+  box_free(&b);
+
+  host_pull.p = body;
+  host_pull.n = 2;
+  host_pull.off = 0;
+  book_pull = host_pull;
+  if (open_acc(&b, 10, 1000, 0) < 0) return -1;
+  use_handler(&b, on_pull_len, &host_pull, &book_pull);
+  if (put_req(&b, GET, &o) < 0 || phase_is(&b, MURO_STEP_PH_WRITE, "hand-pull-len") < 0 || !o.bytes ||
+      !has_lit(o.bytes, o.len, "Content-Length: 2\r\n") || !conn_is(o.bytes, o.len, 0) ||
+      host_pull.off || book_pull.off) {
+    box_free(&b);
+    return fail("hand-pull-len");
+  }
+  scripted += 1;
+  if (wrote_span(&b, &o, &nxt) < 0 || phase_is(&b, MURO_STEP_PH_WRITE, "hand-pull-body") < 0 ||
+      !nxt.bytes || nxt.len != 2 || memcmp(nxt.bytes, "ok", 2) != 0) {
+    box_free(&b);
+    return fail("hand-pull-body");
+  }
+  scripted += 1;
+  if (wrote_span(&b, &nxt, &o) < 0 || phase_is(&b, MURO_STEP_PH_IDLE, "hand-pull-idle") < 0 ||
+      o.close_conn || (o.bytes && o.len)) {
+    box_free(&b);
+    return fail("hand-pull-idle");
+  }
+  scripted += 1;
+  box_free(&b);
+
+  host_pull.off = 0;
+  book_pull.off = 0;
+  if (open_acc(&b, 10, 1000, 0) < 0) return -1;
+  use_handler(&b, on_pull_open, &host_pull, &book_pull);
+  if (put_req(&b, GET, &o) < 0 || phase_is(&b, MURO_STEP_PH_WRITE, "hand-pull-chunk") < 0 ||
+      !o.bytes || !has_lit(o.bytes, o.len, "Transfer-Encoding: chunked\r\n") ||
+      !conn_is(o.bytes, o.len, 0)) {
+    box_free(&b);
+    return fail("hand-pull-chunk");
+  }
+  scripted += 1;
+  if (wrote_span(&b, &o, &nxt) < 0 || phase_is(&b, MURO_STEP_PH_WRITE, "hand-pull-chunk-body") < 0 ||
+      !nxt.bytes || !has_lit(nxt.bytes, nxt.len, "ok")) {
+    box_free(&b);
+    return fail("hand-pull-chunk-body");
+  }
+  scripted += 1;
+  if (wrote_span(&b, &nxt, &o) < 0 || phase_is(&b, MURO_STEP_PH_WRITE, "hand-pull-last") < 0 ||
+      !o.bytes || !has_lit(o.bytes, o.len, "0\r\n\r\n")) {
+    box_free(&b);
+    return fail("hand-pull-last");
+  }
+  scripted += 1;
+  if (wrote_span(&b, &o, &nxt) < 0 || phase_is(&b, MURO_STEP_PH_IDLE, "hand-pull-chunk-idle") < 0 ||
+      nxt.close_conn) {
+    box_free(&b);
+    return fail("hand-pull-chunk-idle");
+  }
+  scripted += 1;
+  box_free(&b);
+
+  host_pull.off = 0;
+  book_pull.off = 0;
+  if (open_acc(&b, 10, 1000, 0) < 0) return -1;
+  use_handler(&b, on_pull_open, &host_pull, &book_pull);
+  if (put_req(&b, HEAD, &o) < 0 || phase_is(&b, MURO_STEP_PH_WRITE, "hand-pull-head") < 0 ||
+      !o.bytes || !conn_is(o.bytes, o.len, 1) || host_pull.off || book_pull.off) {
+    box_free(&b);
+    return fail("hand-pull-head");
+  }
+  scripted += 1;
+  if (wrote_span(&b, &o, &nxt) < 0 || phase_is(&b, MURO_STEP_PH_CLOSED, "hand-pull-head-done") < 0 ||
+      !nxt.close_conn || host_pull.off || book_pull.off) {
+    box_free(&b);
+    return fail("hand-pull-head-done");
+  }
+  scripted += 1;
+  box_free(&b);
+
+  host_pull.off = 0;
+  book_pull.off = 0;
+  if (open_acc(&b, 10, 1000, 0) < 0) return -1;
+  use_handler(&b, on_pull_open, &host_pull, &book_pull);
+  if (put_req(&b, HTTP10, &o) < 0 || phase_is(&b, MURO_STEP_PH_WRITE, "hand-pull-delim") < 0 ||
+      !o.bytes || !conn_is(o.bytes, o.len, 1)) {
+    box_free(&b);
+    return fail("hand-pull-delim");
+  }
+  scripted += 1;
+  if (wrote_span(&b, &o, &nxt) < 0 || phase_is(&b, MURO_STEP_PH_WRITE, "hand-pull-delim-body") < 0 ||
+      !nxt.bytes || nxt.len != 2 || memcmp(nxt.bytes, "ok", 2) != 0) {
+    box_free(&b);
+    return fail("hand-pull-delim-body");
+  }
+  scripted += 1;
+  if (wrote_span(&b, &nxt, &o) < 0 || phase_is(&b, MURO_STEP_PH_CLOSED, "hand-pull-delim-done") < 0 ||
+      !o.close_conn) {
+    box_free(&b);
+    return fail("hand-pull-delim-done");
+  }
+  scripted += 1;
+  box_free(&b);
+
+  big = malloc(70000);
+  if (!big) return fail("hand-big alloc");
+  memset(big, 'x', 70000);
+  if (open_acc(&b, 8388608, 1000, 0) < 0) {
+    free(big);
+    return -1;
+  }
+  use_handler(&b, on_too_big, big, big);
+  if (put_req(&b, GET, &o) < 0 || phase_is(&b, MURO_STEP_PH_DECIDE, "hand-toobig") < 0 ||
+      o.note != MURO_STEP_NOTE_TOO_BIG || !o.close_conn || (o.bytes && o.len)) {
+    box_free(&b);
+    free(big);
+    return fail("hand-toobig");
+  }
+  scripted += 1;
+  box_free(&b);
+
+  if (open_acc(&b, 8388608, 1000, 0) < 0) {
+    free(big);
+    return -1;
+  }
+  use_handler(&b, on_too_big_owe, big, big);
+  if (put_req(&b, GET, &o) < 0 || phase_is(&b, MURO_STEP_PH_WRITE, "hand-toobig-owe") < 0 ||
+      o.note != MURO_STEP_NOTE_TOO_BIG_COMMIT || !o.bytes || !status_token(o.bytes, o.len, 500) ||
+      !conn_is(o.bytes, o.len, 1)) {
+    box_free(&b);
+    free(big);
+    return fail("hand-toobig-owe");
+  }
+  scripted += 1;
+  box_free(&b);
+  free(big);
+  return 0;
+}
+
+/* cover 1 shuts the adapter. A later fact stays shut: close, image
+   closed, no interests, no span, and no second cover note. */
+static int cover_stays_shut(void) {
+  BookStep b;
+  struct HostIn hin;
+  StepIn in;
+  StepOut out;
+  uint8_t ibuf[256];
+  uint8_t obuf[512];
+  int rd = 1;
+  int wr = 1;
+  size_t n;
+  n = strlen(CHUNK);
+  if (n >= sizeof ibuf) return fail("cover-shut");
+  memcpy(ibuf, CHUNK, n);
+  memset(&b, 0, sizeof b);
+  host_in_init(&hin, -1, 10);
+  muro_book_bind(&b, ibuf, sizeof ibuf, obuf, sizeof obuf, &hin, &rd, &wr, on_req, NULL, 10, 60000);
+  muro_book_set_in_len(&b, n);
+  memset(&in, 0, sizeof in);
+  in.kind = MURO_STEP_BYTES;
+  in.now_ms = 1000;
+  in.date = (const uint8_t *)DATE;
+  in.date_n = 29;
+  in.empty_before = 1;
+  memset(&out, 0, sizeof out);
+  if (muro_book_step(&b, &in, &out) != 0 || !adapter_shut(&out, &b, 0, MURO_BOOK_NOTE_COVER)) {
+    host_in_close(&hin);
+    return fail("cover-shut");
+  }
+  scripted += 1;
+  in.kind = MURO_STEP_NOW;
+  memset(&out, 0, sizeof out);
+  rd = 1;
+  wr = 1;
+  if (muro_book_step(&b, &in, &out) != 0 || !adapter_shut(&out, &b, 0, 0) || b.last_cover) {
+    host_in_close(&hin);
+    return fail("cover-later");
+  }
+  scripted += 1;
+  in.kind = MURO_STEP_BYTES;
+  memset(&out, 0, sizeof out);
+  if (muro_book_step(&b, &in, &out) != 0 || !adapter_shut(&out, &b, 0, 0)) {
+    host_in_close(&hin);
+    return fail("cover-bytes");
+  }
+  scripted += 1;
+  host_in_close(&hin);
+  muro_book_shutdown(&b);
+  return 0;
+}
+
+/* An invariant failure shuts with MURO_BOOK_NOTE_STUCK, not the
+   cover note. A covered GET with no handler cannot render, so the
+   adapter closes with note 7. A later fact stays shut with note 0. */
+static int stuck_note(void) {
+  BookStep b;
+  struct HostIn hin;
+  StepIn in;
+  StepOut out;
+  uint8_t ibuf[256];
+  uint8_t obuf[512];
+  int rd = 1;
+  int wr = 1;
+  size_t n;
+  n = strlen(GET);
+  if (n >= sizeof ibuf) return fail("stuck-note");
+  memcpy(ibuf, GET, n);
+  memset(&b, 0, sizeof b);
+  host_in_init(&hin, -1, 10);
+  muro_book_bind(&b, ibuf, sizeof ibuf, obuf, sizeof obuf, &hin, &rd, &wr, NULL, NULL, 10, 60000);
+  muro_book_set_in_len(&b, n);
+  memset(&in, 0, sizeof in);
+  in.kind = MURO_STEP_BYTES;
+  in.now_ms = 1000;
+  in.date = (const uint8_t *)DATE;
+  in.date_n = 29;
+  in.empty_before = 1;
+  memset(&out, 0, sizeof out);
+  if (muro_book_step(&b, &in, &out) != 0 || !adapter_shut(&out, &b, 0, MURO_BOOK_NOTE_STUCK) ||
+      b.last_cover) {
+    host_in_close(&hin);
+    return fail("stuck-note");
+  }
+  scripted += 1;
+  in.kind = MURO_STEP_NOW;
+  memset(&out, 0, sizeof out);
+  rd = 1;
+  wr = 1;
+  if (muro_book_step(&b, &in, &out) != 0 || !adapter_shut(&out, &b, 0, 0)) {
+    host_in_close(&hin);
+    return fail("stuck-later");
+  }
+  scripted += 1;
+  host_in_close(&hin);
+  muro_book_shutdown(&b);
+  return 0;
+}
+
+/* streamTake is 1 only for a Content-Length past 16384. A normal GET
+   captures nothing. The peer-close streamed body does, on both the
+   host and the adapter, before the handler binds. */
+static int capture_stream(void) {
+  Box b;
+  StepOut o;
+  size_t n;
+  if (open_acc(&b, 8388608, 1000, 0) < 0) return -1;
+  n = strlen(GET);
+  memcpy(b.inb, GET, n);
+  muro_http_step_set_in_len(&b.st, n);
+  set_fact(&b, MURO_STEP_BYTES, 0);
+  b.in.empty_before = 1;
+  memset(&o, 0, sizeof o);
+  if (muro_http_step(&b.st, &b.in, &o) < 0 || b.hin.captured || b.bhin.captured) {
+    box_free(&b);
+    return fail("capture-get");
+  }
+  scripted += 1;
+  box_free(&b);
+  if (open_acc(&b, 8388608, 1000, 0) < 0) return -1;
+  n = strlen(STREAM);
+  memcpy(b.inb, STREAM, n);
+  muro_http_step_set_in_len(&b.st, n);
+  set_fact(&b, MURO_STEP_PEER_CLOSED, 0);
+  b.in.empty_before = 1;
+  memset(&o, 0, sizeof o);
+  if (muro_http_step(&b.st, &b.in, &o) < 0 || !b.hin.captured || !b.bhin.captured) {
+    fprintf(stderr, "capture-stream host %d book %d\n", b.hin.captured, b.bhin.captured);
+    box_free(&b);
+    return fail("capture-stream");
+  }
+  if (!o.bytes || !conn_is(o.bytes, o.len, 1)) {
+    box_free(&b);
+    return fail("capture-stream close");
+  }
+  scripted += 1;
+  box_free(&b);
+  return 0;
+}
+
+/* The last admit of a keep-alive GET is the reply. The last admit
+   of the completing write is done. The session stays open. */
+static int admit_agrees(void) {
+  Box b;
+  StepOut seen;
+  http_step_St st;
+  uint64_t wake;
+  if (open_acc(&b, 10, 1000, 0) < 0) return -1;
+  if (!b.st.proto || !b.bk.proto || !proto_live(b.st.proto) || proto_done(b.st.proto) ||
+      proto_move_count(b.st.proto) != 0 || !protos_agree(b.st.proto, b.bk.proto)) {
+    box_free(&b);
+    return fail("admit-accept");
+  }
+  scripted += 1;
+  st = http_step_readSt();
+  if (reply_bytes(&b, &st, GET, 0, &seen, "admit-get") < 0) {
+    box_free(&b);
+    return -1;
+  }
+  if (!proto_live(b.st.proto) || proto_done(b.st.proto) || !protos_agree(b.st.proto, b.bk.proto)) {
+    box_free(&b);
+    return fail("admit-get");
+  }
+  scripted += 1;
+  wake = armed(1000, 0, (uint64_t)b.st.idle_ms);
+  if (full_write(&b, &st, seen, DEC_IDLE, 0, wake, "admit-idle") < 0) {
+    box_free(&b);
+    return -1;
+  }
+  if (!proto_live(b.st.proto) || proto_done(b.st.proto) || !protos_agree(b.st.proto, b.bk.proto)) {
+    box_free(&b);
+    return fail("admit-idle");
+  }
+  scripted += 1;
+  box_free(&b);
+  return 0;
+}
+
 int main(void) {
   uint64_t wake = 61000;
   if (decide(DEC_MORE, MURO_STEP_ACCEPTED, "", 10, 0, NULL, 0, wake, 0, "accept", NULL, NULL,
@@ -2353,6 +2936,7 @@ int main(void) {
   if (cap_span(7, "cap-431") < 0) return 1;
 
   if (keep_alive() < 0) return 1;
+  if (admit_agrees() < 0) return 1;
   if (clocks() < 0) return 1;
   if (one_byte(GET, 0, DEC_IDLE, "get-bytes") < 0) return 1;
   if (one_byte(CLOSE, 1, DEC_QUIET, "close-bytes") < 0) return 1;
@@ -2368,6 +2952,10 @@ int main(void) {
   if (holds(MURO_STEP_WRITE_FAILED, 1, "idle-failed-holds") < 0) return 1;
   if (reply_fail_and_now() < 0) return 1;
   if (closes() < 0) return 1;
+  if (handler_paths() < 0) return 1;
+  if (cover_stays_shut() < 0) return 1;
+  if (stuck_note() < 0) return 1;
+  if (capture_stream() < 0) return 1;
   if (sweep() < 0) return 1;
 
   printf("handwritten-after-close-spans %d\n", after_spans);

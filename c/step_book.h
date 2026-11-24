@@ -7,12 +7,20 @@
    in its place (see the muro-hello-book target).
 
    cover 1 fails closed: close_conn, image closed, note
-   MURO_BOOK_NOTE_COVER. The host logger only prints notes 1..5.
-   There is no fallback into c/step.c. */
+   MURO_BOOK_NOTE_COVER, no read or write interest, and no span.
+   A later fact on that step stays shut. Note
+   MURO_BOOK_NOTE_STUCK is an invariant failure, not a cover.
+   The host logger only prints notes 1..5.
+   There is no fallback into c/step.c.
+
+   Accept begins the same Proto session c/step.c begins. Each later
+   fact is proto_admit with the image phase, the classifier tag, and
+   the reply bit the host passes. A refusal is note
+   MURO_STEP_NOTE_ADMIT. cover 1 does not admit. */
 
 #include "step.h"
 
-enum { MURO_BOOK_NOTE_COVER = 6 };
+enum { MURO_BOOK_NOTE_COVER = 6, MURO_BOOK_NOTE_STUCK = 7 };
 
 typedef struct BookStep {
   int *read_more;
@@ -30,6 +38,23 @@ typedef struct BookStep {
   int blind;
   int image;
   int is_head;
+  int ver11;
+  int resp_mode;
+  int pull_until_end;
+  MuroHttpPull pull;
+  void *pull_user;
+  uint64_t pull_left;
+  Proto *proto;
+  /* Image phase, half, and keep for proto_admit. The differential
+     image is `image`. half and keep are the conn fields the host
+     passes as close_after. */
+  int img_phase;
+  int img_half;
+  int img_keep;
+  int saw_status;
+  int reply_on;
+  int reply_bit;
+  int reply_bad;
   int last_cover;
   uint64_t bphase;
   uint64_t bcode;

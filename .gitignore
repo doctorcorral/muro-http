@@ -24,6 +24,7 @@ c/test_step
 c/test_step_slice
 c/muro-httpd
 c/muro-hello
+c/muro-hello-book
 c/muro-stream
 /bench/loadgen
 /bench/go-hello/go-hello

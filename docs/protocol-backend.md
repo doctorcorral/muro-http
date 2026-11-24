@@ -311,6 +311,8 @@ is still a partial request reads again. `keep` 1 closes instead:
 `Connection: close`, HTTP/1.0, or a peer close during the write.
 That peer close drops a pipelined tail. Book phase 2 has closed. A
 closed step ignores every later fact and disarms the deadline.
+Book phase 5 is a handler shut before a span is parked. The image
+stays in handle. A later fact is quiet, the same as a close.
 
 `n` is the wrote count. `owed` is the outstanding span when `left`
 is 0. A short write stores `left = owed - n`. The next wrote uses
@@ -366,20 +368,31 @@ while idle, stay `cover=1`: the host resets, and the book does not.
 body whose Content-Length is within max while the peer is still
 open (the host pulls it), accept during a write, and accept while
 idle. Chunked is outside even when the method would otherwise be
-501. Not claimed here: a pulled body, fuel, a handler 500, and the
-100 Continue span.
+501. `hand` decides the handler paths this slice used to leave
+open. `hclose` is `close_after` (the adapter also sets it when an
+open request body is not owned by the response pull). `hbad` is a
+status 400..599. A refused handler with `owe_status` is book phase
+5, code 500. A buffered body that does not fit is that same shut
+when `owe_status` is clear, and a 500 write with `keep` 1 when it
+is set (`hand-toobig`, `hand-toobig-owe`). A pull is a handler span
+whose span field is 3 (content-length), 4 (chunked), or 5
+(close-delimited). HEAD or a version other than HTTP/1.1 forces
+the delimited span and `keep` 1. `cover` stays 0 on all of these.
+Not claimed here: fuel, the 100 Continue span, and the host's
+deadline decision (`on_tick` compares the clocks).
 
 Every claim in the book header is an equation `mix muro.check`
-reduces. Versus `origin/main`, this book adds 7 evidence theorems
-and removes 5 (the old `cover=1` names for facts the host holds),
-a net of +2, 126 total. `c/test_step_slice` feeds the
+reduces. Versus `origin/main`, this book adds 17 evidence theorems
+and removes none, 143 total. `c/test_step_slice` feeds the
 same fact and the same buffer to `http_step_stepFact` and to
 `muro_http_step` on those paths, including short writes,
 keep-alive, one pipelined leftover, a peer close during a short
 write, bytes appended onto a leftover, idle `NOW`, a finished
 request on a peer close, a within-max streamed body on a peer
 close, and 414 / 431. It also compares `c/step_book.c` with
-`muro_http_step` on every covered `StepOut`. It
+`muro_http_step` on every covered `StepOut`, including the
+admit session (`proto_live`, `proto_done`, and the moves of the
+last admit). It
 sweeps small fact sequences: a `Connection: close` GET, two
 pipelined GETs, and a streamed body, along with the smaller
 buffers. After a quiet close (`Connection: close` or HTTP/1.0) a
@@ -404,8 +417,15 @@ into `c/step.c`. The production link is still `c/step.c`.
 `make c/muro-hello-book` builds the same hello server with
 `-DMURO_STEP_BOOK`. It is not the default target. A keep-alive span
 from the handwritten step still points into the send buffer bound
-by `muro_http_step_bind`. The admit wall stays in C. The adapter
-does not cover fuel, 100 Continue, chunked, a pulled or streamed
-body while the peer is open, accept during a write or while idle,
-or a handler-forced close the book did not already decide.
+by `muro_http_step_bind`. The admit wall stays in C. Accept calls
+`proto_begin`. Each later fact calls `proto_admit` with the image
+phase, the classifier tag, and the reply bit `c/step.c` passes. A
+refusal is note 1 (`MURO_STEP_NOTE_ADMIT`) and the same close or
+`-1` the host returns. The adapter does not cover fuel, 100
+Continue, chunked, a streamed body while the peer is open, accept
+during a write or while idle, or the deadline decision: `c/host.c`
+`on_tick` still decides when a deadline is due, and the book takes
+`NOW` as the tick.
+`python3 c/test_conformance.py c/muro-hello-book` passes 65 of
+those cases and fails the six `cover=1` ones.
 There is no HTTP/2 backend and no Elixir or muro-beam backend.
