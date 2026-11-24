@@ -282,36 +282,68 @@ set the count. Above 1, Linux binds each worker with
 `mix muro.gen` emits it as `c/generated/step_slice.c` with
 `c_prefix` `http_step_`. The host still calls the handwritten
 function in `c/step.c`. `c/host.c` is unchanged. The slice does not
-call the kernel or the clock.
+call the kernel or the clock, and it does not render bytes.
 
-The book covers one read: the request line, the headers, and a
-Content-Length body. While that read is still open it closes with
-`status_now` on 413, 417, and 501. It owes a write span for 400,
-for an unknown transfer coding (501), and for 413, 417, or 501
-after classify has already finished. A finished request the policy
-accepts is `framed`. The host still runs the handler and renders
-the response into the caller send buffer. The book does not render
-those bytes.
+The book decides one read, the protocol write, the handler write,
+and the idle tick. Phase 0 is reading. Phase 1 owes a protocol span
+and closes when that span finishes: 400, 413, 414, 417, 431, and
+501. A request line with no LF in the first 16384 bytes is 414. A
+header block past 16384 whose request line fit is 431. Phase 3 owes
+the handler span for a finished request the policy accepts. `keep` 0
+returns to phase 4 (idle) when that span finishes, and bytes past
+the request are classified in that same step. A leftover that is
+still a partial request reads again. `keep` 1 closes instead:
+`Connection: close`, HTTP/1.0, or a peer close during the write.
+That peer close drops a pipelined tail. Phase 2 has closed. A
+closed step ignores every later fact and disarms the deadline.
+
+`n` is the wrote count. `owed` is the outstanding span when `left`
+is 0. A short write stores `left = owed - n`. The next wrote uses
+that stored remainder, so a stale `owed` does not move the span.
+`n` greater than or equal to that base finishes the span. The host
+clamps the same way. A wrote with `left` 0 and `owed` 0 finishes
+because the caller named an empty span. The host has no such input.
+It finishes from its own byte counter.
+
+`now`, `deadline`, and `idle` are the adapter clock. Accept arms
+`now+idle` and ignores a carried deadline. A read or an idle step
+keeps a carried deadline, and arms `now+idle` when the deadline is
+0. A write parks with wake 0. `NOW` from read or from idle closes.
+The book does not compare `now` with the deadline: the fact is the
+tick. `NOW` during a write parks that same span again.
+
+While a read is still open, 413, 417, and 501 are `status_now`.
+Once classify has finished they are an owed span, including an
+unknown transfer coding (501). A streamed body (Content-Length past
+16384, not yet in the buffer) whose length is within max is outside
+(`cover=1`). The same body past max is an owed 413 span, because
+classify already finished.
+
+`cover` 1 stays outside: chunked bodies, 100 Continue, that streamed
+body, a finished request on a peer close, a wrote or a failure
+while nothing is owed, and bytes or accept during a write. Chunked
+is outside even when the method would otherwise be 501. Not claimed:
+a pulled body, fuel, a handler 500, and the 100 Continue span.
+
+Every claim in the book header is an equation `mix muro.check`
+reduces. `c/test_step_slice` feeds the same fact and the same buffer
+to `http_step_stepFact` and to `muro_http_step` on those paths,
+including short writes, keep-alive, one pipelined leftover, idle
+`NOW`, and 414 / 431. It also sweeps small fact sequences.
+`ACCEPTED` is not in the sweep: the host resets, and the book does
+not. After a `status_now` close, the handwritten step marks the
+connection shut, and the driver requires both sides to stay quiet.
 
 Once the book has closed, every later fact is ignored. No second
 span. `priv/muro/http/neg/step_span.muro` claims a span after the
 413 close. It is not in `muro.exs`. `mix muro.check --fuel 5000000`
 on that file refuses `span-after-close`, and `mix test` gates that
-refusal. `c/test_step_slice` feeds the same buffer to both functions
-on that slice. After a `status_now` close, the handwritten step
-marks the connection shut, and the driver requires both the book
-and `muro_http_step` to stay quiet.
+refusal.
 
-A header block past 16384 and a short `WROTE` (`n` below the
-outstanding span) are marked outside (`cover=1`) rather than 400
-or quiet. A finished request on a peer close is also outside.
-Not claimed by this slice: 100 Continue, chunked bodies,
-pipelining, a pulled body, an idle `MURO_STEP_NOW`,
-`WRITE_FAILED` of a handler response, keep-alive consume, fuel,
-and a handler 500. Chunked is outside the book even when the
-method would otherwise be 501.
-
-The admit wall, the request views, and `host_copy_response` stay
-in C. There is no HTTP/2 backend and no Elixir or muro-beam
-backend. A keep-alive span from the handwritten step still points
-into the send buffer bound by `muro_http_step_bind`.
+The generated step is not what `c/host.c` calls. It returns span
+kinds, not pointers into the send buffer. It does not call the
+handler, `host_copy_response`, or the admit wall, and it does not
+update `in_len`. A keep-alive span from the handwritten step still
+points into the send buffer bound by `muro_http_step_bind`. The
+admit wall, the request views, and `host_copy_response` stay in C.
+There is no HTTP/2 backend and no Elixir or muro-beam backend.
