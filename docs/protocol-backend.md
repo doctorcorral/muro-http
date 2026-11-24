@@ -342,62 +342,91 @@ tick. `NOW` during a write parks that same span again.
 While a read is still open, 413, 417, and 501 are `status_now`.
 Once classify has finished they are an owed span, including an
 unknown transfer coding (501). A streamed body (Content-Length past
-16384, not yet in the buffer) whose length is within max is outside
-(`cover=1`) while the peer is still open. The same body past max is
-an owed 413 span, because classify already finished. On a peer close
-the within-max body is the handler span with `keep` 1
-(`stream-peer-reply`, `stream-peer-done`). The completing write
-closes.
+16384, not yet in the buffer) whose length is within max is the
+handler reply at the request keep while the peer is still open
+(`stream-open`). The adapter sets `hclose` when that body stays
+open and the response pull does not own it, so the wire says
+`Connection: close`. The same body past max is an owed 413 span,
+because classify already finished. On a peer close the within-max
+body is the handler span with `keep` 1 (`stream-peer-reply`,
+`stream-peer-done`). The completing write closes.
 
 A finished buffered request on a peer close is a handler span
 with `keep` 1 (`fin-get-reply`, `fin-body-reply`, `idle-peer-get`).
-The completing write closes. Chunked and 100 Continue on that
-close stay outside. A streamed body past 16384 is that handler
-span only when the peer has closed. While the peer is open and the
-length is within max, the host pulls the body and the step stays
-`cover=1`.
+The completing write closes. A chunked body is in the book. The
+book scans the framing (`chunkScan`) and decides the same status
+and close as the host: a bad size is 400, a size or total past max
+is 413, a finished body is a handler span, and a peer close before
+the last chunk is 400. Method code 1 is 501 before that body
+check, so a chunked TRACE is 501. `Expect: 100-continue` is in
+the book. Book phase 6 owes the interim (span 6) while the body
+is short. Phase 8 is that interim after the peer has closed.
+Phase 7 is the read after the interim was sent, so a still-short
+body does not park a second one. A body already in the buffer,
+HTTP/1.0, HEAD, and a policy status (413, 417, 501) do not owe
+it. A tick drops it and closes.
 
 Bytes during a write park the same span (`write-bytes-holds`).
 A wrote or a failure while the book is reading stays on the read
 (`wrote-read`, `read-failed-holds`). The same facts while idle
 stay idle (`idle-wrote-holds`, `idle-failed-holds`). The host
-holds those facts the same way. Accept during a write, and accept
-while idle, stay `cover=1`: the host resets, and the book does not.
+holds those facts the same way. Accept during a write
+(`write-accept`, `owe-accept`) and accept while idle
+(`idle-accept`) are a fresh read: `now+idle`, and the carried
+deadline is dropped.
 
-`cover` 1 is outside this slice: chunked, 100 Continue, a streamed
-body whose Content-Length is within max while the peer is still
-open (the host pulls it), accept during a write, and accept while
-idle. Chunked is outside even when the method would otherwise be
-501. `hand` decides the handler paths this slice used to leave
-open. `hclose` is `close_after` (the adapter also sets it when an
-open request body is not owned by the response pull). `hbad` is a
-status 400..599. A refused handler with `owe_status` is book phase
-5, code 500. A buffered body that does not fit is that same shut
-when `owe_status` is clear, and a 500 write with `keep` 1 when it
-is set (`hand-toobig`, `hand-toobig-owe`). A pull is a handler span
+`cover` 1 is an unknown fact. The host returns -1 on that fact.
+`hand` decides the handler paths. `hclose` is `close_after` (the
+adapter also sets it when an open request body is not owned by
+the response pull). `hbad` is a status 400..599. A refused
+handler with `owe_status` is book phase 5, code 500. A buffered
+body that does not fit is that same shut when `owe_status` is
+clear, and a 500 write with `keep` 1 when it is set
+(`hand-toobig`, `hand-toobig-owe`). A pull is a handler span
 whose span field is 3 (content-length), 4 (chunked), or 5
 (close-delimited). HEAD or a version other than HTTP/1.1 forces
 the delimited span and `keep` 1. `cover` stays 0 on all of these.
-Not claimed here: fuel, the 100 Continue span, and the host's
-deadline decision (`on_tick` compares the clocks).
+`overStatus` owes 400 and 413, the codes the body reader sets.
+Any other override is `cover` 1, and the adapter shuts with the
+stuck note.
+Not claimed here: fuel, and the host's deadline decision
+(`on_tick` compares the clocks). The adapter clears a pending
+interim on bytes or a peer close when the recv buffer was empty
+before the arrival. The book itself keeps the interim across
+those facts. An accept during the interim is a fresh read on
+both sides. A later write can still re-park that interim on the
+host, because accept does not clear its bytes. The adapter drops
+them. That later write is not claimed. Bytes that complete the
+request while that interim is still outstanding, and the recv
+buffer was not empty, disarm the host and leave the book armed.
+The sweep rewinds an empty buffer instead, so that race is not
+in the differential. A response pull that leaves the request
+body open does not force `Connection: close`. The host then
+closes after the response because the body is still open. The
+book finishes at the request keep. The test handler does not
+pull, so that close is not claimed.
 
 Every claim in the book header is an equation `mix muro.check`
-reduces. Versus `origin/main`, this book adds 17 evidence theorems
-and removes none, 143 total. `c/test_step_slice` feeds the
-same fact and the same buffer to `http_step_stepFact` and to
+reduces. Versus `origin/main`, this book adds 44 evidence
+theorems and removes 5 (`chunk-outside`, `continue-outside`,
+`stream-outside`, `write-accept-outside`, `idle-accept-outside`),
+a net of +39, 182 total. `c/test_step_slice` feeds the same fact
+and the same buffer to `http_step_stepFact` and to
 `muro_http_step` on those paths, including short writes,
 keep-alive, one pipelined leftover, a peer close during a short
 write, bytes appended onto a leftover, idle `NOW`, a finished
 request on a peer close, a within-max streamed body on a peer
-close, and 414 / 431. It also compares `c/step_book.c` with
+close and while the peer is open, chunked bodies, 100 Continue,
+accept during a write and while idle, a 400 or 413 body
+override, and 414 / 431. It also compares `c/step_book.c` with
 `muro_http_step` on every covered `StepOut`, including the
 admit session (`proto_live`, `proto_done`, and the moves of the
-last admit). It
-sweeps small fact sequences: a `Connection: close` GET, two
-pipelined GETs, and a streamed body, along with the smaller
-buffers. After a quiet close (`Connection: close` or HTTP/1.0) a
-later fact stays quiet on both sides. `ACCEPTED` is not in the
-sweep: the host resets, and the book does not. After a `status_now`
+last admit). It sweeps small fact sequences: a `Connection: close`
+GET, two pipelined GETs, a streamed body (including one within
+max), chunked bodies, a 100-continue request, and `ACCEPTED`,
+along with the smaller buffers. An in-slice `cover` 1 fails the
+sweep. After a quiet close (`Connection: close` or HTTP/1.0) a
+later fact stays quiet on both sides. After a `status_now`
 close, the handwritten step marks the connection shut, and the
 driver requires both sides to stay quiet.
 
@@ -421,11 +450,12 @@ by `muro_http_step_bind`. The admit wall stays in C. Accept calls
 `proto_begin`. Each later fact calls `proto_admit` with the image
 phase, the classifier tag, and the reply bit `c/step.c` passes. A
 refusal is note 1 (`MURO_STEP_NOTE_ADMIT`) and the same close or
-`-1` the host returns. The adapter does not cover fuel, 100
-Continue, chunked, a streamed body while the peer is open, accept
-during a write or while idle, or the deadline decision: `c/host.c`
-`on_tick` still decides when a deadline is due, and the book takes
-`NOW` as the tick.
-`python3 c/test_conformance.py c/muro-hello-book` passes 65 of
-those cases and fails the six `cover=1` ones.
+`-1` the host returns. The adapter does not cover fuel or the
+deadline decision: `c/host.c` `on_tick` still decides when a
+deadline is due, and the book takes `NOW` as the tick. The
+interim, pull, and override cases named above stay outside the
+differential for the reasons given there.
+`make c-conformance` on `c/muro-hello` and `make c-conformance-book`
+on `c/muro-hello-book` each pass 71 of 71. The book target is not
+part of `c-check`.
 There is no HTTP/2 backend and no Elixir or muro-beam backend.
