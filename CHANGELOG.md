@@ -2,6 +2,21 @@
 
 ## 0.1.0-dev — unreleased
 
+- A second `ACCEPTED` on a live slot frees the previous `Proto`
+  before `proto_begin`. `c/step_book.c` owns the recv buffer and
+  the consume, calls the handler and `host_copy_response`, and
+  feeds `http_step_stepFact`. `cover=1` fails closed with note 6
+  and does not call `c/step.c`. The production host still calls
+  `c/step.c`. `c/muro-hello-book` is the opt-in link
+  (`-DMURO_STEP_BOOK`). Bytes during a write park the same span.
+  A wrote or a failure while reading or idle stays on that phase.
+  A within-max streamed body on a peer close is the handler span
+  with `keep` 1 (`stream-peer-reply`, `stream-peer-done`). The
+  slice harness requires `Connection: close` on a fresh keep-1
+  reply, and it keeps the parked keep-alive bytes when the peer
+  drops during that write. Versus `origin/main` the book adds 7
+  evidence theorems and removes 5, a net of +2, 126 total. The
+  library version stays `0.1.0-dev`. The pin stays muro `0.22.24`.
 - `priv/muro/http/step.muro` decides the write side of one HTTP/1.1
   connection as well as the read. 414 and 431 are owed spans. A
   full `WROTE` and a short `WROTE` share one rule: `left` stores
