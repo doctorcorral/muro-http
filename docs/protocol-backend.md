@@ -278,11 +278,40 @@ set the count. Above 1, Linux binds each worker with
 
 ## Step 2
 
-A later change can replace `muro_http_step` with a function muro
-checks, and leave `c/host.c` alone. The replacement takes `StepIn`
-and returns `StepOut`. It still must not call the kernel, and the
-keep-alive span must still point into the connection's send buffer.
-The admit wall, the request views, and `host_copy_response` can
-move with that function or stay as C called from it. This pull
-request does not generate that step and does not add an Elixir or
-muro-beam backend.
+`priv/muro/http/step.muro` is a checked slice of `muro_http_step`.
+`mix muro.gen` emits it as `c/generated/step_slice.c` with
+`c_prefix` `http_step_`. The host still calls the handwritten
+function in `c/step.c`. `c/host.c` is unchanged. The slice does not
+call the kernel or the clock.
+
+The book covers one read: the request line, the headers, and a
+Content-Length body. While that read is still open it closes with
+`status_now` on 413, 417, and 501. It owes a write span for 400,
+for an unknown transfer coding (501), and for 413, 417, or 501
+after classify has already finished. A finished request the policy
+accepts is `framed`. The host still runs the handler and renders
+the response into the caller send buffer. The book does not render
+those bytes.
+
+Once the book has closed, every later fact is ignored. No second
+span. `priv/muro/http/neg/step_span.muro` claims a span after the
+413 close. It is not in `muro.exs`. `mix muro.check --fuel 5000000`
+on that file refuses `span-after-close`. `mix test` does not load
+it: the load checks `step.muro`, then checks the flattened book
+again, and that second pass does not finish inside the suite.
+`c/test_step_slice` feeds the same buffer to both functions
+on that slice. After a `status_now` close, a later fact on
+`c/step.c` used to emit another span. The handwritten step now
+marks the connection shut, and the driver requires both the book
+and `muro_http_step` to stay quiet.
+
+Not in this slice: 414 and 431, 100 Continue, chunked bodies,
+pipelining, a pulled body, an idle `MURO_STEP_NOW`, a short write,
+`WRITE_FAILED` of a handler response, keep-alive consume, fuel,
+and a handler 500. Chunked is outside the book even when the
+method would otherwise be 501.
+
+The admit wall, the request views, and `host_copy_response` stay
+in C. There is no HTTP/2 backend and no Elixir or muro-beam
+backend. A keep-alive span from the handwritten step still points
+into the send buffer bound by `muro_http_step_bind`.
