@@ -281,10 +281,14 @@ static int render_handler(BookStep *b, const StepIn *in, uint64_t book_keep, int
   b->ver11 = req.version.n == 8 && req.version.p && memcmp(req.version.p, "HTTP/1.1", 8) == 0;
   memset(&resp, 0, sizeof resp);
   rc = b->handler(&req, &resp, b->handler_user);
-  host_in_after(b->hin, resp.pull != NULL && !b->is_head, &force, &over);
-  if (over) return -1;
-  if (force) resp.close_after = 1;
   href = rc < 0 ? 1 : 0;
+  /* c/step.c checks a refusal before host_in_after and never runs it
+     on a refused handler. */
+  if (!href) {
+    host_in_after(b->hin, resp.pull != NULL && !b->is_head, &force, &over);
+    if (over) return -1;
+    if (force) resp.close_after = 1;
+  }
   hclose = resp.close_after ? 1u : 0u;
   hbad = (resp.status >= 400 && resp.status <= 599) ? 1u : 0u;
   howe = resp.owe_status ? 1u : 0u;

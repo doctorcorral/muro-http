@@ -378,7 +378,8 @@ is set (`hand-toobig`, `hand-toobig-owe`). A pull is a handler span
 whose span field is 3 (content-length), 4 (chunked), or 5
 (close-delimited). HEAD or a version other than HTTP/1.1 forces
 the delimited span and `keep` 1. `cover` stays 0 on all of these.
-Not claimed here: fuel, and the 100 Continue span.
+Not claimed here: fuel, the 100 Continue span, and the host's
+deadline decision (`on_tick` compares the clocks).
 
 Every claim in the book header is an equation `mix muro.check`
 reduces. Versus `origin/main`, this book adds 17 evidence theorems
@@ -421,8 +422,10 @@ by `muro_http_step_bind`. The admit wall stays in C. Accept calls
 phase, the classifier tag, and the reply bit `c/step.c` passes. A
 refusal is note 1 (`MURO_STEP_NOTE_ADMIT`) and the same close or
 `-1` the host returns. The adapter does not cover fuel, 100
-Continue, chunked, a streamed body while the peer is open, or
-accept during a write or while idle.
+Continue, chunked, a streamed body while the peer is open, accept
+during a write or while idle, or the deadline decision: `c/host.c`
+`on_tick` still decides when a deadline is due, and the book takes
+`NOW` as the tick.
 `python3 c/test_conformance.py c/muro-hello-book` passes 65 of
 those cases and fails the six `cover=1` ones.
 There is no HTTP/2 backend and no Elixir or muro-beam backend.

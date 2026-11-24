@@ -2366,6 +2366,13 @@ static int on_handler_500(const MuroHttpRequest *req, MuroHttpResponse *resp, vo
   return -1;
 }
 
+static int on_refuse(const MuroHttpRequest *req, MuroHttpResponse *resp, void *user) {
+  (void)req;
+  (void)resp;
+  (void)user;
+  return -1;
+}
+
 static int on_too_big(const MuroHttpRequest *req, MuroHttpResponse *resp, void *user) {
   (void)req;
   resp->status = 200;
@@ -2502,6 +2509,28 @@ static int handler_paths(void) {
       muro_book_phase(&b.bk) != MURO_STEP_PH_DECIDE) {
     box_free(&b);
     return fail("hand-500-later");
+  }
+  scripted += 1;
+  box_free(&b);
+
+  /* hand-refuse: a refused handler without owe_status shuts in
+     decide with no note and no 500. A later fact stays shut. */
+  if (open_acc(&b, 10, 1000, 0) < 0) return -1;
+  use_handler(&b, on_refuse, NULL, NULL);
+  if (put_req(&b, GET, &o) < 0 || phase_is(&b, MURO_STEP_PH_DECIDE, "hand-refuse") < 0 || o.note ||
+      !o.close_conn || (o.bytes && o.len) || muro_book_phase(&b.bk) != MURO_STEP_PH_DECIDE ||
+      b.bk.owe) {
+    box_free(&b);
+    return fail("hand-refuse");
+  }
+  scripted += 1;
+  set_fact(&b, MURO_STEP_NOW, 0);
+  memset(&nxt, 0, sizeof nxt);
+  if (muro_http_step(&b.st, &b.in, &nxt) < 0 || phase_is(&b, MURO_STEP_PH_DECIDE, "hand-refuse-later") < 0 ||
+      !nxt.close_conn || nxt.note || (nxt.bytes && nxt.len) ||
+      muro_book_phase(&b.bk) != MURO_STEP_PH_DECIDE) {
+    box_free(&b);
+    return fail("hand-refuse-later");
   }
   scripted += 1;
   box_free(&b);
@@ -2686,6 +2715,53 @@ static int cover_stays_shut(void) {
   if (muro_book_step(&b, &in, &out) != 0 || !adapter_shut(&out, &b, 0, 0)) {
     host_in_close(&hin);
     return fail("cover-bytes");
+  }
+  scripted += 1;
+  host_in_close(&hin);
+  muro_book_shutdown(&b);
+  return 0;
+}
+
+/* An invariant failure shuts with MURO_BOOK_NOTE_STUCK, not the
+   cover note. A covered GET with no handler cannot render, so the
+   adapter closes with note 7. A later fact stays shut with note 0. */
+static int stuck_note(void) {
+  BookStep b;
+  struct HostIn hin;
+  StepIn in;
+  StepOut out;
+  uint8_t ibuf[256];
+  uint8_t obuf[512];
+  int rd = 1;
+  int wr = 1;
+  size_t n;
+  n = strlen(GET);
+  if (n >= sizeof ibuf) return fail("stuck-note");
+  memcpy(ibuf, GET, n);
+  memset(&b, 0, sizeof b);
+  host_in_init(&hin, -1, 10);
+  muro_book_bind(&b, ibuf, sizeof ibuf, obuf, sizeof obuf, &hin, &rd, &wr, NULL, NULL, 10, 60000);
+  muro_book_set_in_len(&b, n);
+  memset(&in, 0, sizeof in);
+  in.kind = MURO_STEP_BYTES;
+  in.now_ms = 1000;
+  in.date = (const uint8_t *)DATE;
+  in.date_n = 29;
+  in.empty_before = 1;
+  memset(&out, 0, sizeof out);
+  if (muro_book_step(&b, &in, &out) != 0 || !adapter_shut(&out, &b, 0, MURO_BOOK_NOTE_STUCK) ||
+      b.last_cover) {
+    host_in_close(&hin);
+    return fail("stuck-note");
+  }
+  scripted += 1;
+  in.kind = MURO_STEP_NOW;
+  memset(&out, 0, sizeof out);
+  rd = 1;
+  wr = 1;
+  if (muro_book_step(&b, &in, &out) != 0 || !adapter_shut(&out, &b, 0, 0)) {
+    host_in_close(&hin);
+    return fail("stuck-later");
   }
   scripted += 1;
   host_in_close(&hin);
@@ -2878,6 +2954,7 @@ int main(void) {
   if (closes() < 0) return 1;
   if (handler_paths() < 0) return 1;
   if (cover_stays_shut() < 0) return 1;
+  if (stuck_note() < 0) return 1;
   if (capture_stream() < 0) return 1;
   if (sweep() < 0) return 1;
 

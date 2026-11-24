@@ -75,7 +75,8 @@
 -- a version other than HTTP/1.1 forces the delimited span and
 -- keep 1. cover stays 0 on all of these. A later fact on phase 5
 -- is quiet, the same as a close.
--- Not claimed here: fuel, and the 100 Continue span.
+-- Not claimed here: fuel, the 100 Continue span, and the host's
+-- deadline decision (c/host.c on_tick compares the clocks).
 -- The C adapter admits each fact with proto_admit. This book does
 -- not. A refused admit is note 1 in that adapter.
 -- Versus origin/main: 17 evidence names added, none removed, net

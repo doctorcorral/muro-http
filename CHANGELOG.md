@@ -13,8 +13,12 @@
   compares that session with the host. `c/muro-hello-book` passes 65
   conformance cases and fails the six `cover=1` ones. Versus
   `origin/main` the book adds 17 evidence theorems and removes none,
-  143 total. Not claimed here: fuel, and the 100 Continue span.
-  `c/step.c` and `c/host.c` are unchanged. The library version stays
+  143 total. Not claimed here: fuel, the 100 Continue span, and the
+  host's deadline decision (`on_tick` compares the clocks). The
+  adapter checks a refused handler before `host_in_after`, as
+  `c/step.c` does. The harness compares a plain refusal
+  (`hand-refuse`) and asserts the invariant note 7 apart from the
+  cover note 6. `c/step.c` and `c/host.c` are unchanged. The library version stays
   `0.1.0-dev`. The pin stays muro `0.22.24`.
 - A second `ACCEPTED` on a live slot frees the previous `Proto`
   before `proto_begin`. `c/step_book.c` owns the recv buffer and
