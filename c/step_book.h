@@ -7,12 +7,15 @@
    in its place (see the muro-hello-book target).
 
    cover 1 fails closed: close_conn, image closed, note
-   MURO_BOOK_NOTE_COVER. The host logger only prints notes 1..5.
+   MURO_BOOK_NOTE_COVER, no read or write interest, and no span.
+   A later fact on that step stays shut. Note
+   MURO_BOOK_NOTE_STUCK is an invariant failure, not a cover.
+   The host logger only prints notes 1..5.
    There is no fallback into c/step.c. */
 
 #include "step.h"
 
-enum { MURO_BOOK_NOTE_COVER = 6 };
+enum { MURO_BOOK_NOTE_COVER = 6, MURO_BOOK_NOTE_STUCK = 7 };
 
 typedef struct BookStep {
   int *read_more;

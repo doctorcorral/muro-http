@@ -309,15 +309,16 @@ static int conn_is(const uint8_t *p, size_t n, uint64_t keep) {
   return has_lit(p, n, lit);
 }
 
-/* Reasons a step may be cover 1. OUT_NO means the step is in the slice. */
+/* Reasons a step may be cover 1. OUT_NO means the step is in the slice.
+   A wrote or a failure while reading or idle is in the slice, so there
+   is no bare-write reason. */
 enum {
   OUT_NO = 0,
   OUT_CHUNK = 1,
   OUT_CONT = 2,
   OUT_STREAM = 3,
-  OUT_BARE = 4,
-  OUT_WRITE_FACT = 5,
-  OUT_IDLE_ACCEPT = 6
+  OUT_WRITE_FACT = 4,
+  OUT_IDLE_ACCEPT = 5
 };
 
 static int named_out(const char *name) {
@@ -420,10 +421,6 @@ static int host_outside(int why, const StepOut *o, const Box *b, int prev_phase,
     if (!conn_is(o->bytes, o->len, 1)) return fail(name);
     if (o->wake_at != 0) return fail(name);
     return 0;
-  }
-  if (why == OUT_BARE) {
-    int phase = prev_phase == MURO_STEP_PH_IDLE ? MURO_STEP_PH_IDLE : MURO_STEP_PH_READ;
-    return host_read_park(o, b, phase, wake, name);
   }
   if (why == OUT_IDLE_ACCEPT) {
     return host_read_park(o, b, MURO_STEP_PH_READ, now + (uint64_t)b->st.idle_ms, name);
@@ -581,6 +578,21 @@ static int same_status(const StepOut *h, const StepOut *a) {
   return memcmp(h->status, a->status, h->status_len) == 0;
 }
 
+/* cover 1, and a later fact on that shut step. The host is not the
+   oracle here: the adapter's own shape is. want_note 0 means the
+   shut path, which sets no note. */
+static int adapter_shut(const StepOut *bo, const BookStep *bk, int brc, int want_note) {
+  if (brc != 0) return 0;
+  if (muro_book_phase(bk) != MURO_STEP_PH_CLOSED) return 0;
+  if (bo->note != want_note) return 0;
+  if (!bo->close_conn || bo->status_now || bo->wake_at) return 0;
+  if (bo->read_more || bo->write_more || bo->interim || bo->cont) return 0;
+  if ((bo->bytes && bo->len) || (bo->status && bo->status_len)) return 0;
+  if (bk->read_more && *bk->read_more) return 0;
+  if (bk->write_more && *bk->write_more) return 0;
+  return 1;
+}
+
 static int host_and_book(HttpStep *st, const StepIn *in, StepOut *out) {
   Box *b = (Box *)((unsigned char *)st - offsetof(Box, st));
   StepOut bo;
@@ -597,8 +609,22 @@ static int host_and_book(HttpStep *st, const StepIn *in, StepOut *out) {
   rc = real_step(st, in, out);
   memset(&bo, 0, sizeof bo);
   brc = muro_book_step(&b->bk, in, &bo);
-  if (skip || b->bk.last_cover) {
+  if (b->bk.last_cover) {
     book_skip += 1;
+    if (!adapter_shut(&bo, &b->bk, brc, MURO_BOOK_NOTE_COVER)) {
+      fprintf(stderr, "book adapter cover fact %d note %d phase %d read %d write %d len %zu\n",
+              in->kind, bo.note, muro_book_phase(&b->bk), bo.read_more, bo.write_more, bo.len);
+      return -1;
+    }
+    return rc;
+  }
+  if (skip) {
+    book_skip += 1;
+    if (!adapter_shut(&bo, &b->bk, brc, 0)) {
+      fprintf(stderr, "book adapter shut fact %d note %d phase %d len %zu\n", in->kind, bo.note,
+              muro_book_phase(&b->bk), bo.len);
+      return -1;
+    }
     return rc;
   }
   book_cmp += 1;
@@ -2265,6 +2291,99 @@ static int holds(int fact, int from_idle, const char *name) {
   return 0;
 }
 
+/* cover 1 shuts the adapter. A later fact stays shut: close, image
+   closed, no interests, no span, and no second cover note. */
+static int cover_stays_shut(void) {
+  BookStep b;
+  struct HostIn hin;
+  StepIn in;
+  StepOut out;
+  uint8_t ibuf[256];
+  uint8_t obuf[512];
+  int rd = 1;
+  int wr = 1;
+  size_t n;
+  n = strlen(CHUNK);
+  if (n >= sizeof ibuf) return fail("cover-shut");
+  memcpy(ibuf, CHUNK, n);
+  memset(&b, 0, sizeof b);
+  host_in_init(&hin, -1, 10);
+  muro_book_bind(&b, ibuf, sizeof ibuf, obuf, sizeof obuf, &hin, &rd, &wr, on_req, NULL, 10, 60000);
+  muro_book_set_in_len(&b, n);
+  memset(&in, 0, sizeof in);
+  in.kind = MURO_STEP_BYTES;
+  in.now_ms = 1000;
+  in.date = (const uint8_t *)DATE;
+  in.date_n = 29;
+  in.empty_before = 1;
+  memset(&out, 0, sizeof out);
+  if (muro_book_step(&b, &in, &out) != 0 || !adapter_shut(&out, &b, 0, MURO_BOOK_NOTE_COVER)) {
+    host_in_close(&hin);
+    return fail("cover-shut");
+  }
+  scripted += 1;
+  in.kind = MURO_STEP_NOW;
+  memset(&out, 0, sizeof out);
+  rd = 1;
+  wr = 1;
+  if (muro_book_step(&b, &in, &out) != 0 || !adapter_shut(&out, &b, 0, 0) || b.last_cover) {
+    host_in_close(&hin);
+    return fail("cover-later");
+  }
+  scripted += 1;
+  in.kind = MURO_STEP_BYTES;
+  memset(&out, 0, sizeof out);
+  if (muro_book_step(&b, &in, &out) != 0 || !adapter_shut(&out, &b, 0, 0)) {
+    host_in_close(&hin);
+    return fail("cover-bytes");
+  }
+  scripted += 1;
+  host_in_close(&hin);
+  muro_book_shutdown(&b);
+  return 0;
+}
+
+/* streamTake is 1 only for a Content-Length past 16384. A normal GET
+   captures nothing. The peer-close streamed body does, on both the
+   host and the adapter, before the handler binds. */
+static int capture_stream(void) {
+  Box b;
+  StepOut o;
+  size_t n;
+  if (open_acc(&b, 8388608, 1000, 0) < 0) return -1;
+  n = strlen(GET);
+  memcpy(b.inb, GET, n);
+  muro_http_step_set_in_len(&b.st, n);
+  set_fact(&b, MURO_STEP_BYTES, 0);
+  b.in.empty_before = 1;
+  memset(&o, 0, sizeof o);
+  if (muro_http_step(&b.st, &b.in, &o) < 0 || b.hin.captured || b.bhin.captured) {
+    box_free(&b);
+    return fail("capture-get");
+  }
+  scripted += 1;
+  box_free(&b);
+  if (open_acc(&b, 8388608, 1000, 0) < 0) return -1;
+  n = strlen(STREAM);
+  memcpy(b.inb, STREAM, n);
+  muro_http_step_set_in_len(&b.st, n);
+  set_fact(&b, MURO_STEP_PEER_CLOSED, 0);
+  b.in.empty_before = 1;
+  memset(&o, 0, sizeof o);
+  if (muro_http_step(&b.st, &b.in, &o) < 0 || !b.hin.captured || !b.bhin.captured) {
+    fprintf(stderr, "capture-stream host %d book %d\n", b.hin.captured, b.bhin.captured);
+    box_free(&b);
+    return fail("capture-stream");
+  }
+  if (!o.bytes || !conn_is(o.bytes, o.len, 1)) {
+    box_free(&b);
+    return fail("capture-stream close");
+  }
+  scripted += 1;
+  box_free(&b);
+  return 0;
+}
+
 int main(void) {
   uint64_t wake = 61000;
   if (decide(DEC_MORE, MURO_STEP_ACCEPTED, "", 10, 0, NULL, 0, wake, 0, "accept", NULL, NULL,
@@ -2368,6 +2487,8 @@ int main(void) {
   if (holds(MURO_STEP_WRITE_FAILED, 1, "idle-failed-holds") < 0) return 1;
   if (reply_fail_and_now() < 0) return 1;
   if (closes() < 0) return 1;
+  if (cover_stays_shut() < 0) return 1;
+  if (capture_stream() < 0) return 1;
   if (sweep() < 0) return 1;
 
   printf("handwritten-after-close-spans %d\n", after_spans);

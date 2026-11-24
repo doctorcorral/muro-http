@@ -1,7 +1,8 @@
 /* Drive http_step_stepFact from the buffers and the handler the host
    already uses. One fact is one call. A parked span is rendered once
    and then advanced. cover 1 closes the connection and sets note
-   MURO_BOOK_NOTE_COVER. A later fact on that step stays closed. */
+   MURO_BOOK_NOTE_COVER. A later fact on that step stays closed.
+   An invariant failure uses MURO_BOOK_NOTE_STUCK, not the cover note. */
 
 #include "step_book.h"
 #include "host_render.h"
@@ -130,12 +131,21 @@ static int render_literal(BookStep *b, const StepIn *in, int into_spare, uint64_
 /* 0 when out holds the handler span. -1 outside the book (pull, a
    forced close the book did not already say, bind status). -2 when
    the handler refused and owe_status asked for the 500 literal. */
+/* Same place as c/step.c prepare_in: reset, then capture the bytes
+   after a streamed header block. A complete buffered body leaves
+   streamTake at 0, so capture copies nothing. */
+static void prepare_in(BookStep *b) {
+  if (!b->hin) return;
+  if (b->bphase != 0 && b->bphase != 4) return;
+  host_in_reset(b->hin);
+  if (b->in && b->in_len) host_in_capture(b->hin, b->in, b->in_len);
+}
+
 static int render_handler(BookStep *b, const StepIn *in, uint64_t book_keep, int *note) {
   MuroHttpRequest req;
   MuroHttpResponse resp;
   int dec;
   int rc;
-  int force = 0;
   int over = 0;
   int keep;
   int omit;
@@ -146,7 +156,11 @@ static int render_handler(BookStep *b, const StepIn *in, uint64_t book_keep, int
   const uint8_t *extra;
   const uint8_t *body;
   if (!b->hin || !b->handler || !b->in) return -1;
+  /* prepare_in already ran for a read or idle fact. Resetting again
+     would drop that capture, so capture once more after this reset.
+     A pipelined tail is rendered in the same call, after consume. */
   host_in_reset(b->hin);
+  if (b->in && b->in_len) host_in_capture(b->hin, b->in, b->in_len);
   dec = host_in_bind(b->hin, b->in, b->in_len, &req);
   if (dec) return -1;
   note_head(b);
@@ -161,10 +175,10 @@ static int render_handler(BookStep *b, const StepIn *in, uint64_t book_keep, int
     return -1;
   }
   if (resp.pull) return -1;
-  host_in_after(b->hin, 0, &force, &over);
+  host_in_after(b->hin, 0, NULL, &over);
   if (over) return -1;
   keep = book_keep ? 1 : 0;
-  if (resp.close_after || (resp.status >= 400 && resp.status <= 599) || force) keep = 1;
+  if (resp.close_after || (resp.status >= 400 && resp.status <= 599)) keep = 1;
   if ((uint64_t)keep != book_keep) return -1;
   omit = b->is_head ? 1 : 0;
   copy_date(in, date);
@@ -273,6 +287,8 @@ int muro_book_step(BookStep *st, const StepIn *in, StepOut *out) {
   prev_code = st->bcode;
   prev_left = st->bleft;
   prev_keep = st->bkeep;
+  if ((in->kind == MURO_STEP_BYTES || in->kind == MURO_STEP_PEER_CLOSED) && !st->shut)
+    prepare_in(st);
   sl = muro__slice_of(st->in ? st->in : (const uint8_t *)"", st->in_len);
   muro_http_reset();
   bk = http_step_stepFact(book_st(st), (uint64_t)in->kind, sl, st->max_body, (uint64_t)in->n, owed,
@@ -335,7 +351,7 @@ int muro_book_step(BookStep *st, const StepIn *in, StepOut *out) {
       if (adv > rem) adv = rem;
       st->out_off += adv;
     }
-    if (st->out_off >= st->out_len) return closed_out(st, out, MURO_BOOK_NOTE_COVER, 0);
+    if (st->out_off >= st->out_len) return closed_out(st, out, MURO_BOOK_NOTE_STUCK, 0);
     park(st, out);
     return 0;
   }
@@ -344,9 +360,9 @@ int muro_book_step(BookStep *st, const StepIn *in, StepOut *out) {
   st->out_off = 0;
   if (phase == 3 && code == 0) rendered_rc = render_handler(st, in, keep, &note);
   else if (phase == 1) rendered_rc = render_literal(st, in, 0, code, &note);
-  else return closed_out(st, out, MURO_BOOK_NOTE_COVER, 0);
-  if (rendered_rc < 0) return closed_out(st, out, note ? note : MURO_BOOK_NOTE_COVER, 0);
-  if (!st->rendered || st->out_off >= st->out_len) return closed_out(st, out, MURO_BOOK_NOTE_COVER, 0);
+  else return closed_out(st, out, MURO_BOOK_NOTE_STUCK, 0);
+  if (rendered_rc < 0) return closed_out(st, out, note ? note : MURO_BOOK_NOTE_STUCK, 0);
+  if (!st->rendered || st->out_off >= st->out_len) return closed_out(st, out, MURO_BOOK_NOTE_STUCK, 0);
   park(st, out);
   (void)prev_code;
   return 0;
