@@ -20,7 +20,12 @@
   and the adapter shuts with note 7. The harness compares the
   adapter with `muro_http_step` on these paths, and the sweep
   reaches chunked bodies, a streamed body at a large max, and
-  `ACCEPTED`. `book-skip` is 0. `c/muro-hello` and
+  `ACCEPTED`. Every `cover` 1 in the sweep fails it. A quiet
+  close must leave the image `CLOSED`, except a later fact after
+  `status_now`, which the host answers from `PEND_SHUT` with its
+  image still `READ`: the harness accepts `READ` only there, with
+  `PEND_SHUT`, `close_conn` 1, no interest and no bytes, and counts
+  those steps (`quiet-read-shut`). `book-skip` is 0. `c/muro-hello` and
   `c/muro-hello-book` each pass 71 conformance cases.
   `make c-conformance-book` runs the book server and is not part of
   `c-check`. Versus `origin/main` the book adds 44 evidence

@@ -35,7 +35,7 @@
    reply says Connection: close. A within-max streamed body on a
    peer close is that same reply. The sweep includes those bodies,
    and it includes ACCEPTED so a write and an idle step can reset.
-   An in-slice step marked cover 1 fails. Bytes during a write, and
+   Every sweep step marked cover 1 fails. Bytes during a write, and
    a wrote or a failure while reading or idle, are scripted covered
    cases.
 
@@ -139,6 +139,11 @@ static int sweep_steps;
 static int sweep_covered;
 static int book_cmp;
 static int book_skip;
+/* Quiet closes the host answers from PEND_SHUT with its image still
+   READ (after status_now). c/step.c keeps PEND_SHUT private; 3 is its
+   value there. */
+#define TEST_PEND_SHUT 3
+static int quiet_read_shut;
 static int count_shape = 1;
 
 static int on_req(const MuroHttpRequest *req, MuroHttpResponse *resp, void *user) {
@@ -1859,7 +1864,6 @@ static int match_covered(const StepOut *o, http_step_Out bk, const Box *b, int f
                           uint64_t owed, int prior_book, const char *name) {
   int img;
   uint64_t tok;
-  if (bo_cover(bk) == 1) return 0;
   if ((uint64_t)o->close_conn != bo_close(bk) || (uint64_t)o->status_now != bo_status(bk) ||
       (uint64_t)o->read_more != bo_read(bk) || (uint64_t)o->write_more != bo_write(bk) ||
       o->wake_at != bo_wake(bk)) {
@@ -1948,9 +1952,13 @@ static int match_covered(const StepOut *o, http_step_Out bk, const Box *b, int f
     }
   }
   /* Book phases are not image phases. status_now (book phase 2, status
-     1) closes while the image is still READ. The host then answers
-     every later fact from PEND_SHUT and leaves that image in READ.
-     A quiet close from a tick or a peer close is CLOSED. */
+     1) closes while the image is still READ and marks the step
+     PEND_SHUT. A later fact on that step is a quiet close (book phase
+     2, status 0) that the host answers from PEND_SHUT, so its image is
+     still READ. That is the only quiet close allowed in READ: it must
+     carry PEND_SHUT, close, and leave no interest and no bytes. Any
+     other quiet close (a tick, a peer close, Connection: close) must
+     be CLOSED. */
   img = muro_http_step_phase(&b->st);
   if (bo_phase(bk) == 0 && img != MURO_STEP_PH_READ) return fail(name);
   if ((bo_phase(bk) == 1 || bo_phase(bk) == 3) && img != MURO_STEP_PH_WRITE) return fail(name);
@@ -1958,9 +1966,12 @@ static int match_covered(const StepOut *o, http_step_Out bk, const Box *b, int f
     if (img != MURO_STEP_PH_IDLE) return fail(name);
     if (muro_http_step_in_len(&b->st) != 0) return fail(name);
   }
-  if (bo_phase(bk) == 2 && bo_status(bk) == 0 && img != MURO_STEP_PH_CLOSED &&
-      img != MURO_STEP_PH_READ)
-    return fail(name);
+  if (bo_phase(bk) == 2 && bo_status(bk) == 0 && img != MURO_STEP_PH_CLOSED) {
+    if (img != MURO_STEP_PH_READ || b->st.pend_kind != TEST_PEND_SHUT) return fail(name);
+    if (!o->close_conn || o->read_more || o->write_more || o->status_now || o->bytes || o->len)
+      return fail(name);
+    quiet_read_shut += 1;
+  }
   if (bo_phase(bk) == 2 && bo_status(bk) == 1 && img != MURO_STEP_PH_READ) return fail(name);
   if (bo_phase(bk) == 7 && img != MURO_STEP_PH_READ) return fail(name);
   return 0;
@@ -2006,7 +2017,7 @@ static int run_seq(const char *buf, const int *facts, int depth, uint64_t max_bo
       return -1;
     }
     if (bo_cover(bk) == 1) {
-      fprintf(stderr, "sweep cover on an in-slice step %d fact %d phase %d\n", i, fact, book_ph);
+      fprintf(stderr, "sweep cover at step %d fact %d phase %d\n", i, fact, book_ph);
       dump_book("sweep", bk);
       box_free(&b);
       return -1;
@@ -3385,6 +3396,8 @@ int main(void) {
   printf("scripted %d\n", scripted);
   printf("sweep-seq %d sweep-steps %d sweep-covered %d\n", sweep_seq, sweep_steps, sweep_covered);
   printf("book-cmp %d book-skip %d\n", book_cmp, book_skip);
+  printf("quiet-read-shut %d\n", quiet_read_shut);
+  if (quiet_read_shut == 0) return 1;
   if (after_spans != 0) return 1;
   printf("OK\n");
   return 0;

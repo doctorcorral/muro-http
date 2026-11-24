@@ -424,11 +424,18 @@ admit session (`proto_live`, `proto_done`, and the moves of the
 last admit). It sweeps small fact sequences: a `Connection: close`
 GET, two pipelined GETs, a streamed body (including one within
 max), chunked bodies, a 100-continue request, and `ACCEPTED`,
-along with the smaller buffers. An in-slice `cover` 1 fails the
-sweep. After a quiet close (`Connection: close` or HTTP/1.0) a
-later fact stays quiet on both sides. After a `status_now`
-close, the handwritten step marks the connection shut, and the
-driver requires both sides to stay quiet.
+along with the smaller buffers. Every `cover` 1 in the sweep
+fails it, so `sweep-covered` is always 0. After a quiet close
+(`Connection: close` or HTTP/1.0) a later fact stays quiet on
+both sides. After a `status_now` close, the handwritten step
+marks the connection shut (`PEND_SHUT`), and the driver requires
+both sides to stay quiet. A quiet close (book phase 2, status 0)
+must leave the image `CLOSED`, with one exact exception: a later
+fact after `status_now`, which the host answers from `PEND_SHUT`
+while its image is still `READ`. The driver accepts `READ` only
+there, and only with `PEND_SHUT` set, `close_conn` 1, no read or
+write interest, no `status_now`, and no bytes. It counts those
+steps (`quiet-read-shut`) and fails if there are none.
 
 Once the book has closed, every later fact is ignored. No second
 span. `priv/muro/http/neg/step_span.muro` claims a span after the

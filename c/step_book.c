@@ -174,6 +174,10 @@ static int park_cont(BookStep *b, const StepIn *in, StepOut *out, uint64_t left,
   out->len = b->cont_len - b->cont_off;
   out->interim = b->cont_off == 0;
   out->cont = 1;
+  /* Not interests(): like park_interim in c/step.c, only the StepOut
+     interests change here. The live read interest pointer stays set
+     until the adapter parks, so a 100 Continue that the socket takes
+     in one write does not clear it before the handler runs. */
   out->read_more = 0;
   out->write_more = 1;
   out->close_conn = 0;
