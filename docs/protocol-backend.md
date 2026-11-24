@@ -281,9 +281,12 @@ set the count. Above 1, Linux binds each worker with
 
 `priv/muro/http/step.muro` is a checked slice of `muro_http_step`.
 `mix muro.gen` emits it as `c/generated/step_slice.c` with
-`c_prefix` `http_step_`. The host still calls the handwritten
-function in `c/step.c`. `c/host.c` is unchanged. The slice does not
-call the kernel or the clock, and it does not render bytes.
+`c_prefix` `http_step_`. The production host still calls the
+handwritten function in `c/step.c`. `c/host.c` is unchanged.
+`c/step_book.c` is an opt-in adapter: it owns the recv buffer and
+the consume, calls the handler and `host_copy_response`, and feeds
+`http_step_stepFact`. The slice does not call the kernel or the
+clock, and it does not render bytes.
 
 The book decides one read, the protocol write, the handler write,
 and the idle tick. The numbers in this section are book phases.
@@ -340,7 +343,9 @@ unknown transfer coding (501). A streamed body (Content-Length past
 16384, not yet in the buffer) whose length is within max is outside
 (`cover=1`) while the peer is still open. The same body past max is
 an owed 413 span, because classify already finished. On a peer close
-the within-max body is the handler span with `keep` 1.
+the within-max body is the handler span with `keep` 1
+(`stream-peer-reply`, `stream-peer-done`). The completing write
+closes.
 
 A finished buffered request on a peer close is a handler span
 with `keep` 1 (`fin-get-reply`, `fin-body-reply`, `idle-peer-get`).
@@ -350,24 +355,32 @@ span only when the peer has closed. While the peer is open and the
 length is within max, the host pulls the body and the step stays
 `cover=1`.
 
+Bytes during a write park the same span (`write-bytes-holds`).
+A wrote or a failure while the book is reading stays on the read
+(`wrote-read`, `read-failed-holds`). The same facts while idle
+stay idle (`idle-wrote-holds`, `idle-failed-holds`). The host
+holds those facts the same way. Accept during a write, and accept
+while idle, stay `cover=1`: the host resets, and the book does not.
+
 `cover` 1 is outside this slice: chunked, 100 Continue, a streamed
 body whose Content-Length is within max while the peer is still
-open (the host pulls it), a wrote or a failure while the
-connection is reading or idle (book phase 0 or book phase 4),
-bytes or accept during a write, and accept while idle. Chunked is
-outside even when the method would otherwise be 501. Not claimed
-here: a pulled body, fuel, a handler 500, and the 100 Continue
-span.
+open (the host pulls it), accept during a write, and accept while
+idle. Chunked is outside even when the method would otherwise be
+501. Not claimed here: a pulled body, fuel, a handler 500, and the
+100 Continue span.
 
 Every claim in the book header is an equation `mix muro.check`
-reduces. Versus `origin/main`, this book adds 17 evidence theorems
-and removes 2, a net of +15, 124 total. `c/test_step_slice` feeds the
+reduces. Versus `origin/main`, this book adds 7 evidence theorems
+and removes 5 (the old `cover=1` names for facts the host holds),
+a net of +2, 126 total. `c/test_step_slice` feeds the
 same fact and the same buffer to `http_step_stepFact` and to
 `muro_http_step` on those paths, including short writes,
 keep-alive, one pipelined leftover, a peer close during a short
 write, bytes appended onto a leftover, idle `NOW`, a finished
-request on a peer close, and 414 / 431. It
-also sweeps small fact sequences: a `Connection: close` GET, two
+request on a peer close, a within-max streamed body on a peer
+close, and 414 / 431. It also compares `c/step_book.c` with
+`muro_http_step` on every covered `StepOut`. It
+sweeps small fact sequences: a `Connection: close` GET, two
 pipelined GETs, and a streamed body, along with the smaller
 buffers. After a quiet close (`Connection: close` or HTTP/1.0) a
 later fact stays quiet on both sides. `ACCEPTED` is not in the
@@ -384,7 +397,15 @@ refusal.
 The generated step is not what `c/host.c` calls. It returns span
 kinds, not pointers into the send buffer. It does not call the
 handler, `host_copy_response`, or the admit wall, and it does not
-update `in_len`. A keep-alive span from the handwritten step still
-points into the send buffer bound by `muro_http_step_bind`. The
-admit wall, the request views, and `host_copy_response` stay in C.
+update `in_len`. `c/step_book.c` does that buffer and handler work
+and writes `Out` onto `StepOut`. `cover=1` fails closed: `close_conn`,
+image closed, note 6 (`MURO_BOOK_NOTE_COVER`). There is no fallback
+into `c/step.c`. The production link is still `c/step.c`.
+`make c/muro-hello-book` builds the same hello server with
+`-DMURO_STEP_BOOK`. It is not the default target. A keep-alive span
+from the handwritten step still points into the send buffer bound
+by `muro_http_step_bind`. The admit wall stays in C. The adapter
+does not cover fuel, 100 Continue, chunked, a pulled or streamed
+body while the peer is open, accept during a write or while idle,
+or a handler-forced close the book did not already decide.
 There is no HTTP/2 backend and no Elixir or muro-beam backend.
