@@ -3,9 +3,12 @@
    in c/generated/step_slice.c. This file compares the fields the
    slice decides.
 
-   A finished request is a handler span in the book (phase 3) and a
-   rendered response in the host. Those bytes must lie in the caller
-   send buffer. The status text is not compared field for field.
+   A finished request is a handler span in the book (book phase 3)
+   and a rendered response in the host. Those bytes must lie in the
+   caller send buffer. The status text is not compared field for
+   field. Book phases are not image phases: book 0 read, 1 protocol
+   write, 2 closed, 3 handler write, 4 idle; image 0 read, 1 handle,
+   2 write, 3 idle, 4 closed.
 
    Clocks are the adapter's. idle_ms is the value passed to bind.
    Accept arms now+idle and ignores a carried deadline. A read or an
@@ -13,13 +16,21 @@
    A write parks with wake 0. NOW from read or idle closes. The book
    does not compare the two clocks.
 
-   cover 1 is outside the slice. The driver still runs the host and
-   requires it to return 0. It does not compare fields on that path.
-   ACCEPTED is not part of the sweep: the host resets, and the book
-   does not.
+   cover 1 is outside the slice: chunked, 100 Continue, a streamed
+   body whose Content-Length is within max, a finished request on a
+   peer close, a wrote or a failure while the book is reading or
+   idle (book phase 0 or book phase 4), and bytes or accept during
+   a write. The driver still runs the host and requires it to
+   return 0. It does not compare fields on that path. ACCEPTED is
+   not part of the sweep: the host resets, and the book does not.
 
-   A wrote with left 0 and owed 0 finishes in the book. That input
-   is not a host fact. The owed-0 check is book-only. */
+   A wrote with left 0 and owed 0 during a write finishes in the
+   book. That input is not a host fact. The owed-0 check is
+   book-only.
+
+   finishWrite sees the unconsumed slice, the host buffer as it
+   stands. It drops one framed prefix. Re-passing the original
+   two-GET buffer after that reply is outside the contract. */
 
 #include "step.h"
 #include "host_stream.h"
@@ -793,7 +804,11 @@ static int cap_span(int which, const char *name) {
 }
 
 /* Install buf when the fact carries bytes. Otherwise the book sees
-   the host buffer as it stands before this call. Book runs first. */
+   the host buffer as it stands before this call: the unconsumed
+   slice. finishWrite drops one framed prefix from that slice.
+   Passing the original full buffer after the host has consumed is
+   outside that contract. The book would classify the first request
+   again. Book runs first. */
 static int step_both(Box *b, http_step_St *st, int fact, const char *buf, uint64_t wrote_n,
                      uint64_t owed, StepOut *o, http_step_Out *bk, const char *name) {
   muro__slice sl;
@@ -1070,6 +1085,25 @@ static int pipeline(void) {
   }
   seen = o;
   st = http_step_take(bk);
+  /* The host buffer is now the unconsumed tail (one GET). The book
+     on that tail goes idle. The book on the original two-GET buffer
+     strips the first request again and parks another reply. Those
+     answers differ. The host is not fed the full buffer. */
+  {
+    http_step_Out again =
+        book_at(st, MURO_STEP_WROTE, sl_of(TWO), b.st.max_body, (uint64_t)seen.len, (uint64_t)seen.len,
+                b.in.now_ms, b.in.deadline, b.st.idle_ms);
+    http_step_Out tail =
+        book_at(st, MURO_STEP_WROTE, sl_mem(b.inb, muro_http_step_in_len(&b.st)), b.st.max_body,
+                (uint64_t)seen.len, (uint64_t)seen.len, b.in.now_ms, b.in.deadline, b.st.idle_ms);
+    if (book_is(again, 3, 0, 0, 0, 0, 1, 2, 0, 0, 0, 0, "pipe-full-again") < 0 ||
+        book_is(tail, 4, 0, 0, 0, 1, 0, 0, 0, 0, armed(1000, 0, 60000), 0, "pipe-tail-contract") < 0 ||
+        (bo_phase(again) == bo_phase(tail) && bo_span(again) == bo_span(tail))) {
+      box_free(&b);
+      return fail("pipe-again-differs");
+    }
+    scripted += 1;
+  }
   if (full_write(&b, &st, seen, DEC_IDLE, 0, armed(1000, 0, 60000), "pipe-done") < 0) {
     box_free(&b);
     return -1;
@@ -1204,6 +1238,54 @@ static int reply_fail_and_now(void) {
   return 0;
 }
 
+/* After a quiet close, a later fact must not read or write.
+   Book phase 2 stays quiet. The host stays shut. */
+static int stays_quiet(Box *b, http_step_St st, int fact, const char *name) {
+  StepOut o;
+  http_step_Out bk;
+  size_t before;
+  int rc;
+  if (fact == MURO_STEP_BYTES || fact == MURO_STEP_PEER_CLOSED) {
+    size_t n = strlen(GET);
+    memcpy(b->inb, GET, n);
+    muro_http_step_set_in_len(&b->st, n);
+  }
+  set_fact(b, fact, fact == MURO_STEP_WROTE ? 1 : 0);
+  b->in.empty_before = 0;
+  before = muro_http_step_in_len(&b->st);
+  memset(&o, 0, sizeof o);
+  bk = book_at(st, fact, sl_mem(b->inb, before), b->st.max_body, fact == MURO_STEP_WROTE ? 1 : 0, 0,
+               b->in.now_ms, b->in.deadline, b->st.idle_ms);
+  rc = muro_http_step(&b->st, &b->in, &o);
+  if (book_is(bk, 2, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, name) < 0) return -1;
+  if (rc < 0) {
+    fprintf(stderr, "%s: host step failed after close\n", name);
+    return -1;
+  }
+  if ((o.bytes && o.len) || (o.status && o.status_len) || o.status_now || o.read_more || o.write_more ||
+      !o.close_conn || o.wake_at != 0 || o.interim || o.cont || b->rd || b->wr ||
+      muro_http_step_in_len(&b->st) != before ||
+      muro_http_step_phase(&b->st) != MURO_STEP_PH_CLOSED) {
+    fprintf(stderr, "%s: activity after close close=%d read=%d write=%d len=%zu phase=%d\n", name,
+            o.close_conn, o.read_more, o.write_more, o.len, muro_http_step_phase(&b->st));
+    return -1;
+  }
+  scripted += 1;
+  return 0;
+}
+
+static int after_close(Box *b, http_step_St st, const char *tag) {
+  const int facts[4] = {MURO_STEP_BYTES, MURO_STEP_WROTE, MURO_STEP_NOW, MURO_STEP_PEER_CLOSED};
+  const char *fn[4] = {"bytes", "wrote", "now", "peer"};
+  int i;
+  for (i = 0; i < 4; i++) {
+    char name[64];
+    snprintf(name, sizeof name, "%s-%s", tag, fn[i]);
+    if (stays_quiet(b, st, facts[i], name) < 0) return -1;
+  }
+  return 0;
+}
+
 static int closes(void) {
   Box b;
   StepOut seen;
@@ -1211,7 +1293,8 @@ static int closes(void) {
   if (open_acc(&b, 10, 1000, 0) < 0) return -1;
   st = http_step_readSt();
   if (reply_bytes(&b, &st, CLOSE, 1, &seen, "close-reply") < 0 ||
-      full_write(&b, &st, seen, DEC_QUIET, 0, 0, "close-done") < 0) {
+      full_write(&b, &st, seen, DEC_QUIET, 0, 0, "close-done") < 0 ||
+      after_close(&b, st, "close-later") < 0) {
     box_free(&b);
     return -1;
   }
@@ -1219,7 +1302,8 @@ static int closes(void) {
   if (open_acc(&b, 10, 1000, 0) < 0) return -1;
   st = http_step_readSt();
   if (reply_bytes(&b, &st, HTTP10, 1, &seen, "http10-reply") < 0 ||
-      full_write(&b, &st, seen, DEC_QUIET, 0, 0, "http10-done") < 0) {
+      full_write(&b, &st, seen, DEC_QUIET, 0, 0, "http10-done") < 0 ||
+      after_close(&b, st, "http10-later") < 0) {
     box_free(&b);
     return -1;
   }
@@ -1337,7 +1421,12 @@ static int run_seq(const char *buf, const int *facts, int depth, uint64_t max_bo
 static int sweep(void) {
   static const int facts5[5] = {MURO_STEP_BYTES, MURO_STEP_PEER_CLOSED, MURO_STEP_WROTE,
                                 MURO_STEP_WRITE_FAILED, MURO_STEP_NOW};
-  static const char *bufs[4];
+  /* Empty, a partial line, a GET, a malformed request, Connection:
+     close, two pipelined GETs, and a streamed body (Content-Length
+     past 16384). max stays 10, so the streamed shape is the owed
+     413. Depth 3 is 5^3 * 7. Then 256 sequences, depth 4, xorshift32
+     seed 0xC0FFEE. */
+  const char *bufs[7];
   int a, c, d, e;
   int seq[4];
   uint32_t xs = 0xC0FFEEu;
@@ -1346,7 +1435,10 @@ static int sweep(void) {
   bufs[1] = LINE;
   bufs[2] = GET;
   bufs[3] = BAD;
-  for (e = 0; e < 4; e++) {
+  bufs[4] = CLOSE;
+  bufs[5] = TWO;
+  bufs[6] = STREAM;
+  for (e = 0; e < 7; e++) {
     for (a = 0; a < 5; a++) {
       for (c = 0; c < 5; c++) {
         for (d = 0; d < 5; d++) {
@@ -1369,7 +1461,7 @@ static int sweep(void) {
     xs ^= xs << 13;
     xs ^= xs >> 17;
     xs ^= xs << 5;
-    if (run_seq(bufs[xs % 4], seq, 4, 10) < 0) return -1;
+    if (run_seq(bufs[xs % 7], seq, 4, 10) < 0) return -1;
   }
   return 0;
 }
