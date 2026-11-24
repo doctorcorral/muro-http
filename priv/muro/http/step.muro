@@ -46,16 +46,18 @@
 -- connection is reading or idle (book phase 0 or book phase 4),
 -- bytes or accept during a write, and accept while idle. A
 -- finished buffered request on a peer close is a handler span
--- with keep 1. The completing write closes. A streamed
--- body past max is an owed 413 span. Classify already finished, so
--- that close is the write, not status_now. A wrote with left 0 and
--- owed 0 finishes: the caller named an empty span. That finish is
--- in the book (owe-empty-span, reply-empty-span). The host has no
--- such input. It finishes from its own byte counter.
+-- with keep 1. The completing write closes. A within-max streamed
+-- body on a peer close is that same handler span
+-- (stream-peer-reply, stream-peer-done). A streamed body past max
+-- is an owed 413 span. Classify already finished, so that close is
+-- the write, not status_now. A wrote with left 0 and owed 0
+-- finishes: the caller named an empty span. That finish is in the
+-- book (owe-empty-span, reply-empty-span). The host has no such
+-- input. It finishes from its own byte counter.
 -- Not claimed here: a pulled body, fuel, a handler 500,
 -- and the 100 Continue span.
--- Versus origin/main: 17 evidence theorems added, 2 removed,
--- net +15, 124 total. Each one is an equation mix muro.check reduces.
+-- Versus origin/main: 19 evidence theorems added, 2 removed,
+-- net +17, 126 total. Each one is an equation mix muro.check reduces.
 import "request.muro"
 
 unboxed data St : Type where
@@ -564,6 +566,9 @@ def sawStream : run Out :=
 def sawStream413 : run Out :=
   step0 readSt factBytes streamBuf max10 (toU64 0) (toU64 0)
 
+def sawStreamPeer : run Out :=
+  step0 readSt factPeer streamBuf maxBig (toU64 0) (toU64 0)
+
 def closed413 : run St :=
   take saw413
 
@@ -780,6 +785,10 @@ def frame-get : evidence {framedEnd getBuf ≡ sliceLen getBuf : U64} := refl
 def stream-outside : evidence {coverOf sawStream ≡ toU64 1 : U64} := refl
 
 def stream-413 : evidence {sawStream413 ≡ owe (toU64 413) : Out} := refl
+
+def stream-peer-reply : evidence {sawStreamPeer ≡ reply (toU64 1) : Out} := refl
+
+def stream-peer-done : evidence {step0 (take sawStreamPeer) factWrote streamBuf maxBig (toU64 8) (toU64 8) ≡ quiet (toU64 0) : Out} := refl
 
 def write-bytes-outside : evidence {coverOf (step0 repGet factBytes getBuf max10 (toU64 0) (toU64 0)) ≡ toU64 1 : U64} := refl
 
