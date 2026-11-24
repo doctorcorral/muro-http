@@ -17,17 +17,19 @@
 -- way. now, deadline, and idle are the adapter clock. idle is the
 -- connection's idle budget in milliseconds.
 --
--- phase 0 is reading. phase 1 owes a protocol span and closes when
--- that span finishes: 400, 413, 414, 417, 431, 501. A request line
--- with no LF in the first 16384 bytes is 414. A header block past
--- 16384 whose request line fit is 431. phase 3 owes the handler
--- span for a finished request the policy accepts. keep 0 returns
--- to phase 4 (idle) when that span finishes, and bytes past the
--- request are classified in that same step. A leftover that is
--- still a partial request reads again. keep 1 closes instead:
+-- Book phase 0 is reading. Book phase 1 owes a protocol span and
+-- closes when that span finishes: 400, 413, 414, 417, 431, 501. A
+-- request line with no LF in the first 16384 bytes is 414. A header
+-- block past 16384 whose request line fit is 431. Book phase 3 owes
+-- the handler span for a finished request the policy accepts. keep 0
+-- returns to book phase 4 (idle) when that span finishes, and bytes
+-- past the request are classified in that same step. A leftover that
+-- is still a partial request reads again. keep 1 closes instead:
 -- Connection: close, HTTP/1.0, or a peer close during the write
--- (that peer close drops a pipelined tail). phase 2 has closed.
+-- (that peer close drops a pipelined tail). Book phase 2 has closed.
 -- A closed step ignores every later fact and disarms the deadline.
+-- These numbers are book phases, not image phases. Image phases are
+-- read 0, handle 1, write 2, idle 3, closed 4.
 --
 -- span 0 is nothing, 1 is the close status (status_now), 2 is a
 -- write span. wake 0 is disarmed. Accept arms now+idle and ignores
@@ -41,14 +43,17 @@
 -- cover 1 is outside this slice: chunked, 100 Continue, a streamed
 -- body whose Content-Length is within max (the host pulls it),
 -- a finished request that arrived on a peer close, a wrote or a
--- failure while nothing is owed, and bytes or accept during a
--- write. A streamed body past max is an owed 413 span. Classify
--- already finished, so that close is the write, not status_now.
--- A wrote with left 0 and owed 0 finishes: the caller named an
--- empty span. The host has no such input. It finishes from its
--- own byte counter.
+-- failure while the connection is reading or idle (book phase 0
+-- or book phase 4), and bytes or accept during a write. A streamed
+-- body past max is an owed 413 span. Classify already finished, so
+-- that close is the write, not status_now. A wrote with left 0 and
+-- owed 0 finishes: the caller named an empty span. That finish is
+-- in the book (owe-empty-span, reply-empty-span). The host has no
+-- such input. It finishes from its own byte counter.
 -- Not claimed here: a pulled body, fuel, a handler 500,
 -- and the 100 Continue span.
+-- Versus main: 69 evidence theorems added, 4 removed, net +65,
+-- 109 total. Each one is an equation mix muro.check reduces.
 import "request.muro"
 
 unboxed data St : Type where
@@ -234,17 +239,16 @@ def replyKeep : run Π (k : Keep) → Out :=
 
 -- reading 1: classify still wants bytes, so a policy status is
 -- status_now and the step closes. reading 0: classify finished, so
--- the handwritten step answers through the write span.
+-- the handwritten step answers through the write span. code 0 only
+-- arrives with reading 1. A finished request (reading 0, code 0) is
+-- replyKeep, before this call, so there is no reply arm here.
 def usePol : run Π (+ code : U64) → Π (+ reading : U64) → Π (+ now : U64) → Π (+ dl : U64) → Π (+ idle : U64) → Out :=
   λ (+ code : U64) → λ (+ reading : U64) → λ (+ now : U64) → λ (+ dl : U64) → λ (+ idle : U64) →
     match (isPol code (toU64 9)) motive (λ _ → Out)
       | true => outside
       | false =>
           (match (isPol code (toU64 0)) motive (λ _ → Out)
-            | true =>
-                (match (u64eq reading (toU64 1)) motive (λ _ → Out)
-                  | true => moreAt now dl idle
-                  | false => reply (toU64 0))
+            | true => moreAt now dl idle
             | false =>
                 (match (u64eq reading (toU64 1)) motive (λ _ → Out)
                   | true => statusNow code
@@ -314,6 +318,15 @@ def tailOf : run Π (+ buf : Slice) → Slice :=
 
 -- keep 1 closes. keep 0 classifies bytes past this request, or
 -- returns to idle when the buffer holds nothing past it.
+-- The caller passes only the unconsumed slice. That slice still
+-- starts with the request whose response just finished. tailOf
+-- drops that framed prefix. The next write passes that tail, not
+-- the original buffer. Passing the full two-GET buffer again, after
+-- the pipelined reply, strips the first request a second time and
+-- classifies that same tail as another reply. That re-pass is
+-- outside the contract: pipe-done passes the tail and is idle,
+-- pipe-full-again passes twoGet again and is another reply, and
+-- pipe-again-differs is that those spans are not the same.
 def finishWrite : run Π (+ code : U64) → Π (+ keep : U64) → Π (+ buf : Slice) → Π (+ max : U64) → Π (+ now : U64) → Π (+ dl : U64) → Π (+ idle : U64) → Out :=
   λ (+ code : U64) → λ (+ keep : U64) → λ (+ buf : Slice) → λ (+ max : U64) → λ (+ now : U64) → λ (+ dl : U64) → λ (+ idle : U64) →
     match (u64eq keep (toU64 1)) motive (λ _ → Out)
@@ -741,7 +754,17 @@ def pipe-tail : evidence {tailOf twoGet ≡ getBuf : Slice} := refl
 
 def pipe-second : evidence {step0 (take sawTwo) factWrote twoGet max10 (toU64 4) (toU64 4) ≡ reply (toU64 0) : Out} := refl
 
-def pipe-done : evidence {step0 (take (step0 (take sawTwo) factWrote twoGet max10 (toU64 4) (toU64 4))) factWrote getBuf max10 (toU64 4) (toU64 4) ≡ idle : Out} := refl
+def pipeTail : run Out :=
+  step0 (take (step0 (take sawTwo) factWrote twoGet max10 (toU64 4) (toU64 4))) factWrote getBuf max10 (toU64 4) (toU64 4)
+
+def pipe-done : evidence {pipeTail ≡ idle : Out} := refl
+
+def pipeAgain : run Out :=
+  step0 (take (step0 (take sawTwo) factWrote twoGet max10 (toU64 4) (toU64 4))) factWrote twoGet max10 (toU64 4) (toU64 4)
+
+def pipe-full-again : evidence {pipeAgain ≡ reply (toU64 0) : Out} := refl
+
+def pipe-again-differs : evidence {u64eq (spanOf pipeAgain) (spanOf pipeTail) ≡ false : Bool} := refl
 
 def pipe-partial : evidence {step0 (take sawPipe) factWrote pipePart max10 (toU64 4) (toU64 4) ≡ more : Out} := refl
 
