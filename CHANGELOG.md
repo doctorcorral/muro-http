@@ -2,22 +2,28 @@
 
 ## 0.1.0-dev — unreleased
 
-- Pin muro `0.22.22` from Hex (`{:muro, "~> 0.22.22"}` in
-  `mix.exs`, `muro: "0.22.22"` in `muro.exs`). `priv/muro/http/step.muro`
-  marks a header block past 16384, and a short `WROTE` (`n` below the
-  outstanding span), as outside the slice rather than 400 or quiet.
-  A finished request on a peer close is proved `cover=1`.
-  `c/test_step_slice` checks those paths. After a `status_now` close
-  the handwritten step already stays quiet; the stale comment is
-  gone. `priv/muro/http/neg/step_span.muro` is still refused by
+- Pin muro `0.22.24` from Hex (`{:muro, "~> 0.22.24"}` in
+  `mix.exs`, `muro: "0.22.24"` in `muro.exs`), after merging `#20`.
+  `priv/muro/http/step.muro` marks a header block past 16384, and a
+  short `WROTE` (`n` below the outstanding span), as outside the
+  slice rather than 400 or quiet. Those paths, and a finished
+  request on a peer close, are proved `cover=1`. `c/test_step_slice`
+  also checks the host: a 414 / 431 write (or `status_now`), never
+  a 400, on an oversize header cap, a short write that stays in
+  write, `n` above `owed`, `owed` 0, and a zero-length short
+  write. After a `status_now` close the handwritten step already
+  stays quiet; the stale comment is gone.
+  `priv/muro/http/neg/step_span.muro` is refused by
   `mix muro.check --fuel 5000000`, and `test/conn_test.exs` gates
-  that refusal. `mix muro.gen` refreshes the committed C and Elixir
-  headers for 0.22.22. The family FSM emitter now records departed
-  instances and `skip_below` in `lib/muro_http/family_fsm.ex`;
-  `family.muro` is unchanged. `test/family_test.exs` now uses a
-  fresh creation index after a resolved accept, because 0.22.22
-  refuses a repeat of a departed index. The other generated files
-  only change the 0.22.22 banner. The library version stays
+  that refusal with a 120s timeout. `mix muro.gen` refreshes the
+  committed C and Elixir headers for 0.22.24. The family FSM
+  emitter records departed instances and `skip_below` in
+  `lib/muro_http/family_fsm.ex`; `family.muro` is unchanged.
+  `test/family_test.exs` uses a fresh creation index after a
+  resolved accept, asserts
+  `{:error, {:departed, key, index}}` on a repeat, and covers
+  `skip`, `skip_below`, and `drop_key`. The other generated files
+  only change the 0.22.24 banner. The library version stays
   `0.1.0-dev`.
 - `bodyView` keeps the in-buffer offset of an empty body, including
   `Content-Length: 0`, on a memo hit. A later call with the same

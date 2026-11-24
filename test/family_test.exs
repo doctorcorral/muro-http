@@ -22,7 +22,7 @@ defmodule MuroHttp.FamilyTest do
   # not a bound on live connections and it is not the Agda proof.
   test "mix muro.check accepts reply order, a free accept, and one drained turn" do
     assert {:ok, text, ""} = Muro.CLI.Check.run(["priv/muro/http/family.muro"])
-    assert text =~ "Muro v0.22.22\n"
+    assert text =~ "Muro v0.22.24\n"
     assert text =~ "family conns: turn per key of Act\n"
     assert text =~ "temporal drained: holds in 3 reachable states, 3 transitions\n"
     assert text =~ "temporal reply-order: holds in 3721 reachable states, 10521 transitions\n"
@@ -57,7 +57,7 @@ defmodule MuroHttp.FamilyTest do
     assert {:open, b_accept, state} = Conns.arrive(state, "b", :accept, 0)
     assert {:ok, [], state} = Conns.resolved(state, a_accept)
     assert {:ok, [], state} = Conns.resolved(state, b_accept)
-    # 0.22.22 records a resolved index as departed, so a later
+    # 0.22.24 records a resolved index as departed, so a later
     # reply on the same key must use a fresh creation index.
     assert {:open, a0, state} = Conns.arrive(state, "a", :reply, 1)
     assert {:held, a1, state} = Conns.arrive(state, "a", :reply, 2)
@@ -135,5 +135,51 @@ defmodule MuroHttp.FamilyTest do
     assert {:ok, host} = ReplyIn.recv(host, :ok)
     assert ReplyIn.done?(host)
     assert {:error, {:unexpected, _step, :done, :ok}} = ReplyIn.recv(host, :ok)
+  end
+
+  # The emitted dispatcher reports a forgotten / departed creation
+  # index as {:error, {:departed, key, index}}. There is no
+  # :forgotten atom in muro 0.22.24.
+  test "a repeat of a departed creation index is refused" do
+    state = Conns.new()
+    assert {:open, a0, state} = Conns.arrive(state, "a", :accept, 0)
+    assert {:ok, [], state} = Conns.resolved(state, a0)
+    assert {:error, {:departed, "a", 0}} = Conns.arrive(state, "a", :reply, 0)
+
+    assert {:error, {2, {:departed, "a", 0}}} =
+             Conns.check_trace([
+               {:arrive, "a", :accept, 0},
+               {:resolved, 0},
+               {:arrive, "a", :reply, 0}
+             ])
+  end
+
+  test "skip, skip_below, and drop_key record and clear departed indices" do
+    state = Conns.new()
+    assert {:ok, state} = Conns.skip(state, "a", 3)
+    assert {:error, {:departed, "a", 3}} = Conns.arrive(state, "a", :accept, 3)
+    # A later first arrival of an earlier index above the floor is accepted.
+    assert {:open, a1, state} = Conns.arrive(state, "a", :accept, 1)
+    assert {:error, {:live, "a"}} = Conns.drop_key(state, "a")
+    assert {:ok, [], state} = Conns.resolved(state, a1)
+    assert {:ok, state} = Conns.drop_key(state, "a")
+    # drop_key clears that key's record; the floor stays -1, so 3 may arrive again.
+    assert {:open, _a3, _state3} = Conns.arrive(state, "a", :accept, 3)
+
+    state = Conns.new()
+    assert {:ok, state} = Conns.skip(state, "b", 0)
+    assert {:ok, state} = Conns.skip_below(state, 0)
+    assert {:ok, ^state} = Conns.skip_below(state, 0)
+    assert {:error, {:departed, "b", 0}} = Conns.arrive(state, "b", :accept, 0)
+    assert {:open, _b1, _state} = Conns.arrive(state, "b", :accept, 1)
+
+    assert :ok =
+             Conns.check_trace([
+               {:skip, "a", 0},
+               {:arrive, "a", :accept, 1},
+               {:resolved, 0},
+               {:drop, "a"},
+               {:skip_below, 0}
+             ])
   end
 end
