@@ -1587,6 +1587,13 @@ static int idle_edges(void) {
     box_free(&b);
     return -1;
   }
+  /* ACCEPTED on a live step replaces HttpStep.proto. take_fact
+     calls proto_begin and drops the previous pointer. Production
+     accepts only on a fresh slot, after bind, so that pointer is
+     NULL there. Free it here. The host check still requires the
+     reset to READ with wake now+idle. */
+  proto_free(b.st.proto);
+  b.st.proto = NULL;
   if (step_both(&b, &st, MURO_STEP_ACCEPTED, NULL, 0, 0, &o, &bk, "idle-accept") < 0) {
     box_free(&b);
     return -1;
