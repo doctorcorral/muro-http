@@ -15,7 +15,7 @@ headers='unistd\.h|sys/socket\.h|sys/epoll\.h|sys/event\.h|poll\.h|fcntl\.h|sys/
 # the render and stream helpers.
 libc='memcpy memmove memset memcmp malloc free realloc calloc strlen bzero'
 allow_prefix='asan_ ubsan_ sanitizer_ stack_chk chkstk'
-objs='c/proto.o c/admit_glue.o c/host_render.o c/host_stream.o c/render.o c/conn.o c/scan_cache.o c/request.o c/shim.o c/session.o c/admit.o'
+objs='c/proto.o c/admit_glue.o c/host_render.o c/host_stream.o c/render.o c/conn.o c/scan_cache.o c/step_memo.o c/view_memo.o c/request.o c/shim.o c/session.o c/admit.o'
 
 seen=$(mktemp)
 queue=$(mktemp)

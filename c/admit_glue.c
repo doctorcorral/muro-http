@@ -21,6 +21,7 @@
 #include "admit.h"
 
 #include <stddef.h>
+#include <string.h>
 
 _Static_assert(MURO_SESS_SEND == 1, "admit.muro dirSend");
 _Static_assert(MURO_SESS_RECV == 2, "admit.muro dirRecv");
@@ -66,43 +67,133 @@ static AdmitOffer none(void) {
   return out;
 }
 
+/* admitChoice is a pure function of these integers. One keep-alive
+   GET repeats four offers. The book still runs when any integer
+   differs, including the reply bit and close-after, so keep versus
+   close stays a book result. Eight slots cover that cycle and a
+   second connection shape without dropping the hot keys. */
+enum { ADMIT_SLOTS = 8 };
+
+struct admit_key {
+  uint64_t w[13];
+};
+
+struct admit_slot {
+  int used;
+  struct admit_key key;
+  AdmitOffer offer;
+};
+
+static struct admit_slot admit_slots[ADMIT_SLOTS];
+static unsigned admit_hand;
+static unsigned admit_misses;
+
+/* Tests isolate offers. The server never calls these. A hit does
+   not increment the miss count. */
+void admit_memo_reset(void) {
+  unsigned i;
+  for (i = 0; i < ADMIT_SLOTS; i++) admit_slots[i].used = 0;
+  admit_hand = 0;
+  admit_misses = 0;
+}
+
+unsigned admit_memo_misses(void) { return admit_misses; }
+
+static struct admit_key admit_key_of(uint64_t phase, uint64_t ev, uint64_t n, uint64_t has_cls,
+                                     uint64_t cls, uint64_t has_rep, uint64_t rep, uint64_t observe,
+                                     uint64_t close_after, uint64_t at, uint64_t stuck, uint64_t key,
+                                     uint64_t sess_done) {
+  struct admit_key k;
+  k.w[0] = phase;
+  k.w[1] = ev;
+  k.w[2] = n;
+  k.w[3] = has_cls;
+  k.w[4] = cls;
+  k.w[5] = has_rep;
+  k.w[6] = rep;
+  k.w[7] = observe;
+  k.w[8] = close_after;
+  k.w[9] = at;
+  k.w[10] = stuck;
+  k.w[11] = key;
+  k.w[12] = sess_done;
+  return k;
+}
+
+static void admit_store(struct admit_key key, AdmitOffer offer) {
+  struct admit_slot *s = &admit_slots[admit_hand % ADMIT_SLOTS];
+  admit_hand += 1;
+  s->used = 1;
+  s->key = key;
+  s->offer = offer;
+}
+
 AdmitOffer admit_offer(uint64_t phase, uint64_t ev, uint64_t n, uint64_t has_cls,
                        uint64_t cls, uint64_t has_rep, uint64_t rep, uint64_t observe,
                        uint64_t close_after, uint64_t at, uint64_t stuck, uint64_t key,
                        uint64_t sess_done) {
-  Offer o = admitChoice(phase, ev, n, has_cls, cls, has_rep, rep, observe, close_after, at,
-                        stuck, key, sess_done);
-  AdmitOffer out = none();
+  struct admit_key akey = admit_key_of(phase, ev, n, has_cls, cls, has_rep, rep, observe, close_after,
+                                       at, stuck, key, sess_done);
+  Offer o;
+  AdmitOffer out;
   uint64_t count;
   uint64_t i;
-  if (o.muro__as.offer.muro__f_0 != 1) return out;
+  for (i = 0; i < ADMIT_SLOTS; i++) {
+    if (admit_slots[i].used && memcmp(&admit_slots[i].key, &akey, sizeof akey) == 0)
+      return admit_slots[i].offer;
+  }
+  admit_misses += 1;
+  o = admitChoice(phase, ev, n, has_cls, cls, has_rep, rep, observe, close_after, at, stuck, key,
+                  sess_done);
+  out = none();
+  if (o.muro__as.offer.muro__f_0 != 1) {
+    admit_store(akey, out);
+    return out;
+  }
   count = o.muro__as.offer.muro__f_1;
-  if (count > ADMIT_MOVES) return out;
+  if (count > ADMIT_MOVES) {
+    admit_store(akey, out);
+    return out;
+  }
   out.ok = 1;
   out.n = (int)count;
   for (i = 0; i < count; i++) {
     Move m;
     uint64_t present, dir, tag, bit, ctor;
     const char *name = NULL;
-    if (!slot(o, (int)i, &m)) return none();
+    if (!slot(o, (int)i, &m)) {
+      out = none();
+      break;
+    }
     present = m.muro__as.mv.muro__f_0;
     dir = m.muro__as.mv.muro__f_1;
     tag = m.muro__as.mv.muro__f_2;
     bit = m.muro__as.mv.muro__f_3;
     ctor = m.muro__as.mv.muro__f_4;
-    if (present != 1 || (dir != MURO_SESS_SEND && dir != MURO_SESS_RECV)) return none();
+    if (present != 1 || (dir != MURO_SESS_SEND && dir != MURO_SESS_RECV)) {
+      out = none();
+      break;
+    }
     if (tag == MURO_SESS_PICK) {
-      if (bit > 1) return none();
+      if (bit > 1) {
+        out = none();
+        break;
+      }
     } else if (tag == MURO_SESS_DATA) {
       name = ctor_name(ctor);
-      if (!name) return none();
+      if (!name) {
+        out = none();
+        break;
+      }
     } else {
-      return none();
+      out = none();
+      break;
     }
     out.m[i].dir = (int)dir;
     out.m[i].tag = (int)tag;
     out.m[i].bit = (unsigned)bit;
     out.m[i].ctor = name;
   }
+  admit_store(akey, out);
   return out;
 }
