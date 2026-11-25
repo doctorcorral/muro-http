@@ -2,9 +2,11 @@
 
 ## 0.1.0-dev — unreleased
 
-- Pin muro `0.22.32` from Hex (`{:muro, "~> 0.22.32"}` in
-  `mix.exs`, `muro: "0.22.32"` in `muro.exs`) and carry the
-  end-of-headers offset in `step.muro` state. `St` and `Out` gain
+- Pin muro `0.22.33` from Hex (`{:muro, "~> 0.22.33"}` in
+  `mix.exs`, `muro: "0.22.33"` in `muro.exs`), the work-saved
+  inliner and known-dead-arm specialization from
+  [murolang/muro#295](https://github.com/murolang/muro/pull/295),
+  and carry the end-of-headers offset in `step.muro` state. `St` and `Out` gain
   `hend`. `0` means unknown; a complete header block is never at
   offset `0`. `rememberEnd` records `headerEnd` once headers are
   done. `onBuf` binds one `scan` and that stored end, then uses
@@ -55,7 +57,7 @@
   `headerEndAt` when `hend` is already bound nonzero, would
   shrink that path. Errors and non2xx were 0 on every run.
   `c/step.c` and `c/host.c` are unchanged. The library version
-  stays `0.1.0-dev`. The pin is muro `0.22.32`.
+  stays `0.1.0-dev`. The pin is muro `0.22.33`.
 - Chunked request bodies, `Expect: 100-continue`, an open streamed
   body, accept during a write or while idle, and a body-reader
   override of 400 or 413 are decided in `priv/muro/http/step.muro`.

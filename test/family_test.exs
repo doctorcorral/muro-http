@@ -22,7 +22,7 @@ defmodule MuroHttp.FamilyTest do
   # not a bound on live connections and it is not the Agda proof.
   test "mix muro.check accepts reply order, a free accept, and one drained turn" do
     assert {:ok, text, ""} = Muro.CLI.Check.run(["priv/muro/http/family.muro"])
-    assert text =~ "Muro v0.22.32\n"
+    assert text =~ "Muro v0.22.33\n"
     assert text =~ "family conns: turn per key of Act\n"
     assert text =~ "temporal drained: holds in 3 reachable states, 3 transitions\n"
     assert text =~ "temporal reply-order: holds in 3721 reachable states, 10521 transitions\n"
