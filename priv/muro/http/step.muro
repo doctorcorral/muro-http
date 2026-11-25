@@ -43,10 +43,27 @@
 -- and the two clocks produce the same close. NOW during a write
 -- parks that same span again.
 --
--- cover 1 is outside this slice: chunked, 100 Continue, a streamed
--- body whose Content-Length is within max while the peer is still
--- open (the host pulls it), accept during a write, and accept while
--- idle. Bytes during a write park the same span. A wrote or a
+-- cover 1 is an unknown fact. A streamed body whose
+-- Content-Length is within max while the peer is still open is a
+-- handler reply at the request keep (stream-open). The adapter
+-- then sets hclose when that body is still open and the response
+-- does not pull it, so the wire says Connection: close. Accept
+-- during a write (write-accept, owe-accept) and accept while idle
+-- (idle-accept) are a fresh read: now+idle, and the carried
+-- deadline is dropped. Chunked bodies are in the slice. The book
+-- scans the chunk framing
+-- (chunkScan) and decides the same status and close as
+-- host_in_policy: a bad size is 400, a size or total past max is
+-- 413, a finished body is a handler span, and a peer close before
+-- the last chunk is 400. Method code 1 is 501 before that body
+-- check, so a chunked TRACE is 501. 100-continue is in the slice.
+-- Book phase 6 owes the interim (span 6) while the body is short.
+-- Phase 8 is that interim after the peer has closed. Phase 7 is
+-- the read after the interim was sent, so a still-short body does
+-- not park a second one. A body already in the buffer, HTTP/1.0,
+-- HEAD, and a policy status (413, 417, 501) do not owe it. A tick
+-- drops it and closes. Bytes during a write park the
+-- same span. A wrote or a
 -- failure while reading stays on the read. The same facts while
 -- idle stay idle. The host holds those facts the same way. A
 -- finished buffered request on a peer close is a handler span
@@ -75,12 +92,32 @@
 -- a version other than HTTP/1.1 forces the delimited span and
 -- keep 1. cover stays 0 on all of these. A later fact on phase 5
 -- is quiet, the same as a close.
--- Not claimed here: fuel, the 100 Continue span, and the host's
--- deadline decision (c/host.c on_tick compares the clocks).
+-- Not claimed here: fuel, and the host's deadline decision
+-- (c/host.c on_tick compares the clocks). The adapter clears a
+-- pending interim on bytes or a peer close when the recv buffer
+-- was empty before the arrival, the same as prepare_in. The book
+-- itself keeps the interim across those facts. An accept during
+-- the interim is a fresh read on both sides. A later write can
+-- still re-park that interim on the host, because accept does not
+-- clear its bytes. The adapter drops them. That later write is
+-- not claimed. Bytes that complete the request while that interim
+-- is still outstanding, and the recv buffer was not empty, disarm
+-- the host and leave the book armed. The sweep rewinds an empty
+-- buffer instead, so that race is not in the differential. A
+-- response pull that leaves the request body open does not force
+-- Connection: close. The host then closes after the response
+-- because the body is still open. The book finishes at the
+-- request keep. The test handler does not pull, so that close is
+-- not claimed. An unknown fact is cover 1. The host returns -1.
+-- overStatus owes 400 and 413. Any other override is cover, and
+-- the adapter shuts with the stuck note. The body reader only
+-- produces 400 and 413.
 -- The C adapter admits each fact with proto_admit. This book does
 -- not. A refused admit is note 1 in that adapter.
--- Versus origin/main: 17 evidence names added, none removed, net
--- +17, 143 total. Each one is an equation mix muro.check reduces.
+-- Versus origin/main: 44 evidence names added, 5 removed
+-- (chunk-outside, continue-outside, stream-outside,
+-- write-accept-outside, idle-accept-outside), net +39, 182 total.
+-- Each one is an equation mix muro.check reduces.
 import "request.muro"
 
 unboxed data St : Type where
@@ -203,34 +240,138 @@ def expectIs : run Π (+ s : Slice) → Π (+ n : U64) → Bool :=
   λ (+ s : Slice) → λ (+ n : U64) → u64eq (expectCode s) n
 
 -- A body the host will stream: headers are done, the buffered body
--- is short, and Content-Length is past 16384. That pull is not this
--- slice. A complete body is not short, so it is not streamed.
+-- is short, and Content-Length is past 16384. The step is the
+-- handler reply at the request keep. The adapter sets hclose when
+-- that body stays open and the response pull does not own it.
+-- A complete body is not short, so it is not streamed.
+-- A chunked body is not this predicate.
 def streamed : run Π (+ s : Slice) → Bool :=
   λ (+ s : Slice) → and (bodyShort s) (gt16384 (contentLength s))
 
--- Chunked is outside this slice, before the status order, so a
--- chunked TRACE is not claimed as 501. The rest matches
--- host_in_policy: method code 1 is 501, then Content-Length over
--- max is 413, then an HTTP/1.1 Expect other than 100-continue is
--- 417, then 100-continue with a short body is outside.
--- 9 is outside the slice. 0 is no policy status.
+-- Phases 2, 3, 4, and 5 are a size line that has a remainder.
+-- chunk_over rejects those when rem or total+rem passes max.
+def ckHot : run Π (+ ph : U64) → Bool :=
+  λ (+ ph : U64) →
+    or (u64eq ph (toU64 2))
+      (or (u64eq ph (toU64 3)) (or (u64eq ph (toU64 4)) (u64eq ph (toU64 5))))
+
+-- Bad framing is not 413. A running total past max is. A hot phase
+-- is over when rem passes max, or total passes max-rem. Subtract
+-- only after rem fits, the same wrap guard as chunk_over. A size
+-- still being read (phase 0) is over when the accumulator passes max.
+def chunkOver : run Π (+ ck : Ck) → Π (+ max : U64) → Bool :=
+  λ (+ ck : Ck) → λ (+ max : U64) →
+    match ck motive (λ _ → Bool)
+      | ck ph acc rem total _fl _at =>
+          (match (u64eq ph (toU64 9)) motive (λ _ → Bool)
+            | true => false
+            | false =>
+                (match (u64lt max total) motive (λ _ → Bool)
+                  | true => true
+                  | false =>
+                      (match (ckHot ph) motive (λ _ → Bool)
+                        | true =>
+                            (match (u64lt max rem) motive (λ _ → Bool)
+                              | true => true
+                              | false => u64lt (subi max rem) total)
+                        | false =>
+                            (match (u64eq ph (toU64 0)) motive (λ _ → Bool)
+                              | true => u64lt max acc
+                              | false => false))))
+
+-- One scan. A bad chunk is not a policy status (classify owes 400).
+-- Otherwise chunk_over is 413, then an HTTP/1.1 Expect other than
+-- 100-continue is 417. 100-continue on a chunked body is not code 9.
+def chunkPol : run Π (+ ck : Ck) → Π (+ s : Slice) → Π (+ max : U64) → U64 :=
+  λ (+ ck : Ck) → λ (+ s : Slice) → λ (+ max : U64) →
+    match ck motive (λ _ → U64)
+      | ck ph _acc _rem _total _fl _at =>
+          (match (u64eq ph (toU64 9)) motive (λ _ → U64)
+            | true => toU64 0
+            | false =>
+                (match (chunkOver ck max) motive (λ _ → U64)
+                  | true => toU64 413
+                  | false =>
+                      (match (and (ver11 s) (expectIs s (toU64 2))) motive (λ _ → U64)
+                        | true => toU64 417
+                        | false => toU64 0)))
+
+-- Matches host_in_policy. Method code 1 is 501 before the body
+-- check, so a chunked TRACE is 501. A chunked body then uses
+-- chunkPol. Content-Length past max is 413. An HTTP/1.1 Expect
+-- other than 100-continue is 417. 0 is no policy status.
+-- 100-continue is not a policy status: wantCont parks it when the
+-- body is still short. Non-chunked requests are not scanned.
 def policy : run Π (+ s : Slice) → Π (+ max : U64) → U64 :=
   λ (+ s : Slice) → λ (+ max : U64) →
-    match (chunked s) motive (λ _ → U64)
-      | true => toU64 9
+    match (methodUnimpl s) motive (λ _ → U64)
+      | true => toU64 501
       | false =>
-          (match (methodUnimpl s) motive (λ _ → U64)
-            | true => toU64 501
+          (match (chunked s) motive (λ _ → U64)
+            | true => chunkPol (chunkScan s) s max
             | false =>
                 (match (tooLong s max) motive (λ _ → U64)
                   | true => toU64 413
                   | false =>
                       (match (and (ver11 s) (expectIs s (toU64 2))) motive (λ _ → U64)
                         | true => toU64 417
-                        | false =>
-                            (match (and (ver11 s) (and (expectIs s (toU64 1)) (bodyShort s))) motive (λ _ → U64)
-                              | true => toU64 9
-                              | false => toU64 0))))
+                        | false => toU64 0)))
+
+-- The body is finished, so 100-continue is not owed. A chunked body
+-- is finished only when the last chunk is done. Anything else is
+-- finished when it is not short. Non-chunked requests are not scanned.
+def reqComplete : run Π (+ s : Slice) → Bool :=
+  λ (+ s : Slice) →
+    match (chunked s) motive (λ _ → Bool)
+      | true => ckDone (chunkScan s)
+      | false =>
+          (match (bodyShort s) motive (λ _ → Bool)
+            | true => false
+            | false => true)
+
+def isHead : run Π (+ s : Slice) → Bool :=
+  λ (+ s : Slice) → spanEq (methodView s) b"HEAD"
+
+-- HTTP/1.1 Expect: 100-continue, body not finished, not HEAD.
+-- The caller has already rejected a policy status, and it does not
+-- ask on a peer close or after the 100 was sent.
+def wantCont : run Π (+ s : Slice) → Bool :=
+  λ (+ s : Slice) →
+    match (ver11 s) motive (λ _ → Bool)
+      | true =>
+          (match (expectIs s (toU64 1)) motive (λ _ → Bool)
+            | true =>
+                (match (isHead s) motive (λ _ → Bool)
+                  | true => false
+                  | false =>
+                      (match (reqComplete s) motive (λ _ → Bool)
+                        | true => false
+                        | false => true))
+            | false => false)
+      | false => false
+
+-- Phase 6 is the interim span. The read timer stays armed.
+def contAt : run Π (+ now : U64) → Π (+ dl : U64) → Π (+ idle : U64) → Out :=
+  λ (+ now : U64) → λ (+ dl : U64) → λ (+ idle : U64) →
+    out (toU64 6) (toU64 100) (toU64 0) (toU64 0) (toU64 0) (toU64 1) (toU64 6) (toU64 0) (toU64 0) (arm now dl idle) (toU64 0)
+
+-- A short write, a held fact, or a peer close while the 100 is still
+-- going out. Phase 8 means the peer has already closed.
+def contHold : run Π (+ phase : U64) → Π (+ left : U64) → Π (+ now : U64) → Π (+ dl : U64) → Π (+ idle : U64) → Out :=
+  λ (+ phase : U64) → λ (+ left : U64) → λ (+ now : U64) → λ (+ dl : U64) → λ (+ idle : U64) →
+    out phase (toU64 100) (toU64 0) (toU64 0) (toU64 0) (toU64 1) (toU64 6) (toU64 0) left (arm now dl idle) (toU64 0)
+
+-- Phase 7 is the read after the 100 has been sent. A later short
+-- body must not park a second interim.
+def moreSent : run Π (+ now : U64) → Π (+ dl : U64) → Π (+ idle : U64) → Out :=
+  λ (+ now : U64) → λ (+ dl : U64) → λ (+ idle : U64) →
+    out (toU64 7) (toU64 0) (toU64 0) (toU64 0) (toU64 1) (toU64 0) (toU64 0) (toU64 0) (toU64 0) (arm now dl idle) (toU64 0)
+
+def parkRead : run Π (+ sent : U64) → Π (+ now : U64) → Π (+ dl : U64) → Π (+ idle : U64) → Out :=
+  λ (+ sent : U64) → λ (+ now : U64) → λ (+ dl : U64) → λ (+ idle : U64) →
+    match (u64eq sent (toU64 1)) motive (λ _ → Out)
+      | true => moreSent now dl idle
+      | false => moreAt now dl idle
 
 def isPol : run Π (+ n : U64) → Π (+ c : U64) → Bool :=
   λ (+ n : U64) → λ (+ c : U64) → u64eq n c
@@ -271,31 +412,27 @@ def replyKeep : run Π (k : Keep) → Out :=
 -- replyKeep, before this call, so there is no reply arm here.
 def usePol : run Π (+ code : U64) → Π (+ reading : U64) → Π (+ now : U64) → Π (+ dl : U64) → Π (+ idle : U64) → Out :=
   λ (+ code : U64) → λ (+ reading : U64) → λ (+ now : U64) → λ (+ dl : U64) → λ (+ idle : U64) →
-    match (isPol code (toU64 9)) motive (λ _ → Out)
-      | true => outside
+    match (isPol code (toU64 0)) motive (λ _ → Out)
+      | true => moreAt now dl idle
       | false =>
-          (match (isPol code (toU64 0)) motive (λ _ → Out)
-            | true => moreAt now dl idle
-            | false =>
-                (match (u64eq reading (toU64 1)) motive (λ _ → Out)
-                  | true => statusNow code
-                  | false => owe code))
+          (match (u64eq reading (toU64 1)) motive (λ _ → Out)
+            | true => statusNow code
+            | false => owe code)
 
 -- A finished request on a peer close is the handler span with
 -- keep 1. The completing write closes and drops a pipelined tail.
--- Policy 9 (chunked, or 100-continue) stays outside. A policy
--- status is an owed span.
+-- A policy status is an owed span. 100-continue is not a policy code.
 def finOk : run Π (+ code : U64) → Out :=
   λ (+ code : U64) →
     match (isPol code (toU64 0)) motive (λ _ → Out)
       | true => reply (toU64 1)
-      | false =>
-          (match (isPol code (toU64 9)) motive (λ _ → Out)
-            | true => outside
-            | false => owe code)
+      | false => owe code
 
-def onStatus : run Π (+ st : Status) → Π (+ fin : U64) → Π (+ s : Slice) → Π (+ max : U64) → Π (+ now : U64) → Π (+ dl : U64) → Π (+ idle : U64) → Out :=
-  λ (+ st : Status) → λ (+ fin : U64) → λ (+ s : Slice) → λ (+ max : U64) → λ (+ now : U64) → λ (+ dl : U64) → λ (+ idle : U64) →
+-- sent 1 means the 100 was already written. A second short body
+-- reads again. sent 0 and wantCont parks the interim. A peer close
+-- does not park it: fin is 1, and the status is the final one.
+def onStatus : run Π (+ st : Status) → Π (+ fin : U64) → Π (+ sent : U64) → Π (+ s : Slice) → Π (+ max : U64) → Π (+ now : U64) → Π (+ dl : U64) → Π (+ idle : U64) → Out :=
+  λ (+ st : Status) → λ (+ fin : U64) → λ (+ sent : U64) → λ (+ s : Slice) → λ (+ max : U64) → λ (+ now : U64) → λ (+ dl : U64) → λ (+ idle : U64) →
     match st motive (λ _ → Out)
       | status-ok =>
           (match (u64eq fin (toU64 1)) motive (λ _ → Out)
@@ -303,8 +440,8 @@ def onStatus : run Π (+ st : Status) → Π (+ fin : U64) → Π (+ s : Slice) 
             | false =>
                 (match (isPol (policy s max) (toU64 0)) motive (λ _ → Out)
                   | true =>
-                      (match (streamed s) motive (λ _ → Out)
-                        | true => outside
+                      (match (and (u64eq sent (toU64 0)) (wantCont s)) motive (λ _ → Out)
+                        | true => contAt now dl idle
                         | false => replyKeep (keepOf s))
                   | false => usePol (policy s max) (toU64 0) now dl idle))
       | status-malformed =>
@@ -322,14 +459,20 @@ def onStatus : run Π (+ st : Status) → Π (+ fin : U64) → Π (+ s : Slice) 
             | true => owe (toU64 400)
             | false =>
                 (match (headersDone s) motive (λ _ → Out)
-                  | true => usePol (policy s max) (toU64 1) now dl idle
-                  | false => moreAt now dl idle))
+                  | true =>
+                      (match (isPol (policy s max) (toU64 0)) motive (λ _ → Out)
+                        | true =>
+                            (match (and (u64eq sent (toU64 0)) (wantCont s)) motive (λ _ → Out)
+                              | true => contAt now dl idle
+                              | false => parkRead sent now dl idle)
+                        | false => usePol (policy s max) (toU64 1) now dl idle)
+                  | false => parkRead sent now dl idle))
       | status-unimplemented => owe (toU64 501)
 
-def onBuf : run Π (+ fin : U64) → Π (+ s : Slice) → Π (+ max : U64) → Π (+ now : U64) → Π (+ dl : U64) → Π (+ idle : U64) → Out :=
-  λ (+ fin : U64) → λ (+ s : Slice) → λ (+ max : U64) → λ (+ now : U64) → λ (+ dl : U64) → λ (+ idle : U64) →
+def onBuf : run Π (+ fin : U64) → Π (+ sent : U64) → Π (+ s : Slice) → Π (+ max : U64) → Π (+ now : U64) → Π (+ dl : U64) → Π (+ idle : U64) → Out :=
+  λ (+ fin : U64) → λ (+ sent : U64) → λ (+ s : Slice) → λ (+ max : U64) → λ (+ now : U64) → λ (+ dl : U64) → λ (+ idle : U64) →
     match (classify s) motive (λ _ → Out)
-      | classified st _keep => onStatus st fin s max now dl idle
+      | classified st _keep => onStatus st fin sent s max now dl idle
 
 def baseOf : run Π (+ left : U64) → Π (+ owed : U64) → U64 :=
   λ (+ left : U64) → λ (+ owed : U64) →
@@ -361,7 +504,7 @@ def finishWrite : run Π (+ code : U64) → Π (+ keep : U64) → Π (+ buf : Sl
       | true => quiet code
       | false =>
           (match (pastEnd buf) motive (λ _ → Out)
-            | true => onBuf (toU64 0) (tailOf buf) max now dl idle
+            | true => onBuf (toU64 0) (toU64 0) (tailOf buf) max now dl idle
             | false => idleAt now dl idle)
 
 def writeFact : run Π (+ phase : U64) → Π (+ code : U64) → Π (+ left : U64) → Π (+ keep : U64) → Π (+ fact : U64) → Π (+ n : U64) → Π (+ owed : U64) → Π (+ buf : Slice) → Π (+ max : U64) → Π (+ now : U64) → Π (+ dl : U64) → Π (+ idle : U64) → Out :=
@@ -383,7 +526,10 @@ def writeFact : run Π (+ phase : U64) → Π (+ code : U64) → Π (+ left : U6
                         | false =>
                             (match (u64eq fact factBytes) motive (λ _ → Out)
                               | true => still phase code left keep
-                              | false => outside))))
+                              | false =>
+                                  (match (u64eq fact factAccepted) motive (λ _ → Out)
+                                    | true => moreAt now (toU64 0) idle
+                                    | false => outside)))))
 
 def readFact : run Π (+ fact : U64) → Π (+ s : Slice) → Π (+ max : U64) → Π (+ now : U64) → Π (+ dl : U64) → Π (+ idle : U64) → Out :=
   λ (+ fact : U64) → λ (+ s : Slice) → λ (+ max : U64) → λ (+ now : U64) → λ (+ dl : U64) → λ (+ idle : U64) →
@@ -391,13 +537,13 @@ def readFact : run Π (+ fact : U64) → Π (+ s : Slice) → Π (+ max : U64) �
       | true => moreAt now (toU64 0) idle
       | false =>
           (match (u64eq fact factBytes) motive (λ _ → Out)
-            | true => onBuf (toU64 0) s max now dl idle
+            | true => onBuf (toU64 0) (toU64 0) s max now dl idle
             | false =>
                 (match (u64eq fact factPeer) motive (λ _ → Out)
                   | true =>
                       (match (u64eq (sliceLen s) (toU64 0)) motive (λ _ → Out)
                         | true => quiet (toU64 0)
-                        | false => onBuf (toU64 1) s max now dl idle)
+                        | false => onBuf (toU64 1) (toU64 0) s max now dl idle)
                   | false =>
                       (match (u64eq fact factNow) motive (λ _ → Out)
                         | true => quiet (toU64 0)
@@ -409,20 +555,80 @@ def readFact : run Π (+ fact : U64) → Π (+ s : Slice) → Π (+ max : U64) �
 def idleFact : run Π (+ fact : U64) → Π (+ s : Slice) → Π (+ max : U64) → Π (+ now : U64) → Π (+ dl : U64) → Π (+ idle : U64) → Out :=
   λ (+ fact : U64) → λ (+ s : Slice) → λ (+ max : U64) → λ (+ now : U64) → λ (+ dl : U64) → λ (+ idle : U64) →
     match (u64eq fact factBytes) motive (λ _ → Out)
-      | true => onBuf (toU64 0) s max now dl idle
+      | true => onBuf (toU64 0) (toU64 0) s max now dl idle
       | false =>
           (match (u64eq fact factPeer) motive (λ _ → Out)
             | true =>
                 (match (u64eq (sliceLen s) (toU64 0)) motive (λ _ → Out)
                   | true => quiet (toU64 0)
-                  | false => onBuf (toU64 1) s max now dl idle)
+                  | false => onBuf (toU64 1) (toU64 0) s max now dl idle)
             | false =>
                 (match (u64eq fact factNow) motive (λ _ → Out)
                   | true => quiet (toU64 0)
                   | false =>
                       (match (or (u64eq fact factWrote) (u64eq fact factFailed)) motive (λ _ → Out)
                         | true => idleAt now dl idle
-                        | false => outside)))
+                        | false =>
+                            (match (u64eq fact factAccepted) motive (λ _ → Out)
+                              | true => moreAt now (toU64 0) idle
+                              | false => outside))))
+
+-- Phase 6 or 8: the 100 is still the span. A full wrote classifies
+-- the buffer. Phase 8 carries the peer close into that classification.
+-- A tick drops the interim and closes. A hard write failure parks
+-- the same span again. Bytes keep the interim, and its read timer,
+-- when the adapter has not already cleared it. A peer close keeps
+-- the interim too, but the image is then a write, so the timer is
+-- off and the wake is 0.
+def contFact : run Π (+ phase : U64) → Π (+ left : U64) → Π (+ fact : U64) → Π (+ n : U64) → Π (+ owed : U64) → Π (+ buf : Slice) → Π (+ max : U64) → Π (+ now : U64) → Π (+ dl : U64) → Π (+ idle : U64) → Out :=
+  λ (+ phase : U64) → λ (+ left : U64) → λ (+ fact : U64) → λ (+ n : U64) → λ (+ owed : U64) → λ (+ buf : Slice) → λ (+ max : U64) → λ (+ now : U64) → λ (+ dl : U64) → λ (+ idle : U64) →
+    match (u64eq fact factWrote) motive (λ _ → Out)
+      | true =>
+          (match (u64lt n (baseOf left owed)) motive (λ _ → Out)
+            | true => contHold phase (subi (baseOf left owed) n) now dl idle
+            | false =>
+                (match (u64eq phase (toU64 8)) motive (λ _ → Out)
+                  | true => onBuf (toU64 1) (toU64 1) buf max now dl idle
+                  | false => onBuf (toU64 0) (toU64 1) buf max now dl idle))
+      | false =>
+          (match (u64eq fact factFailed) motive (λ _ → Out)
+            | true => contHold phase left now dl idle
+            | false =>
+                (match (u64eq fact factNow) motive (λ _ → Out)
+                  | true => quiet (toU64 0)
+                  | false =>
+                      (match (u64eq fact factPeer) motive (λ _ → Out)
+                        | true => contHold (toU64 8) left (toU64 0) (toU64 0) (toU64 0)
+                        | false =>
+                            (match (u64eq fact factBytes) motive (λ _ → Out)
+                              | true => contHold phase left now dl idle
+                              | false =>
+                                  (match (u64eq fact factAccepted) motive (λ _ → Out)
+                                    | true => moreAt now (toU64 0) idle
+                                    | false => outside)))))
+
+-- Phase 7: the 100 is already sent. Bytes and a peer close classify
+-- with sent 1, so a still-short body does not park another interim.
+def sentFact : run Π (+ fact : U64) → Π (+ s : Slice) → Π (+ max : U64) → Π (+ now : U64) → Π (+ dl : U64) → Π (+ idle : U64) → Out :=
+  λ (+ fact : U64) → λ (+ s : Slice) → λ (+ max : U64) → λ (+ now : U64) → λ (+ dl : U64) → λ (+ idle : U64) →
+    match (u64eq fact factAccepted) motive (λ _ → Out)
+      | true => moreAt now (toU64 0) idle
+      | false =>
+          (match (u64eq fact factBytes) motive (λ _ → Out)
+            | true => onBuf (toU64 0) (toU64 1) s max now dl idle
+            | false =>
+                (match (u64eq fact factPeer) motive (λ _ → Out)
+                  | true =>
+                      (match (u64eq (sliceLen s) (toU64 0)) motive (λ _ → Out)
+                        | true => quiet (toU64 0)
+                        | false => onBuf (toU64 1) (toU64 1) s max now dl idle)
+                  | false =>
+                      (match (u64eq fact factNow) motive (λ _ → Out)
+                        | true => quiet (toU64 0)
+                        | false =>
+                            (match (or (u64eq fact factWrote) (u64eq fact factFailed)) motive (λ _ → Out)
+                              | true => moreSent now dl idle
+                              | false => outside))))
 
 def stepFact : run Π (+ st : St) → Π (+ fact : U64) → Π (+ buf : Slice) → Π (+ max : U64) → Π (+ n : U64) → Π (+ owed : U64) → Π (+ now : U64) → Π (+ dl : U64) → Π (+ idle : U64) → Out :=
   λ (+ st : St) → λ (+ fact : U64) → λ (+ buf : Slice) → λ (+ max : U64) → λ (+ n : U64) → λ (+ owed : U64) → λ (+ now : U64) → λ (+ dl : U64) → λ (+ idle : U64) →
@@ -434,9 +640,15 @@ def stepFact : run Π (+ st : St) → Π (+ fact : U64) → Π (+ buf : Slice) �
                 (match (or (u64eq phase (toU64 1)) (u64eq phase (toU64 3))) motive (λ _ → Out)
                   | true => writeFact phase code left keep fact n owed buf max now dl idle
                   | false =>
-                      (match (u64eq phase (toU64 4)) motive (λ _ → Out)
-                        | true => idleFact fact buf max now dl idle
-                        | false => readFact fact buf max now dl idle)))
+                      (match (or (u64eq phase (toU64 6)) (u64eq phase (toU64 8))) motive (λ _ → Out)
+                        | true => contFact phase left fact n owed buf max now dl idle
+                        | false =>
+                            (match (u64eq phase (toU64 7)) motive (λ _ → Out)
+                              | true => sentFact fact buf max now dl idle
+                              | false =>
+                                  (match (u64eq phase (toU64 4)) motive (λ _ → Out)
+                                    | true => idleFact fact buf max now dl idle
+                                    | false => readFact fact buf max now dl idle)))))
 
 def step0 : run Π (+ st : St) → Π (+ fact : U64) → Π (+ buf : Slice) → Π (+ max : U64) → Π (+ n : U64) → Π (+ owed : U64) → Out :=
   λ (+ st : St) → λ (+ fact : U64) → λ (+ buf : Slice) → λ (+ max : U64) → λ (+ n : U64) → λ (+ owed : U64) →
@@ -491,6 +703,15 @@ def hand : run Π (+ reqKeep : U64) → Π (+ hclose : U64) → Π (+ hbad : U64
                               | false => shutHandle (toU64 0))
                         | false => reply (keepHand reqKeep hclose hbad))))
 
+-- After a successful handler, 400 or 413 on the body reader is an
+-- owed protocol span. The host reader sets only those two. Any
+-- other code stays outside, and the adapter shuts.
+def overStatus : run Π (+ code : U64) → Out :=
+  λ (+ code : U64) →
+    match (or (u64eq code (toU64 400)) (u64eq code (toU64 413))) motive (λ _ → Out)
+      | true => owe code
+      | false => outside
+
 def lineBuf : run Slice :=
   b"GET / HT"
 
@@ -533,8 +754,77 @@ def noHost : run Slice :=
 def chunkBuf : run Slice :=
   b"POST / HTTP/1.1\r\nHost: h\r\nTransfer-Encoding: chunked\r\n\r\n"
 
+def chunkOne : run Slice :=
+  b"POST / HTTP/1.1\r\nHost: h\r\nTransfer-Encoding: chunked\r\n\r\n2\r\nhi\r\n0\r\n\r\n"
+
+def chunkExt : run Slice :=
+  b"POST / HTTP/1.1\r\nHost: h\r\nTransfer-Encoding: chunked\r\n\r\n4;ext=1\r\nwiki\r\n0\r\n\r\n"
+
+def chunkTrailer : run Slice :=
+  b"POST / HTTP/1.1\r\nHost: h\r\nTransfer-Encoding: chunked\r\n\r\n2\r\nhi\r\n0\r\nX-A: b\r\n\r\n"
+
+def chunkBare : run Slice :=
+  b"POST / HTTP/1.1\r\nHost: h\r\nTransfer-Encoding: chunked\r\n\r\n0\r\nNope\r\n\r\n"
+
+def chunkBad : run Slice :=
+  b"POST / HTTP/1.1\r\nHost: h\r\nTransfer-Encoding: chunked\r\n\r\nzz\r\n"
+
+def chunkSpace : run Slice :=
+  b"POST / HTTP/1.1\r\nHost: h\r\nTransfer-Encoding: chunked\r\n\r\n4 \r\nwiki\r\n0\r\n\r\n"
+
+def chunkExtLf : run Slice :=
+  b"POST / HTTP/1.1\r\nHost: h\r\nTransfer-Encoding: chunked\r\n\r\n4;bad\n\r\nwiki\r\n0\r\n\r\n"
+
+def chunkOverHex : run Slice :=
+  b"POST / HTTP/1.1\r\nHost: h\r\nTransfer-Encoding: chunked\r\n\r\n10000000000000000\r\n"
+
+def chunkToo : run Slice :=
+  b"POST / HTTP/1.1\r\nHost: h\r\nTransfer-Encoding: chunked\r\n\r\n1000000\r\n"
+
+def chunkPrem : run Slice :=
+  b"POST / HTTP/1.1\r\nHost: h\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhi"
+
+def chunkClose : run Slice :=
+  b"POST / HTTP/1.1\r\nHost: h\r\nConnection: close\r\nTransfer-Encoding: chunked\r\n\r\n0\r\n\r\n"
+
+def chunkPipe : run Slice :=
+  b"POST / HTTP/1.1\r\nHost: h\r\nTransfer-Encoding: chunked\r\n\r\n0\r\n\r\nGET / HTTP/1.1\r\nHost: h\r\n\r\n"
+
+def chunkMulti : run Slice :=
+  b"POST / HTTP/1.1\r\nHost: h\r\nTransfer-Encoding: chunked\r\n\r\n1\r\na\r\n1\r\nb\r\n0\r\n\r\n"
+
+def chunkExpect : run Slice :=
+  b"POST / HTTP/1.1\r\nHost: h\r\nTransfer-Encoding: chunked\r\nExpect: foo\r\n\r\n"
+
+def chunkExpectDone : run Slice :=
+  b"POST / HTTP/1.1\r\nHost: h\r\nTransfer-Encoding: chunked\r\nExpect: foo\r\n\r\n0\r\n\r\n"
+
+def chunkTrace : run Slice :=
+  b"TRACE / HTTP/1.1\r\nHost: h\r\nTransfer-Encoding: chunked\r\n\r\n"
+
+def chunkTraceDone : run Slice :=
+  b"TRACE / HTTP/1.1\r\nHost: h\r\nTransfer-Encoding: chunked\r\n\r\n0\r\n\r\n"
+
 def contBuf : run Slice :=
   b"POST / HTTP/1.1\r\nHost: h\r\nExpect: 100-continue\r\nContent-Length: 4\r\n\r\n"
+
+def contFull : run Slice :=
+  b"POST / HTTP/1.1\r\nHost: h\r\nExpect: 100-continue\r\nContent-Length: 4\r\n\r\nping"
+
+def cont10 : run Slice :=
+  b"POST / HTTP/1.0\r\nContent-Length: 4\r\nExpect: 100-continue\r\n\r\n"
+
+def contHead : run Slice :=
+  b"HEAD / HTTP/1.1\r\nHost: h\r\nExpect: 100-continue\r\nContent-Length: 4\r\n\r\n"
+
+def contBig : run Slice :=
+  b"POST / HTTP/1.1\r\nHost: h\r\nExpect: 100-continue\r\nContent-Length: 100\r\n\r\n"
+
+def contChunk : run Slice :=
+  b"POST / HTTP/1.1\r\nHost: h\r\nTransfer-Encoding: chunked\r\nExpect: 100-continue\r\n\r\n"
+
+def contChunkDone : run Slice :=
+  b"POST / HTTP/1.1\r\nHost: h\r\nTransfer-Encoding: chunked\r\nExpect: 100-continue\r\n\r\n0\r\n\r\n"
 
 def headBuf : run Slice :=
   b"HEAD / HTTP/1.1\r\nHost: h\r\n\r\n"
@@ -617,8 +907,83 @@ def sawFinOver : run Out :=
 def sawChunk : run Out :=
   step0 readSt factBytes chunkBuf max10 (toU64 0) (toU64 0)
 
+def sawChunkOne : run Out :=
+  step0 readSt factBytes chunkOne max10 (toU64 0) (toU64 0)
+
+def sawChunkExt : run Out :=
+  step0 readSt factBytes chunkExt max10 (toU64 0) (toU64 0)
+
+def sawChunkTrailer : run Out :=
+  step0 readSt factBytes chunkTrailer max10 (toU64 0) (toU64 0)
+
+def sawChunkBare : run Out :=
+  step0 readSt factBytes chunkBare max10 (toU64 0) (toU64 0)
+
+def sawChunkBad : run Out :=
+  step0 readSt factBytes chunkBad max10 (toU64 0) (toU64 0)
+
+def sawChunkSpace : run Out :=
+  step0 readSt factBytes chunkSpace max10 (toU64 0) (toU64 0)
+
+def sawChunkExtLf : run Out :=
+  step0 readSt factBytes chunkExtLf max10 (toU64 0) (toU64 0)
+
+def sawChunkOverHex : run Out :=
+  step0 readSt factBytes chunkOverHex max10 (toU64 0) (toU64 0)
+
+def sawChunkToo : run Out :=
+  step0 readSt factBytes chunkToo maxBig (toU64 0) (toU64 0)
+
+def sawChunkPrem : run Out :=
+  step0 readSt factPeer chunkPrem maxBig (toU64 0) (toU64 0)
+
+def sawChunkClose : run Out :=
+  step0 readSt factBytes chunkClose max10 (toU64 0) (toU64 0)
+
+def sawChunkPipe : run Out :=
+  step0 readSt factBytes chunkPipe max10 (toU64 0) (toU64 0)
+
+def sawChunkMulti : run Out :=
+  step0 readSt factBytes chunkMulti max10 (toU64 0) (toU64 0)
+
+def sawChunkOverDone : run Out :=
+  step0 readSt factBytes chunkOne (toU64 1) (toU64 0) (toU64 0)
+
+def sawChunkExpect : run Out :=
+  step0 readSt factBytes chunkExpect maxBig (toU64 0) (toU64 0)
+
+def sawChunkExpectDone : run Out :=
+  step0 readSt factBytes chunkExpectDone maxBig (toU64 0) (toU64 0)
+
+def sawChunkTrace : run Out :=
+  step0 readSt factBytes chunkTrace maxBig (toU64 0) (toU64 0)
+
+def sawChunkTraceDone : run Out :=
+  step0 readSt factBytes chunkTraceDone maxBig (toU64 0) (toU64 0)
+
 def sawCont : run Out :=
   step0 readSt factBytes contBuf max10 (toU64 0) (toU64 0)
+
+def sawContFull : run Out :=
+  step0 readSt factBytes contFull max10 (toU64 0) (toU64 0)
+
+def sawCont10 : run Out :=
+  step0 readSt factBytes cont10 max10 (toU64 0) (toU64 0)
+
+def sawContHead : run Out :=
+  step0 readSt factBytes contHead max10 (toU64 0) (toU64 0)
+
+def sawContBig : run Out :=
+  step0 readSt factBytes contBig max10 (toU64 0) (toU64 0)
+
+def sawContChunk : run Out :=
+  step0 readSt factBytes contChunk max10 (toU64 0) (toU64 0)
+
+def sawContChunkDone : run Out :=
+  step0 readSt factBytes contChunkDone max10 (toU64 0) (toU64 0)
+
+def contSent : run St :=
+  take (moreSent (toU64 0) (toU64 0) (toU64 0))
 
 def sawNow : run Out :=
   step0 readSt factNow getBuf max10 (toU64 0) (toU64 0)
@@ -704,9 +1069,81 @@ def fin-partial : evidence {sawFinPartial ≡ owe (toU64 400) : Out} := refl
 
 def fin-oversize : evidence {sawFinOver ≡ owe (toU64 400) : Out} := refl
 
-def chunk-outside : evidence {coverOf sawChunk ≡ toU64 1 : U64} := refl
+def chunk-more : evidence {sawChunk ≡ more : Out} := refl
 
-def continue-outside : evidence {coverOf sawCont ≡ toU64 1 : U64} := refl
+def chunk-one : evidence {sawChunkOne ≡ reply (toU64 0) : Out} := refl
+
+def chunk-ext : evidence {sawChunkExt ≡ reply (toU64 0) : Out} := refl
+
+def chunk-trailer : evidence {sawChunkTrailer ≡ reply (toU64 0) : Out} := refl
+
+def chunk-trailer-bare : evidence {sawChunkBare ≡ owe (toU64 400) : Out} := refl
+
+def chunk-bad : evidence {sawChunkBad ≡ owe (toU64 400) : Out} := refl
+
+def chunk-space : evidence {sawChunkSpace ≡ owe (toU64 400) : Out} := refl
+
+def chunk-ext-lf : evidence {sawChunkExtLf ≡ owe (toU64 400) : Out} := refl
+
+def chunk-overflow : evidence {sawChunkOverHex ≡ owe (toU64 400) : Out} := refl
+
+def chunk-too : evidence {sawChunkToo ≡ statusNow (toU64 413) : Out} := refl
+
+def chunk-prem : evidence {sawChunkPrem ≡ owe (toU64 400) : Out} := refl
+
+def chunk-close : evidence {sawChunkClose ≡ reply (toU64 1) : Out} := refl
+
+def chunk-pipe : evidence {sawChunkPipe ≡ reply (toU64 0) : Out} := refl
+
+def chunk-pipe-next : evidence {step0 (take sawChunkPipe) factWrote chunkPipe max10 (toU64 4) (toU64 4) ≡ reply (toU64 0) : Out} := refl
+
+def chunk-multi : evidence {sawChunkMulti ≡ reply (toU64 0) : Out} := refl
+
+def chunk-over-done : evidence {sawChunkOverDone ≡ owe (toU64 413) : Out} := refl
+
+def chunk-expect : evidence {sawChunkExpect ≡ statusNow (toU64 417) : Out} := refl
+
+def chunk-expect-done : evidence {sawChunkExpectDone ≡ owe (toU64 417) : Out} := refl
+
+def chunk-trace : evidence {sawChunkTrace ≡ statusNow (toU64 501) : Out} := refl
+
+def chunk-trace-done : evidence {sawChunkTraceDone ≡ owe (toU64 501) : Out} := refl
+
+def cont-owed : evidence {sawCont ≡ contAt (toU64 0) (toU64 0) (toU64 0) : Out} := refl
+
+def cont-have : evidence {sawContFull ≡ reply (toU64 0) : Out} := refl
+
+def cont-10 : evidence {sawCont10 ≡ more : Out} := refl
+
+def cont-head : evidence {sawContHead ≡ more : Out} := refl
+
+def cont-413 : evidence {sawContBig ≡ statusNow (toU64 413) : Out} := refl
+
+def cont-chunk : evidence {sawContChunk ≡ contAt (toU64 0) (toU64 0) (toU64 0) : Out} := refl
+
+def cont-chunk-done : evidence {sawContChunkDone ≡ reply (toU64 0) : Out} := refl
+
+def cont-wrote : evidence {step0 (take sawCont) factWrote contBuf max10 (toU64 1) (toU64 1) ≡ moreSent (toU64 0) (toU64 0) (toU64 0) : Out} := refl
+
+def cont-short : evidence {step0 (take sawCont) factWrote contBuf max10 (toU64 1) (toU64 10) ≡ contHold (toU64 6) (toU64 9) (toU64 0) (toU64 0) (toU64 0) : Out} := refl
+
+def cont-now : evidence {step0 (take sawCont) factNow contBuf max10 (toU64 0) (toU64 0) ≡ quiet (toU64 0) : Out} := refl
+
+def cont-fail : evidence {step0 (take sawCont) factFailed contBuf max10 (toU64 0) (toU64 0) ≡ contHold (toU64 6) (toU64 0) (toU64 0) (toU64 0) (toU64 0) : Out} := refl
+
+def cont-peer : evidence {step0 (take sawCont) factPeer contBuf max10 (toU64 0) (toU64 0) ≡ contHold (toU64 8) (toU64 0) (toU64 0) (toU64 0) (toU64 0) : Out} := refl
+
+-- The peer close disarms. step0's clocks are already 0, so the
+-- clock is named here. A first interim still arms.
+def cont-peer-wake : evidence {stepFact (take sawCont) factPeer contBuf max10 (toU64 0) (toU64 0) (toU64 1000) (toU64 0) (toU64 60000) ≡ contHold (toU64 8) (toU64 0) (toU64 0) (toU64 0) (toU64 0) : Out} := refl
+
+def cont-arm : evidence {stepFact readSt factBytes contBuf max10 (toU64 0) (toU64 0) (toU64 1000) (toU64 0) (toU64 60000) ≡ contAt (toU64 1000) (toU64 0) (toU64 60000) : Out} := refl
+
+def cont-peer-done : evidence {step0 (take (step0 (take sawCont) factPeer contBuf max10 (toU64 0) (toU64 0))) factWrote contBuf max10 (toU64 1) (toU64 1) ≡ owe (toU64 400) : Out} := refl
+
+def cont-body : evidence {step0 contSent factBytes contFull max10 (toU64 0) (toU64 0) ≡ reply (toU64 0) : Out} := refl
+
+def cont-hold : evidence {step0 contSent factBytes contBuf max10 (toU64 0) (toU64 0) ≡ moreSent (toU64 0) (toU64 0) (toU64 0) : Out} := refl
 
 def now-read : evidence {sawNow ≡ quiet (toU64 0) : Out} := refl
 
@@ -863,7 +1300,7 @@ def pipe-partial : evidence {step0 (take sawPipe) factWrote pipePart max10 (toU6
 
 def frame-get : evidence {framedEnd getBuf ≡ sliceLen getBuf : U64} := refl
 
-def stream-outside : evidence {coverOf sawStream ≡ toU64 1 : U64} := refl
+def stream-open : evidence {sawStream ≡ reply (toU64 0) : Out} := refl
 
 def stream-413 : evidence {sawStream413 ≡ owe (toU64 413) : Out} := refl
 
@@ -873,7 +1310,9 @@ def stream-peer-done : evidence {step0 (take sawStreamPeer) factWrote streamBuf 
 
 def write-bytes-holds : evidence {step0 repGet factBytes getBuf max10 (toU64 0) (toU64 0) ≡ reply (toU64 0) : Out} := refl
 
-def write-accept-outside : evidence {coverOf (step0 repGet factAccepted getBuf max10 (toU64 0) (toU64 0)) ≡ toU64 1 : U64} := refl
+def write-accept : evidence {stepFact repGet factAccepted getBuf max10 (toU64 0) (toU64 0) (toU64 1000) (toU64 424242) (toU64 60000) ≡ moreAt (toU64 1000) (toU64 0) (toU64 60000) : Out} := refl
+
+def owe-accept : evidence {stepFact owe400 factAccepted badBuf max10 (toU64 0) (toU64 0) (toU64 1000) (toU64 424242) (toU64 60000) ≡ moreAt (toU64 1000) (toU64 0) (toU64 60000) : Out} := refl
 
 def read-failed-holds : evidence {step0 readSt factFailed getBuf max10 (toU64 0) (toU64 0) ≡ more : Out} := refl
 
@@ -1010,7 +1449,7 @@ def after-close-failed : evidence {step0 closedClose factFailed closeBuf max10 (
 
 def after-close-accept : evidence {step0 closedClose factAccepted b"" max10 (toU64 0) (toU64 0) ≡ quiet (toU64 0) : Out} := refl
 
-def idle-accept-outside : evidence {coverOf (step0 idleSt factAccepted b"" max10 (toU64 0) (toU64 0)) ≡ toU64 1 : U64} := refl
+def idle-accept : evidence {stepFact idleSt factAccepted b"" max10 (toU64 0) (toU64 0) (toU64 1000) (toU64 424242) (toU64 60000) ≡ moreAt (toU64 1000) (toU64 0) (toU64 60000) : Out} := refl
 
 -- headersDone, and the header block ends past 16384. The request
 -- line fits, so capCode is 431. capHdr is the other arm: the header
@@ -1026,6 +1465,12 @@ def headers-done-431 : evidence {headersDone capHdrDone ≡ true : Bool} := refl
 def headers-end-431 : evidence {gt16384 (headerEnd capHdrDone) ≡ true : Bool} := refl
 
 def cap-hdr-done-431 : evidence {sawHdrDone ≡ owe (toU64 431) : Out} := refl
+
+def over-400 : evidence {overStatus (toU64 400) ≡ owe (toU64 400) : Out} := refl
+
+def over-413 : evidence {overStatus (toU64 413) ≡ owe (toU64 413) : Out} := refl
+
+def over-other : evidence {coverOf (overStatus (toU64 500)) ≡ toU64 1 : U64} := refl
 
 def hand-agree : evidence {hand (toU64 0) (toU64 0) (toU64 0) (toU64 0) (toU64 0) (toU64 0) (toU64 1) (toU64 0) (toU64 1) ≡ reply (toU64 0) : Out} := refl
 

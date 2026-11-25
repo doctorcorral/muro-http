@@ -2,6 +2,40 @@
 
 ## 0.1.0-dev — unreleased
 
+- Chunked request bodies, `Expect: 100-continue`, an open streamed
+  body, accept during a write or while idle, and a body-reader
+  override of 400 or 413 are decided in `priv/muro/http/step.muro`.
+  The book scans chunk framing (`chunkScan`): a bad size is 400, a
+  size or total past max is 413, a finished body is a handler span,
+  and a peer close before the last chunk is 400. A chunked TRACE is
+  501 before that check. Book phase 6 owes the 100 interim (span 6)
+  while the body is short. Phase 8 is that interim after the peer
+  has closed. Phase 7 is the read after it was sent. A body already
+  buffered, HTTP/1.0, HEAD, and a policy status do not owe it. An
+  open streamed body is the handler reply at the request keep
+  (`stream-open`); the adapter sets `hclose` when that body stays
+  open and the response does not pull it. Accept during a write or
+  while idle is a fresh read and drops the carried deadline.
+  `overStatus` owes 400 and 413. Any other override is `cover` 1
+  and the adapter shuts with note 7. The harness compares the
+  adapter with `muro_http_step` on these paths, and the sweep
+  reaches chunked bodies, a streamed body at a large max, and
+  `ACCEPTED`. Every `cover` 1 in the sweep fails it. A quiet
+  close must leave the image `CLOSED`, except a later fact after
+  `status_now`, which the host answers from `PEND_SHUT` with its
+  image still `READ`: the harness accepts `READ` only there, with
+  `PEND_SHUT`, `close_conn` 1, no interest, no `status_now`, and no
+  bytes, and counts those steps (`quiet-read-shut`). `book-skip` is 0. `c/muro-hello` and
+  `c/muro-hello-book` each pass 71 conformance cases.
+  `make c-conformance-book` runs the book server and is not part of
+  `c-check`. Versus `origin/main` the book adds 44 evidence
+  theorems and removes 5, a net of +39, 182 total. Not claimed
+  here: fuel, the host's deadline decision, the follow-up write
+  after accept during a pending interim, a completing read that
+  arrives while that interim is still outstanding and the buffer
+  was not empty, and a response pull that leaves the request body
+  open. `c/step.c` and `c/host.c` are unchanged. The library
+  version stays `0.1.0-dev`. The pin stays muro `0.22.24`.
 - `hand` decides the handler paths the book left open: `close_after`,
   a 4xx or 5xx, a handler 500 (`owe_status`, book phase 5, the image
   stays in handle), and a pulled body (span 3 content-length, 4
