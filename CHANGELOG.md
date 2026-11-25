@@ -24,16 +24,38 @@
   five interleaved sittings (each sitting is the median of three
   5 s keepalive GET runs, `c=128`, workers 4, `taskset` 0–3 / 4–7,
   governor `powersave`), comparing the 0.22.32 pin-only book
-  against this header-end change plus the C server: book 108758.10
-  rps to 95873.98 rps (0.882×, paired 0.831–0.894), C 184889.64
-  rps to 189921.83 rps (1.027×, within load noise). The C/book gap
-  went from 1.700× to 1.981×. Errors and non2xx were 0 on every
-  run. Load started at 3.51 and rose into the mid-20s / 30s
-  (bench plus two other `mix muro.check` jobs). The pin-only
-  sharing pass remains; this state change did not close the
-  remaining gap on that sitting. `c/step.c` and `c/host.c` are
-  unchanged. The library version stays `0.1.0-dev`. The pin is
-  muro `0.22.32`.
+  against the first header-end book plus the C server: book
+  108758.10 rps to 95873.98 rps (0.882×, paired 0.831–0.894), C
+  184889.64 rps to 189921.83 rps (1.027×, within load noise). The
+  C/book gap went from 1.700× to 1.981×. Profile (user-space
+  `perf_event_open`, 200k keepalive GET, workers 4): the
+  header-end book did 59645 instructions/request vs 44105 for the
+  pin (1.35×). A tight `stepFact` loop showed the same two `scan`
+  calls but 5 `crlfFold` walks per request vs the pin's 2. Root
+  cause: `onBuf` passed the incoming `hend` (0 on a keep-alive
+  GET) into `statusOfAt` and only then called `rememberEnd`, so
+  every `headersDoneAt` / `headerEndAt` took the unknown-end arm
+  and the emitter did not hoist `headerEnd`. `reqCompleteHs` also
+  used `bodyShortSt` (always `headerEnd`). `finishWrite` called
+  `framedEndAt` twice in the pipelined arm. The follow-up binds
+  `headerEnd` once (`storedEnd`), calls `rememberEnd` before
+  `statusOfAt`, uses `bodyShortAt` in `reqCompleteHs`, and binds
+  `framedEndAt` once in `finishWriteAt`. After that, the
+  microbench is 1 `crlfFold` per request (and 22397 inst vs the
+  pin's 23824). Server-level inst/request fell to 54786 (1.24×
+  the pin). A second five-sitting A/B of that fix (10:11–10:17 AM
+  CST, load 2 rising into the 20s–40s): book 122214.11 rps to
+  110691.92 rps (0.906×, sittings 0.833–0.910), C 208177.53 rps
+  to 223312.48 rps (1.073×, load noise). The remaining gap is the
+  still-larger generated C (`onBuf` / `onBufScan` each ~14k, a
+  25k `readFact` that inlines `onBuf`, book text +13%): the `*At`
+  helpers still compile the unknown-end arms into the keep-alive
+  path, and the emitter inlines those large terms. A muro emitter
+  change that did not inline above a size, or that specialized
+  `headerEndAt` when `hend` is already bound nonzero, would
+  shrink that path. Errors and non2xx were 0 on every run.
+  `c/step.c` and `c/host.c` are unchanged. The library version
+  stays `0.1.0-dev`. The pin is muro `0.22.32`.
 - Chunked request bodies, `Expect: 100-continue`, an open streamed
   body, accept during a write or while idle, and a body-reader
   override of 400 or 413 are decided in `priv/muro/http/step.muro`.

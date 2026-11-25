@@ -1299,13 +1299,21 @@ def headersDoneAt : run Π (+ hend : U64) → Π (+ s : Slice) → Bool :=
       | true => headersDone s
       | false => true
 
+-- Map a measured headerEnd to the stored form: the incomplete
+-- sentinel (sliceLen + 1) becomes 0, and a real end is kept.
+def storedEnd : run Π (+ h : U64) → Π (+ s : Slice) → U64 :=
+  λ (+ h : U64) → λ (+ s : Slice) →
+    match (u64eq h (addi (sliceLen s) (toU64 1))) motive (λ _ → U64)
+      | true => toU64 0
+      | false => h
+
+-- Bind headerEnd once. Callers should remember before statusOfAt
+-- so a complete first read takes the known-end arms and does not
+-- fold the header again at every headersDoneAt / headerEndAt site.
 def rememberEnd : run Π (+ hend : U64) → Π (+ s : Slice) → U64 :=
   λ (+ hend : U64) → λ (+ s : Slice) →
     match (u64eq hend (toU64 0)) motive (λ _ → U64)
-      | true =>
-          (match (headersDone s) motive (λ _ → U64)
-            | true => headerEnd s
-            | false => toU64 0)
+      | true => storedEnd (headerEnd s) s
       | false => hend
 
 def bodyTailAt : run Π (+ hend : U64) → Π (+ s : Slice) → Slice :=

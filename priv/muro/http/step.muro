@@ -367,7 +367,7 @@ def reqCompleteHs : run Π (+ hs : HSt) → Π (+ hend : U64) → Π (+ s : Slic
     match (chunkedHs hs) motive (λ _ → Bool)
       | true => ckDone (chunkScanAt hend s)
       | false =>
-          (match (bodyShortSt hs s) motive (λ _ → Bool)
+          (match (bodyShortAt hend hs s) motive (λ _ → Bool)
             | true => false
             | false => true)
 
@@ -555,11 +555,11 @@ def onStatus : run Π (+ st : Status) → Π (+ hs : HSt) → Π (+ hend : U64) 
 
 def onBufScan : run Π (+ hs : HSt) → Π (+ hend : U64) → Π (+ fin : U64) → Π (+ sent : U64) → Π (+ s : Slice) → Π (+ max : U64) → Π (+ now : U64) → Π (+ dl : U64) → Π (+ idle : U64) → Out :=
   λ (+ hs : HSt) → λ (+ hend : U64) → λ (+ fin : U64) → λ (+ sent : U64) → λ (+ s : Slice) → λ (+ max : U64) → λ (+ now : U64) → λ (+ dl : U64) → λ (+ idle : U64) →
-    onStatus (statusOfAt hend hs s) hs (rememberEnd hend s) fin sent s max now dl idle
+    onStatus (statusOfAt hend hs s) hs hend fin sent s max now dl idle
 
 def onBuf : run Π (+ fin : U64) → Π (+ sent : U64) → Π (+ s : Slice) → Π (+ max : U64) → Π (+ now : U64) → Π (+ dl : U64) → Π (+ idle : U64) → Π (+ hend : U64) → Out :=
   λ (+ fin : U64) → λ (+ sent : U64) → λ (+ s : Slice) → λ (+ max : U64) → λ (+ now : U64) → λ (+ dl : U64) → λ (+ idle : U64) → λ (+ hend : U64) →
-    onBufScan (scan s) hend fin sent s max now dl idle
+    onBufScan (scan s) (rememberEnd hend s) fin sent s max now dl idle
 
 def baseOf : run Π (+ left : U64) → Π (+ owed : U64) → U64 :=
   λ (+ left : U64) → λ (+ owed : U64) →
@@ -592,14 +592,21 @@ def tailOfAt : run Π (+ hend : U64) → Π (+ buf : Slice) → Slice :=
 -- outside the contract: pipe-done passes the tail and is idle,
 -- pipe-full-again passes twoGet again and is another reply, and
 -- pipe-again-differs is that those spans are not the same.
-def finishWrite : run Π (+ code : U64) → Π (+ keep : U64) → Π (+ buf : Slice) → Π (+ max : U64) → Π (+ now : U64) → Π (+ dl : U64) → Π (+ idle : U64) → Π (+ hend : U64) → Out :=
-  λ (+ code : U64) → λ (+ keep : U64) → λ (+ buf : Slice) → λ (+ max : U64) → λ (+ now : U64) → λ (+ dl : U64) → λ (+ idle : U64) → λ (+ hend : U64) →
+-- Bind framedEndAt once so a pipelined finish does not scan the
+-- just-completed request twice (pastEndAt and tailOfAt each called
+-- framedEndAt, and the emitter did not hoist that call).
+def finishWriteAt : run Π (+ end : U64) → Π (+ code : U64) → Π (+ keep : U64) → Π (+ buf : Slice) → Π (+ max : U64) → Π (+ now : U64) → Π (+ dl : U64) → Π (+ idle : U64) → Out :=
+  λ (+ end : U64) → λ (+ code : U64) → λ (+ keep : U64) → λ (+ buf : Slice) → λ (+ max : U64) → λ (+ now : U64) → λ (+ dl : U64) → λ (+ idle : U64) →
     match (u64eq keep (toU64 1)) motive (λ _ → Out)
       | true => quiet code
       | false =>
-          (match (pastEndAt hend buf) motive (λ _ → Out)
-            | true => onBuf (toU64 0) (toU64 0) (tailOfAt hend buf) max now dl idle (toU64 0)
+          (match (u64lt end (sliceLen buf)) motive (λ _ → Out)
+            | true => onBuf (toU64 0) (toU64 0) (slice buf end (subi (sliceLen buf) end)) max now dl idle (toU64 0)
             | false => idleAt now dl idle)
+
+def finishWrite : run Π (+ code : U64) → Π (+ keep : U64) → Π (+ buf : Slice) → Π (+ max : U64) → Π (+ now : U64) → Π (+ dl : U64) → Π (+ idle : U64) → Π (+ hend : U64) → Out :=
+  λ (+ code : U64) → λ (+ keep : U64) → λ (+ buf : Slice) → λ (+ max : U64) → λ (+ now : U64) → λ (+ dl : U64) → λ (+ idle : U64) → λ (+ hend : U64) →
+    finishWriteAt (framedEndAt hend buf) code keep buf max now dl idle
 
 def writeFact : run Π (+ phase : U64) → Π (+ code : U64) → Π (+ left : U64) → Π (+ keep : U64) → Π (+ hend : U64) → Π (+ fact : U64) → Π (+ n : U64) → Π (+ owed : U64) → Π (+ buf : Slice) → Π (+ max : U64) → Π (+ now : U64) → Π (+ dl : U64) → Π (+ idle : U64) → Out :=
   λ (+ phase : U64) → λ (+ code : U64) → λ (+ left : U64) → λ (+ keep : U64) → λ (+ hend : U64) → λ (+ fact : U64) → λ (+ n : U64) → λ (+ owed : U64) → λ (+ buf : Slice) → λ (+ max : U64) → λ (+ now : U64) → λ (+ dl : U64) → λ (+ idle : U64) →
