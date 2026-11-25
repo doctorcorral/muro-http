@@ -2,6 +2,38 @@
 
 ## 0.1.0-dev — unreleased
 
+- Pin muro `0.22.32` from Hex (`{:muro, "~> 0.22.32"}` in
+  `mix.exs`, `muro: "0.22.32"` in `muro.exs`) and carry the
+  end-of-headers offset in `step.muro` state. `St` and `Out` gain
+  `hend`. `0` means unknown; a complete header block is never at
+  offset `0`. `rememberEnd` records `headerEnd` once headers are
+  done. `onBuf` binds one `scan` and that stored end, then uses
+  `statusOfAt`, `policyHs`, `wantContHs`, `headerEndAt`,
+  `chunkScanAt`, and `framedEndAt` so later steps do not walk the
+  header block again. `finishWrite` of a keep-alive uses the old
+  request's `hend` to split the tail, then resets `hend` to `0` for
+  the next request. Adapter `BookStep` stores `bhend`,
+  `http_step_still` / `http_step_hand` / `http_step_overStatus`
+  take it, and `out_field` 11 is `hend` (fields 0–10 unchanged).
+  `mix muro.check --fuel 5000000` on `request.muro` and `step.muro`
+  reports `All terms check`. `./c/test_step_slice` is scripted 528,
+  book-cmp 10964, book-skip 0, quiet-read-shut 74. `c/muro-hello`
+  and `c/muro-hello-book` each pass 71 conformance cases. Versus
+  `origin/main` the book adds 2 evidence theorems on `step.muro`
+  and 3 on `request.muro`, 184 and 100 total. On omarzo, median of
+  five interleaved sittings (each sitting is the median of three
+  5 s keepalive GET runs, `c=128`, workers 4, `taskset` 0–3 / 4–7,
+  governor `powersave`), comparing the 0.22.32 pin-only book
+  against this header-end change plus the C server: book 108758.10
+  rps to 95873.98 rps (0.882×, paired 0.831–0.894), C 184889.64
+  rps to 189921.83 rps (1.027×, within load noise). The C/book gap
+  went from 1.700× to 1.981×. Errors and non2xx were 0 on every
+  run. Load started at 3.51 and rose into the mid-20s / 30s
+  (bench plus two other `mix muro.check` jobs). The pin-only
+  sharing pass remains; this state change did not close the
+  remaining gap on that sitting. `c/step.c` and `c/host.c` are
+  unchanged. The library version stays `0.1.0-dev`. The pin is
+  muro `0.22.32`.
 - Chunked request bodies, `Expect: 100-continue`, an open streamed
   body, accept during a write or while idle, and a body-reader
   override of 400 or 413 are decided in `priv/muro/http/step.muro`.

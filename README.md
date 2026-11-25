@@ -6,7 +6,7 @@
     <td>
       <h3>An HTTP/1.1 core written in muro.<br>Checked, then served from C.</h3>
       <a href="https://github.com/doctorcorral/muro-http/actions/workflows/muro.yml"><img src="https://img.shields.io/github/actions/workflow/status/doctorcorral/muro-http/muro.yml?branch=main&style=flat-square&label=ci&labelColor=111111&color=e8e8e8" alt="CI"></a>
-      <a href="https://hex.pm/packages/muro"><img src="https://img.shields.io/badge/muro-0.22.24-e8e8e8?style=flat-square&labelColor=111111" alt="muro 0.22.24"></a>
+      <a href="https://hex.pm/packages/muro"><img src="https://img.shields.io/badge/muro-0.22.32-e8e8e8?style=flat-square&labelColor=111111" alt="muro 0.22.32"></a>
     </td>
   </tr>
 </table>
@@ -20,8 +20,8 @@ admission, and the response bytes, plus a C host that dispatches to a
 handler. The challenge server is an example on that core. This
 repository is version `0.1.0-dev`.
 
-It pins the released Hex package muro `0.22.24` (`{:muro, "~> 0.22.24"}`
-in `mix.exs`, `muro: "0.22.24"` in `muro.exs`). It does not depend on a
+It pins the released Hex package muro `0.22.32` (`{:muro, "~> 0.22.32"}`
+in `mix.exs`, `muro: "0.22.32"` in `muro.exs`). It does not depend on a
 compiler checkout.
 
 It is hosted at https://github.com/doctorcorral/muro-http. There is no Hex publish.
@@ -529,7 +529,7 @@ The `check` job runs `mix test`, so those counts are a CI result.
 The jobs do not print the counts as their own log line. The walk
 is not a proof for every key count, and it is not a bound on live
 sockets. The pin proves the hold rule for any number of keys and
-any number of instances (`agda/Muro/Family.agda` in muro 0.22.24).
+any number of instances (`agda/Muro/Family.agda` in muro 0.22.32).
 This repository does not contain that proof. The program that
 writes the dispatcher is not proved. `test/family_test.exs` also
 replays two keys on the emitted
@@ -829,7 +829,7 @@ and the fixed date. That is a test. It does not sweep tag
 combinations. `c/test_tags` checks the decide `*From` helpers.
 
 muro 0.21.15 and 0.21.16 add a temporal check and a synthesis cover.
-They do not change response bytes or this loop. The pin is 0.22.24.
+They do not change response bytes or this loop. The pin is 0.22.32.
 The per-key reply-order check is `priv/muro/http/family.muro`. It is
 a hold rule over a fixed script, not this loop.
 
@@ -1044,7 +1044,7 @@ The shim, the driver, and the generated file are compiled with
 
 The driver prints `OK` and allocation counts. `methodView`,
 `targetView`, `pathView`, `queryView`, `versionView`, and `bodyView`
-allocate 0. On muro 0.22.24, as on 0.22.19, 0.22.14, and 0.20.42, `classify` of
+allocate 0. On muro 0.22.32, as on 0.22.24, 0.22.19, 0.22.14, and 0.20.42, `classify` of
 `GET /health` allocates 1 and `classify` of `POST /posts` with a
 two-byte body allocates 1. That object is the `Classified` result.
 See `GAPS.md`. `bodyClass`, `textOff`, and `textLen` allocate 0,

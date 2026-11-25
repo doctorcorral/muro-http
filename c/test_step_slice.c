@@ -1852,10 +1852,10 @@ static int stream_forced_close(const Box *b, http_step_Out bk) {
   return stream && pol == 0;
 }
 
-static http_step_St st_of(uint64_t phase, uint64_t code, uint64_t left, uint64_t keep) {
+static http_step_St st_of(uint64_t phase, uint64_t code, uint64_t left, uint64_t keep, uint64_t hend) {
   http_step_St st;
   muro_http_reset();
-  st = http_step_take(http_step_still(phase, code, left, keep));
+  st = http_step_take(http_step_still(phase, code, left, keep, hend));
   muro_http_reset();
   return st;
 }
@@ -2040,7 +2040,7 @@ static int run_seq(const char *buf, const int *facts, int depth, uint64_t max_bo
         box_free(&b);
         return -1;
       }
-      st = st_of(b.bk.bphase, b.bk.bcode, b.bk.bleft, b.bk.bkeep);
+      st = st_of(b.bk.bphase, b.bk.bcode, b.bk.bleft, b.bk.bkeep, b.bk.bhend);
     } else {
       st = http_step_take(bk);
     }
@@ -2256,7 +2256,7 @@ static int stream_open(void) {
     return fail("stream-open");
   }
   scripted += 1;
-  st = st_of(b.bk.bphase, b.bk.bcode, b.bk.bleft, b.bk.bkeep);
+  st = st_of(b.bk.bphase, b.bk.bcode, b.bk.bleft, b.bk.bkeep, b.bk.bhend);
   if (step_both(&b, &st, MURO_STEP_WROTE, NULL, (uint64_t)o.len, (uint64_t)o.len, &o, &bk,
                 "stream-open-done") < 0 ||
       check_shape(DEC_QUIET, &o, bk, &b, 0, NULL, 0, 0, 0, "stream-open-done") < 0) {
