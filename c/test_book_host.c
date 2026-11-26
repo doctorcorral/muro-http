@@ -25,6 +25,8 @@ static const char POST_BODY[] = "POST / HTTP/1.1\r\nHost: h\r\nContent-Length: 4
 static const char CHUNK_HDR[] = "POST / HTTP/1.1\r\nHost: h\r\nTransfer-Encoding: chunked\r\n\r\n";
 static const char CHUNK_DONE[] =
     "POST / HTTP/1.1\r\nHost: h\r\nTransfer-Encoding: chunked\r\n\r\n0\r\n\r\n";
+static const char CHUNK_THEN_GET[] =
+    "POST / HTTP/1.1\r\nHost: h\r\nTransfer-Encoding: chunked\r\n\r\n0\r\n\r\nGET /x HTTP/1.1\r\nHost: h\r\n\r\n";
 
 static int on_req(const MuroHttpRequest *req, MuroHttpResponse *resp, void *user) {
   (void)req;
@@ -226,8 +228,8 @@ int main(void) {
     done(&st, &hin, inb, outb);
     return 1;
   }
-  if (!out.write_more || st.hend != hend_get) {
-    fprintf(stderr, "book host hend: ka-second host=%llu want=%llu\n", (unsigned long long)st.hend,
+  if (!out.write_more || expect_fr(&st, hend_get, 0, 0, 0, "ka-second") != 0) {
+    fprintf(stderr, "book host facts: ka-second host=%llu want=%llu\n", (unsigned long long)st.hend,
             (unsigned long long)hend_get);
     done(&st, &hin, inb, outb);
     return 1;
@@ -336,6 +338,86 @@ int main(void) {
   if (rc < 0 || !out.write_more || expect_fr(&st, hend, 1, 0, 0, "chunk-done") != 0) {
     fprintf(stderr, "book host facts: chunk-done rc=%d hend host=%llu want=%llu write=%d\n", rc,
             (unsigned long long)st.hend, (unsigned long long)hend, out.write_more);
+    done(&st, &hin, inb, outb);
+    return 1;
+  }
+  done(&st, &hin, inb, outb);
+
+  /* Keep-alive after a Content-Length POST: idle must clear the
+     non-zero sawCL/cl, not only hend. A GET-then-GET keep-alive
+     would not catch that leak, because those facts are already 0. */
+  if (bind_fresh(&st, &hin, &inb, &outb, &rd, &wr, &in, &out) != 0) return 1;
+  if (feed(&st, inb, &in, &out, POST_BODY, 1, "ka-post") != 0) {
+    done(&st, &hin, inb, outb);
+    return 1;
+  }
+  hend = slice_end(POST_BODY);
+  if (!out.write_more || hend == 0 || expect_fr(&st, hend, 0, 1, 4, "ka-post") != 0) {
+    fprintf(stderr, "book host facts: ka-post host=%llu want=%llu te=%llu sawcl=%llu cl=%llu write=%d\n",
+            (unsigned long long)st.hend, (unsigned long long)hend, (unsigned long long)st.te,
+            (unsigned long long)st.sawcl, (unsigned long long)st.cl, out.write_more);
+    done(&st, &hin, inb, outb);
+    return 1;
+  }
+  if (write_once(&st, &in, &out, "ka-post-idle") != 0) {
+    done(&st, &hin, inb, outb);
+    return 1;
+  }
+  if (expect_fr(&st, 0, 0, 0, 0, "ka-post-idle") != 0 || muro_http_step_in_len(&st) != 0) {
+    fprintf(stderr, "book host facts: ka-post-idle host=%llu te=%llu sawcl=%llu cl=%llu in_len=%zu\n",
+            (unsigned long long)st.hend, (unsigned long long)st.te, (unsigned long long)st.sawcl,
+            (unsigned long long)st.cl, muro_http_step_in_len(&st));
+    done(&st, &hin, inb, outb);
+    return 1;
+  }
+  if (feed(&st, inb, &in, &out, GET, 1, "ka-post-get") != 0) {
+    done(&st, &hin, inb, outb);
+    return 1;
+  }
+  if (!out.write_more || expect_fr(&st, hend_get, 0, 0, 0, "ka-post-get") != 0) {
+    fprintf(stderr, "book host facts: ka-post-get host=%llu want=%llu te=%llu sawcl=%llu cl=%llu\n",
+            (unsigned long long)st.hend, (unsigned long long)hend_get, (unsigned long long)st.te,
+            (unsigned long long)st.sawcl, (unsigned long long)st.cl);
+    done(&st, &hin, inb, outb);
+    return 1;
+  }
+  done(&st, &hin, inb, outb);
+
+  /* Pipelined chunked POST then GET /x: consume must clear te=1 and
+     rebind hend to GET2. Leaving the first request's facts in place
+     would still have a plausible hend inside GET /x. */
+  if (bind_fresh(&st, &hin, &inb, &outb, &rd, &wr, &in, &out) != 0) return 1;
+  if (feed(&st, inb, &in, &out, CHUNK_THEN_GET, 1, "pipe-chunk-one") != 0) {
+    done(&st, &hin, inb, outb);
+    return 1;
+  }
+  hend = slice_end(CHUNK_DONE);
+  if (!out.write_more || hend == 0 || expect_fr(&st, hend, 1, 0, 0, "pipe-chunk-one") != 0) {
+    fprintf(stderr, "book host facts: pipe-chunk-one host=%llu want=%llu te=%llu sawcl=%llu cl=%llu\n",
+            (unsigned long long)st.hend, (unsigned long long)hend, (unsigned long long)st.te,
+            (unsigned long long)st.sawcl, (unsigned long long)st.cl);
+    done(&st, &hin, inb, outb);
+    return 1;
+  }
+  if (write_once(&st, &in, &out, "pipe-chunk-second") != 0) {
+    done(&st, &hin, inb, outb);
+    return 1;
+  }
+  if (muro_http_step_in_len(&st) != strlen(GET2) || memcmp(inb, GET2, strlen(GET2)) != 0 ||
+      expect_fr(&st, hend_get2, 0, 0, 0, "pipe-chunk-second") != 0) {
+    fprintf(stderr, "book host facts: pipe-chunk-second host=%llu want=%llu te=%llu in_len=%zu\n",
+            (unsigned long long)st.hend, (unsigned long long)hend_get2, (unsigned long long)st.te,
+            muro_http_step_in_len(&st));
+    done(&st, &hin, inb, outb);
+    return 1;
+  }
+  if (write_once(&st, &in, &out, "pipe-chunk-done") != 0) {
+    done(&st, &hin, inb, outb);
+    return 1;
+  }
+  if (expect_fr(&st, 0, 0, 0, 0, "pipe-chunk-done") != 0 || muro_http_step_in_len(&st) != 0) {
+    fprintf(stderr, "book host facts: pipe-chunk-done host=%llu te=%llu in_len=%zu\n",
+            (unsigned long long)st.hend, (unsigned long long)st.te, muro_http_step_in_len(&st));
     done(&st, &hin, inb, outb);
     return 1;
   }

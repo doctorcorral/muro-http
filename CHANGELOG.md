@@ -7,8 +7,8 @@
   `Out` carry `te` (1 when Transfer-Encoding is chunked), `sawCL` (1
   when Content-Length was seen), and `cl` (that length, or 0). Those
   facts are recorded only when `endKnown` (`hend` in `(0, sliceLen]`);
-  otherwise they stay 0. `framedEndAt` now takes the stored facts and
-  uses `framedEndHs` without a new `scan` when the end is known. An
+  otherwise they stay 0. When `endKnown`, `framedEndAt` trusts those
+  stored facts and uses `framedEndHs` without a new `scan`. An
   unknown or past-slice end falls back to one `scan` and ignores the
   stored facts. `finishWrite` still binds that end once. A keep-alive
   tail starts the next request with `hend` and the facts reset to 0.
@@ -18,17 +18,26 @@
   facts (fields 0–11 unchanged). The production book host persists
   them on `HttpStep.{te,sawcl,cl}` through `load_http` / `store_http`.
   Evidence is honest `refl`: GET / short POST / chunked / stream facts
-  on the step, idle and pipelined tails at 0, `framedEndHs` of those
-  same requests, and `framedEndAt` falling back on an unknown or
-  past-slice end even when the stored facts are wrong. No specs were
-  weakened. `book_is` compares fields 12–14. Keep-alive and pipeline
-  cases assert idle facts are 0 and that a pipelined GET then GET /x
-  rebinds after the buffer slides. A C test ignores wrong facts when
-  the end is unknown or past the slice. `carry_header_end_book` and
-  `./c/test_book_host` check a short POST carries `sawCL`/`cl` into the
-  body step, a chunked request carries `te=1`, keep-alive idle clears
-  the facts, and the same pipelined pair rebinds them after
-  `consume()`. `mix muro.check --fuel 5000000` on `request.muro` and
+  on classify (`te-of-*`, `sawCL-of-*`, `cl-of-*`), `facts-idle`
+  (`te` of the idle constructor), and `facts-pipe-done` /
+  `facts-pipe-done-cl` (`te` and `cl` of a GET-then-GET pipelined
+  idle; `pipe-done` is `pipeTail ≡ idle`), plus `framedEndHs` of
+  those same requests, and `framedEndAt` falling back on an unknown
+  or past-slice end even when the stored facts are wrong. No specs
+  were weakened. `book_is` compares fields 12–14. Book keep-alive
+  and pipeline cases in `c/test_step_slice.c` are GET then GET, so
+  they check idle facts stay 0 and that a pipelined GET then GET /x
+  rebinds `hend` after the buffer slides; they do not by themselves
+  catch a leaked non-zero `te`, `sawCL`, or `cl`.
+  `carry_header_end_book` checks a short POST carries `sawCL`/`cl`
+  on the book's `Out` and `BookStep`. A C test ignores wrong facts
+  when the end is unknown or past the slice. `./c/test_book_host`
+  checks the production host: a short POST carries `sawCL`/`cl` into
+  the body step, a chunked request carries `te=1`, a Content-Length
+  POST then GET keep-alive clears the non-zero facts on idle and
+  rebinds them on the next GET, and a pipelined chunked POST then
+  GET /x clears `te` and rebinds after `consume()`.
+  `mix muro.check --fuel 5000000` on `request.muro` and
   `step.muro` reports `All terms check`. `./c/test_step_slice` is
   scripted 535, book-cmp 10971, book-skip 0, quiet-read-shut 74.
   `c/muro-hello` and `c/muro-hello-book` each pass 71 conformance

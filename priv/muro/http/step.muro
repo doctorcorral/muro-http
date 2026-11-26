@@ -120,17 +120,21 @@
 -- again. te, sawCL, and cl are the first-scan framing facts stored
 -- next to it: te is 1 when Transfer-Encoding is chunked, sawCL is 1
 -- when Content-Length was seen, and cl is that length (0 if not).
--- framedEndAt uses those facts and does not scan when hend is known
--- for this slice. hend 0 or a value past the slice falls back to a
--- scan and ignores the stored facts. keep-alive tails start a new
--- request and reset hend and the facts to 0.
+-- When endKnown (hend in (0, sliceLen]), framedEndAt trusts those
+-- stored facts and does not scan. When hend is 0 or past the slice,
+-- it falls back to one scan and ignores the stored facts.
+-- keep-alive tails start a new request and reset hend and the facts
+-- to 0.
 -- Versus origin/main: 18 evidence names added (te-of-get, sawCL-of-get,
 -- cl-of-get, te-of-short, sawCL-of-short, cl-of-short, te-of-body,
 -- sawCL-of-body, cl-of-body, te-of-chunk, sawCL-of-chunk, cl-of-chunk,
 -- te-of-stream, sawCL-of-stream, cl-of-stream, facts-idle,
 -- facts-pipe-done, facts-pipe-done-cl), 0 removed, 204 total, plus
--- equations that name the stored framing facts. Each one is an
--- equation mix muro.check reduces.
+-- equations that name the stored framing facts. facts-idle is te of
+-- the idle constructor. facts-pipe-done and facts-pipe-done-cl are
+-- te and cl of a GET-then-GET pipelined idle (pipeTail is idle). The
+-- non-zero fact values are the te-of- / sawCL-of- / cl-of- theorems
+-- on classify. Each one is an equation mix muro.check reduces.
 import "request.muro"
 
 unboxed data St : Type where
