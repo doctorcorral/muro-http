@@ -189,6 +189,7 @@ static uint64_t bo_cover(http_step_Out o) { return o.muro__as.out.muro__f_7; }
 static uint64_t bo_left(http_step_Out o) { return o.muro__as.out.muro__f_8; }
 static uint64_t bo_wake(http_step_Out o) { return o.muro__as.out.muro__f_9; }
 static uint64_t bo_keep(http_step_Out o) { return o.muro__as.out.muro__f_10; }
+static uint64_t bo_hend(http_step_Out o) { return o.muro__as.out.muro__f_11; }
 
 static muro__slice sl_of(const char *s) {
   muro__slice sl;
@@ -301,13 +302,13 @@ static int box_bind(Box *b, uint64_t max_body) {
 static void dump_book(const char *name, http_step_Out o) {
   fprintf(stderr,
           "%s: book phase=%llu code=%llu close=%llu status=%llu read=%llu write=%llu span=%llu "
-          "cover=%llu left=%llu wake=%llu keep=%llu\n",
+          "cover=%llu left=%llu wake=%llu keep=%llu hend=%llu\n",
           name, (unsigned long long)bo_phase(o), (unsigned long long)bo_code(o),
           (unsigned long long)bo_close(o), (unsigned long long)bo_status(o),
           (unsigned long long)bo_read(o), (unsigned long long)bo_write(o),
           (unsigned long long)bo_span(o), (unsigned long long)bo_cover(o),
           (unsigned long long)bo_left(o), (unsigned long long)bo_wake(o),
-          (unsigned long long)bo_keep(o));
+          (unsigned long long)bo_keep(o), (unsigned long long)bo_hend(o));
 }
 
 static int book_is(http_step_Out o, uint64_t phase, uint64_t code, uint64_t close, uint64_t status,
@@ -318,6 +319,24 @@ static int book_is(http_step_Out o, uint64_t phase, uint64_t code, uint64_t clos
       bo_left(o) == left && bo_wake(o) == wake && bo_keep(o) == keep)
     return 0;
   dump_book(name, o);
+  return -1;
+}
+
+static int book_hend(http_step_Out o, uint64_t hend, const char *name) {
+  if (bo_hend(o) == hend) return 0;
+  fprintf(stderr, "%s: book hend %llu want %llu\n", name, (unsigned long long)bo_hend(o),
+          (unsigned long long)hend);
+  return -1;
+}
+
+/* Host HttpStep.hend, adapter BookStep.bhend, and the book's Out.hend
+   must agree. This is how a dropped host-bridge field is caught. */
+static int hend_agree(const HttpStep *st, const BookStep *bk, http_step_Out o, uint64_t hend,
+                      const char *name) {
+  if (bo_hend(o) == hend && bk && bk->bhend == hend && (!st || st->hend == hend)) return 0;
+  fprintf(stderr, "%s: hend out %llu host %llu book %llu want %llu\n", name,
+          (unsigned long long)bo_hend(o), (unsigned long long)(st ? st->hend : 0),
+          (unsigned long long)(bk ? bk->bhend : 0), (unsigned long long)hend);
   return -1;
 }
 
@@ -1589,6 +1608,73 @@ static int peer_short(void) {
 
 /* Append the rest of a GET onto the leftover "GET / HT" with
    empty_before 0. The book sees the whole slice and replies. */
+
+/* Short POST headers, then the body bytes, with the header end
+   carried on Out, BookStep.bhend, and the host HttpStep.hend. */
+static int carry_header_end(void) {
+  Box b;
+  StepOut o;
+  http_step_Out bk;
+  http_step_St st;
+  uint64_t hend;
+  size_t have;
+  const char *rest;
+  size_t rn;
+  muro__slice sl;
+  if (open_acc(&b, 10, 1000, 0) < 0) return -1;
+  st = http_step_readSt();
+  if (step_both(&b, &st, MURO_STEP_BYTES, POST_SHORT, 0, 0, &o, &bk, "cl-short-carry") < 0) {
+    box_free(&b);
+    return -1;
+  }
+  if (check_shape(DEC_MORE, &o, bk, &b, 0, NULL, 0, armed(1000, 0, 60000), 0, "cl-short-carry") <
+      0) {
+    box_free(&b);
+    return -1;
+  }
+  sl = sl_of(POST_SHORT);
+  hend = http_step_headerEnd(sl);
+  if (hend == 0 || hend == sl.n + 1) {
+    box_free(&b);
+    return fail("cl-short-carry end");
+  }
+  if (book_hend(bk, hend, "cl-short-carry") < 0 ||
+      hend_agree(NULL, &b.bk, bk, hend, "cl-short-carry") < 0) {
+    box_free(&b);
+    return -1;
+  }
+  st = http_step_take(bk);
+  have = strlen(POST_SHORT);
+  rest = POST_BODY + have;
+  rn = strlen(rest);
+  if (have + rn > IN_CAP) {
+    box_free(&b);
+    return fail("cl-short-body");
+  }
+  memcpy(b.inb + have, rest, rn);
+  muro_http_step_set_in_len(&b.st, have + rn);
+  set_fact(&b, MURO_STEP_BYTES, 0);
+  b.in.empty_before = 0;
+  memset(&o, 0, sizeof o);
+  bk = book_at(st, MURO_STEP_BYTES, sl_mem(b.inb, have + rn), b.st.max_body, 0, 0, b.in.now_ms,
+               b.in.deadline, b.st.idle_ms);
+  if (muro_http_step(&b.st, &b.in, &o) < 0) {
+    box_free(&b);
+    return fail("cl-short-body");
+  }
+  if (check_shape(DEC_REPLY, &o, bk, &b, 0, NULL, 0, 0, 0, "cl-short-body") < 0) {
+    box_free(&b);
+    return -1;
+  }
+  if (book_hend(bk, hend, "cl-short-body") < 0 ||
+      hend_agree(NULL, &b.bk, bk, hend, "cl-short-body") < 0) {
+    box_free(&b);
+    return -1;
+  }
+  box_free(&b);
+  return 0;
+}
+
 static int leftover_append(void) {
   Box b;
   StepOut seen;
@@ -2031,12 +2117,13 @@ static int run_seq(const char *buf, const int *facts, int depth, uint64_t max_bo
        The next fact has to see that keep, or the book would idle
        while the host closes. Any other disagreement is a bug. */
     if (b.bk.bphase != bo_phase(bk) || b.bk.bcode != bo_code(bk) || b.bk.bleft != bo_left(bk) ||
-        b.bk.bkeep != bo_keep(bk)) {
+        b.bk.bkeep != bo_keep(bk) || b.bk.bhend != bo_hend(bk)) {
       if (!(stream_forced_close(&b, bk) && b.bk.bphase == 3 && b.bk.bcode == 0 && b.bk.bleft == 0 &&
             b.bk.bkeep == 1)) {
-        fprintf(stderr, "sweep hand state phase %llu/%llu keep %llu/%llu\n",
+        fprintf(stderr, "sweep hand state phase %llu/%llu keep %llu/%llu hend %llu/%llu\n",
                 (unsigned long long)bo_phase(bk), (unsigned long long)b.bk.bphase,
-                (unsigned long long)bo_keep(bk), (unsigned long long)b.bk.bkeep);
+                (unsigned long long)bo_keep(bk), (unsigned long long)b.bk.bkeep,
+                (unsigned long long)bo_hend(bk), (unsigned long long)b.bk.bhend);
         box_free(&b);
         return -1;
       }
@@ -3377,6 +3464,7 @@ int main(void) {
   if (pipeline() < 0) return 1;
   if (peer_drops() < 0) return 1;
   if (peer_short() < 0) return 1;
+  if (carry_header_end() < 0) return 1;
   if (leftover_append() < 0) return 1;
   if (idle_edges() < 0) return 1;
   if (idle_peer_get() < 0) return 1;

@@ -118,9 +118,9 @@
 -- known. A complete block is never at offset 0. After the headers
 -- finish, later steps reuse that offset and do not fold the header
 -- again. keep-alive tails start a new request and reset it to 0.
--- Versus origin/main: 44 evidence names added, 5 removed
+-- Versus origin/main: 46 evidence names added, 5 removed
 -- (chunk-outside, continue-outside, stream-outside,
--- write-accept-outside, idle-accept-outside), net +39, 182 total,
+-- write-accept-outside, idle-accept-outside), net +41, 186 total,
 -- plus equations that name the stored end. Each one is an equation
 -- mix muro.check reduces.
 import "request.muro"
@@ -1144,6 +1144,12 @@ def get-reply : evidence {sawGet ≡ reply (toU64 0) (headerEnd getBuf) : Out} :
 def cl-short : evidence {sawShort ≡ moreEnd (headerEnd postShort) : Out} := refl
 
 def cl-body : evidence {sawBody ≡ reply (toU64 0) (headerEnd postBody) : Out} := refl
+
+-- Short body, then the remaining bytes, with the header end stored
+-- on the first step. Matches a full read of the same request.
+def cl-short-then-body : evidence {step0 (take sawShort) factBytes postBody max10 (toU64 0) (toU64 0) ≡ sawBody : Out} := refl
+
+def hend-of-short : evidence {hendOf sawShort ≡ headerEnd postShort : U64} := refl
 
 def close-413 : evidence {saw413 ≡ statusNow (toU64 413) : Out} := refl
 

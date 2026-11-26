@@ -17,12 +17,22 @@
   the next request. Adapter `BookStep` stores `bhend`,
   `http_step_still` / `http_step_hand` / `http_step_overStatus`
   take it, and `out_field` 11 is `hend` (fields 0–10 unchanged).
-  `mix muro.check --fuel 5000000` on `request.muro` and `step.muro`
-  reports `All terms check`. `./c/test_step_slice` is scripted 528,
-  book-cmp 10964, book-skip 0, quiet-read-shut 74. `c/muro-hello`
+  The production book host (`muro_http_step` in `c/step_book.c`,
+  used by `c/muro-hello-book`) persists that end: `HttpStep` has
+  `hend`, and `load_http` / `store_http` copy it to and from
+  `BookStep.bhend`, so a later step on the same request reuses
+  the stored end. `headerEndAt`, `headersDoneAt`, and
+  `rememberEnd` take a stored end only when it is in `(0, sliceLen]`
+  (`endKnown`); a value past the slice falls back to a fresh fold.
+  The adapter clears `hend` (via `finishWrite`, then `remember`)
+  before `consume()` slides the buffer. `./c/test_book_host` checks
+  that the host field is carried from a short POST into the body
+  step. `mix muro.check --fuel 5000000` on `request.muro` and `step.muro`
+  reports `All terms check`. `./c/test_step_slice` is scripted 531,
+  book-cmp 10967, book-skip 0, quiet-read-shut 74. `c/muro-hello`
   and `c/muro-hello-book` each pass 71 conformance cases. Versus
-  `origin/main` the book adds 2 evidence theorems on `step.muro`
-  and 3 on `request.muro`, 184 and 100 total. On omarzo, median of
+  `origin/main` the book adds 4 evidence theorems on `step.muro`
+  and 9 on `request.muro`, 186 and 106 total. On omarzo, median of
   five interleaved sittings (each sitting is the median of three
   5 s keepalive GET runs, `c=128`, workers 4, `taskset` 0–3 / 4–7,
   governor `powersave`), comparing the 0.22.32 pin-only book

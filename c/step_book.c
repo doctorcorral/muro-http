@@ -959,6 +959,7 @@ static void load_http(BookStep *b, HttpStep *st) {
   if (b->cont_len > sizeof b->cont) b->cont_len = sizeof b->cont;
   if (b->cont_off > b->cont_len) b->cont_off = b->cont_len;
   if (b->cont_len) memcpy(b->cont, st->cont, b->cont_len);
+  b->bhend = st->hend;
 }
 
 static void store_http(HttpStep *st, const BookStep *b, StepOut *out) {
@@ -991,6 +992,7 @@ static void store_http(HttpStep *st, const BookStep *b, StepOut *out) {
   st->cont_off = b->cont_off;
   if (st->cont_len > sizeof st->cont) st->cont_len = sizeof st->cont;
   if (st->cont_len) memcpy(st->cont, b->cont, st->cont_len);
+  st->hend = b->bhend;
   if (out && out->status && b->spare_len && out->status >= b->spare &&
       out->status < b->spare + sizeof b->spare) {
     out->status = st->spare + (size_t)(out->status - b->spare);
