@@ -134,7 +134,7 @@ static unsigned long take(const char *name, Conn *st, Proto *proto, Ev ev) {
   if (proto_live(proto) && !proto_done(proto) && (phase == PH_READ || phase == PH_IDLE) &&
       (tag == 0 || (tag == 1 && buf.n > 0))) {
     Classified *c = classify(buf);
-    status = c->muro__as.classified.muro__f_0->muro__field_tag;
+    status = (int)c->muro__as.classified.muro__f_0;
   }
   /* Tag 6 is the handler reply. n1 is 1 for HTTP 400..599, admitted
      as reply-bad. Any other status is reply-ok. reply -1 would offer
@@ -259,14 +259,14 @@ static void check_keepalive(void) {
     view_memo_reset();
     muro_http_reset();
     a = classify(s);
-    status = a->muro__as.classified.muro__f_0->muro__field_tag;
-    keep = a->muro__as.classified.muro__f_1->muro__field_tag;
+    status = (int)a->muro__as.classified.muro__f_0;
+    keep = (int)a->muro__as.classified.muro__f_1;
     muro_http_reset();
     n0 = muro_http_allocs();
     b = classify(s);
     if (muro_http_allocs() != n0) bad("health", "classify hit allocs");
-    if (b->muro__as.classified.muro__f_0->muro__field_tag != status) bad("health", "classify status");
-    if (b->muro__as.classified.muro__f_1->muro__field_tag != keep) bad("health", "classify keep");
+    if ((int)b->muro__as.classified.muro__f_0 != status) bad("health", "classify status");
+    if ((int)b->muro__as.classified.muro__f_1 != keep) bad("health", "classify keep");
     code = methodCode(s);
     muro_http_reset();
     if (methodCode(s) != code) bad("health", "method hit");

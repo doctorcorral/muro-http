@@ -55,11 +55,9 @@ static int check_steps(const char *name, const uint8_t *p, size_t n);
 static int class_eq(Classified *a, Classified *b) {
   if (!a || !b) return 0;
   if (a->muro__field_tag != b->muro__field_tag) return 0;
-  if (!a->muro__as.classified.muro__f_0 || !b->muro__as.classified.muro__f_0) return 0;
-  if (a->muro__as.classified.muro__f_0->muro__field_tag != b->muro__as.classified.muro__f_0->muro__field_tag)
+  if (a->muro__as.classified.muro__f_0 != b->muro__as.classified.muro__f_0)
     return 0;
-  if (!a->muro__as.classified.muro__f_1 || !b->muro__as.classified.muro__f_1) return 0;
-  if (a->muro__as.classified.muro__f_1->muro__field_tag != b->muro__as.classified.muro__f_1->muro__field_tag)
+  if (a->muro__as.classified.muro__f_1 != b->muro__as.classified.muro__f_1)
     return 0;
   return 1;
 }

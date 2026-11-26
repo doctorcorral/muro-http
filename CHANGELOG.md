@@ -2,6 +2,28 @@
 
 ## 0.1.0-dev — unreleased
 
+- Pin muro `0.22.34` from Hex (`{:muro, "~> 0.22.34"}` in
+  `mix.exs`, `muro: "0.22.34"` in `muro.exs`), the unboxed C enums
+  from [murolang/muro#296](https://github.com/murolang/muro/pull/296),
+  and regenerate the books. An all-nullary type such as `Bool`,
+  `Status`, `Keep`, `Verb`, `PathShape`, or the decide `StatusCode`,
+  `ErrKind`, and `ActKind` is now a by-value C `enum` of its
+  constructor tag instead of a pointer to a boxed object. Tags are unchanged: `true` and
+  `status-ok` are tag `0`. The C host and drivers read those fields
+  directly: `step.c`, `step_book.c`, `host_stream.c`, `view_memo.c`,
+  `tag_pin.c`, `examples/challenge/app.c`, and the `test_classify`,
+  `test_conn`, `test_scan_cache`, and `test_step_slice` drivers drop
+  the `->muro__field_tag` load and the null checks on enum fields.
+  The `.muro` books are unchanged. Allocation counts are unchanged:
+  `classify` still allocates the one `Classified` result. Measured
+  on omarzo against #30 (4 workers, epoll, server on cores 0–3,
+  loadgen on 4–7, 200k counted requests, userspace
+  `perf_event_open`), the book host went from 20,688 to 14,952
+  instructions per request on a one-read GET, 22,554 to 18,906 on
+  split headers, and 26,439 to 18,812 on a late POST body; the C
+  host stayed within noise (5,860 to 5,989, 12,896 to 11,465, 7,221
+  to 7,321). Errors and non2xx were 0 on every counted run. The
+  library version stays `0.1.0-dev`. The pin is muro `0.22.34`.
 - Persist the first-scan framing facts next to `hend` and skip the
   `framedEndAt` rescan on a later finish. After classify, `St` and
   `Out` carry `te` (1 when Transfer-Encoding is chunked), `sawCL` (1
@@ -133,7 +155,7 @@
   `headerEndAt` when `hend` is already bound nonzero, would
   shrink that path. Errors and non2xx were 0 on every run.
   `c/step.c` and `c/host.c` are unchanged. The library version
-  stays `0.1.0-dev`. The pin is muro `0.22.33`.
+  stays `0.1.0-dev`. The pin is muro `0.22.34`.
 - Chunked request bodies, `Expect: 100-continue`, an open streamed
   body, accept during a write or while idle, and a body-reader
   override of 400 or 413 are decided in `priv/muro/http/step.muro`.

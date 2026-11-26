@@ -14,7 +14,7 @@
 
 enum { IN_NONE = 0, IN_MEM = 1, IN_CL = 2, IN_CHUNK = 3 };
 
-static int is_true(Bool *b) { return b && b->muro__field_tag == 0; }
+static int is_true(Bool b) { return b == muro__tag_Bool_true_k; }
 
 static int span_eq(muro__slice s, const char *lit) {
   size_t n = strlen(lit);

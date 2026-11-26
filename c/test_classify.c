@@ -64,12 +64,12 @@ static unsigned long classify_of(const char *name, const char *raw, uint8_t st, 
     bad(name, "classified");
     return n;
   }
-  if (c->muro__as.classified.muro__f_0->muro__field_tag != st) bad(name, "status");
-  if (check_keep && c->muro__as.classified.muro__f_1->muro__field_tag != keep) bad(name, "keep");
+  if ((uint8_t)c->muro__as.classified.muro__f_0 != st) bad(name, "status");
+  if (check_keep && (uint8_t)c->muro__as.classified.muro__f_1 != keep) bad(name, "keep");
   return n;
 }
 
-static int is_true(Bool *b) { return b && b->muro__field_tag == 0; }
+static int is_true(Bool b) { return b == muro__tag_Bool_true_k; }
 
 static void expect_chunk(const char *name, const char *raw, int done, int bad_frame, uint64_t total) {
   Ck ck;
@@ -211,8 +211,8 @@ int main(void) {
   g = of(glued);
   muro_http_reset();
   c = classify(g);
-  if (c->muro__as.classified.muro__f_0->muro__field_tag != ST_NEED) bad("no-space", "status");
-  if (c->muro__as.classified.muro__f_1->muro__field_tag != K_YES) bad("no-space", "keep");
+  if ((int)c->muro__as.classified.muro__f_0 != ST_NEED) bad("no-space", "status");
+  if ((int)c->muro__as.classified.muro__f_1 != K_YES) bad("no-space", "keep");
   muro_http_reset();
   if (!same(methodView(g), "GET/feed\r") || !inside(methodView(g), g)) bad("no-space", "method");
 

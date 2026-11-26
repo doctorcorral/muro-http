@@ -469,8 +469,8 @@ static int conn_is(const uint8_t *p, size_t n, uint64_t keep) {
   return has_lit(p, n, lit);
 }
 
-static int flag_true(const http_step_Bool *b) {
-  return b && b->muro__field_tag == http_step_muro__tag_Bool_true_k;
+static int flag_true(http_step_Bool b) {
+  return b == http_step_muro__tag_Bool_true_k;
 }
 
 static uint64_t st_phase(http_step_St st) { return st.muro__as.st.muro__f_0; }

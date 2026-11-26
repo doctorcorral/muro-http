@@ -242,14 +242,13 @@ static int query_facts(Challenge *ch) {
 static int run_decide(Challenge *ch, int *code, int *err, int *act) {
   Decision *d = decide(verbFrom(ch->verb), pathFrom(ch->path), idFrom(ch->idc), authFrom(ch->auth),
                        bodyFrom(ch->body), likeFrom(ch->like), dbFrom(ch->db));
-  if (!d || d->muro__field_tag != 0 || !d->muro__as.decided.muro__f_0 ||
-      !d->muro__as.decided.muro__f_1 || !d->muro__as.decided.muro__f_2) {
+  if (!d || d->muro__field_tag != 0) {
     muro_http_reset();
     return -1;
   }
-  *code = d->muro__as.decided.muro__f_0->muro__field_tag;
-  *err = d->muro__as.decided.muro__f_1->muro__field_tag;
-  *act = d->muro__as.decided.muro__f_2->muro__field_tag;
+  *code = (int)d->muro__as.decided.muro__f_0;
+  *err = (int)d->muro__as.decided.muro__f_1;
+  *act = (int)d->muro__as.decided.muro__f_2;
   muro_http_reset();
   return 0;
 }
