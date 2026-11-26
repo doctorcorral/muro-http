@@ -25,11 +25,23 @@
   `rememberEnd` take a stored end only when it is in `(0, sliceLen]`
   (`endKnown`); a value past the slice falls back to a fresh fold.
   The adapter clears `hend` (via `finishWrite`, then `remember`)
-  before `consume()` slides the buffer. `./c/test_book_host` checks
-  that the host field is carried from a short POST into the body
-  step. `mix muro.check --fuel 5000000` on `request.muro` and `step.muro`
-  reports `All terms check`. `./c/test_step_slice` is scripted 531,
-  book-cmp 10967, book-skip 0, quiet-read-shut 74. `c/muro-hello`
+  before `consume()` slides the buffer. `book_is` in
+  `c/test_step_slice.c` compares field 11 (`Out.hend`). Keep-alive
+  and pipeline cases assert idle `hend == 0` and that a pipelined
+  GET then GET /x rebinds after the buffer slides (a stale first
+  end would still fall inside GET /x). A C test mirrors
+  `header-end-at-past`: a stored end past the slice is ignored.
+  `carry_header_end_book` covers the book's `Out.hend` and
+  `BookStep.bhend` (this file's handwritten host does not write
+  `HttpStep.hend`). `./c/test_book_host` checks the production
+  host: a short POST carries `hend` into the body step, keep-alive
+  idle clears it and the next GET rebinds it, the same pipelined
+  pair rebinds after `consume()`, a past-slice stored end folds
+  again, and a `Connection: close` finish skips consume (`keepHand`
+  forces keep 1, so `finishWrite` takes quiet and does not classify
+  an unconsumed tail). `mix muro.check --fuel 5000000` on `request.muro` and `step.muro`
+  reports `All terms check`. `./c/test_step_slice` is scripted 535,
+  book-cmp 10971, book-skip 0, quiet-read-shut 74. `c/muro-hello`
   and `c/muro-hello-book` each pass 71 conformance cases. Versus
   `origin/main` the book adds 4 evidence theorems on `step.muro`
   and 9 on `request.muro`, 186 and 106 total. On omarzo, median of

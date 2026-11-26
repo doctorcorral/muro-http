@@ -118,11 +118,10 @@
 -- known. A complete block is never at offset 0. After the headers
 -- finish, later steps reuse that offset and do not fold the header
 -- again. keep-alive tails start a new request and reset it to 0.
--- Versus origin/main: 46 evidence names added, 5 removed
--- (chunk-outside, continue-outside, stream-outside,
--- write-accept-outside, idle-accept-outside), net +41, 186 total,
--- plus equations that name the stored end. Each one is an equation
--- mix muro.check reduces.
+-- Versus origin/main: 4 evidence names added (cl-short-then-body,
+-- hend-of-get, hend-of-short, remember-get-step), 0 removed, 186
+-- total, plus equations that name the stored end. Each one is an
+-- equation mix muro.check reduces.
 import "request.muro"
 
 unboxed data St : Type where
