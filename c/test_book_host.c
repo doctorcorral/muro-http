@@ -1,6 +1,7 @@
 /* Prove the book host (muro_http_step in step_book.c) persists
-   HttpStep.hend across steps via load_http / store_http. Linked
-   with -DMURO_STEP_BOOK (c/step_book_host.o). */
+   HttpStep.hend and the first-scan framing facts (te / sawcl / cl)
+   across steps via load_http / store_http. Linked with
+   -DMURO_STEP_BOOK (c/step_book_host.o). */
 
 #include "step.h"
 #include "host_stream.h"
@@ -21,6 +22,9 @@ static const char CLOSE_THEN[] =
     "GET / HTTP/1.1\r\nHost: h\r\nConnection: close\r\n\r\nGET /x HTTP/1.1\r\nHost: h\r\n\r\n";
 static const char POST_SHORT[] = "POST / HTTP/1.1\r\nHost: h\r\nContent-Length: 4\r\n\r\n";
 static const char POST_BODY[] = "POST / HTTP/1.1\r\nHost: h\r\nContent-Length: 4\r\n\r\nabcd";
+static const char CHUNK_HDR[] = "POST / HTTP/1.1\r\nHost: h\r\nTransfer-Encoding: chunked\r\n\r\n";
+static const char CHUNK_DONE[] =
+    "POST / HTTP/1.1\r\nHost: h\r\nTransfer-Encoding: chunked\r\n\r\n0\r\n\r\n";
 
 static int on_req(const MuroHttpRequest *req, MuroHttpResponse *resp, void *user) {
   (void)req;
@@ -55,6 +59,16 @@ static uint64_t slice_end(const char *buf) {
   return h;
 }
 
+static int expect_fr(const HttpStep *st, uint64_t hend, uint64_t te, uint64_t sawcl, uint64_t cl,
+                     const char *what) {
+  if (st->hend == hend && st->te == te && st->sawcl == sawcl && st->cl == cl) return 0;
+  fprintf(stderr, "book host facts: %s hend=%llu te=%llu sawcl=%llu cl=%llu want %llu %llu %llu %llu\n",
+          what, (unsigned long long)st->hend, (unsigned long long)st->te,
+          (unsigned long long)st->sawcl, (unsigned long long)st->cl, (unsigned long long)hend,
+          (unsigned long long)te, (unsigned long long)sawcl, (unsigned long long)cl);
+  return 1;
+}
+
 static void done(HttpStep *st, struct HostIn *hin, uint8_t *inb, uint8_t *outb) {
   muro_http_step_shutdown(st);
   host_in_close(hin);
@@ -76,13 +90,14 @@ static int bind_fresh(HttpStep *st, struct HostIn *hin, uint8_t **inb, uint8_t *
   }
   host_in_init(hin, -1, 10);
   muro_http_step_bind(st, *inb, IN_CAP, *outb, OUT_CAP, hin, rd, wr, on_req, NULL, 10, 60000);
-  if (st->hend != 0) {
+  if (st->hend != 0 || st->te != 0 || st->sawcl != 0 || st->cl != 0) {
     done(st, hin, *inb, *outb);
-    return fail("bind hend");
+    return fail("bind facts");
   }
   set_in(in, MURO_STEP_ACCEPTED, 0, 0);
   memset(out, 0, sizeof *out);
-  if (muro_http_step(st, in, out) < 0 || out->close_conn || st->hend != 0) {
+  if (muro_http_step(st, in, out) < 0 || out->close_conn || st->hend != 0 || st->te != 0 ||
+      st->sawcl != 0 || st->cl != 0) {
     done(st, hin, *inb, *outb);
     return fail("accept");
   }
@@ -136,7 +151,7 @@ int main(void) {
   rc = muro_http_step(&st, &in, &out);
   hend = slice_end(POST_SHORT);
   if (rc < 0 || out.close_conn || out.write_more || !out.read_more || hend == 0 ||
-      st.hend != hend) {
+      expect_fr(&st, hend, 0, 1, 4, "short") != 0) {
     fprintf(stderr, "book host hend: short rc=%d hend host=%llu want=%llu read=%d write=%d\n", rc,
             (unsigned long long)st.hend, (unsigned long long)hend, out.read_more, out.write_more);
     done(&st, &hin, inb, outb);
@@ -148,7 +163,8 @@ int main(void) {
   set_in(&in, MURO_STEP_BYTES, 0, 0);
   memset(&out, 0, sizeof out);
   rc = muro_http_step(&st, &in, &out);
-  if (rc < 0 || !out.write_more || !out.bytes || !out.len || st.hend != hend) {
+  if (rc < 0 || !out.write_more || !out.bytes || !out.len ||
+      expect_fr(&st, hend, 0, 1, 4, "body") != 0) {
     fprintf(stderr, "book host hend: body rc=%d hend host=%llu want=%llu write=%d len=%zu\n", rc,
             (unsigned long long)st.hend, (unsigned long long)hend, out.write_more, out.len);
     done(&st, &hin, inb, outb);
@@ -164,6 +180,20 @@ int main(void) {
     if (http_step_headerEndAt(99, get) != end) return fail("past-slice At");
     if (http_step_headerEndAt(end, get) != end) return fail("past-slice stored");
     if (http_step_headerEndAt(0, get) != end) return fail("past-slice unknown");
+    {
+      uint64_t fe = http_step_framedEnd(get);
+      uint64_t at0, atp, atok;
+      muro_http_reset();
+      at0 = http_step_framedEndAt(0, 1, 1, 99, get);
+      muro_http_reset();
+      atp = http_step_framedEndAt(99, 1, 1, 99, get);
+      muro_http_reset();
+      atok = http_step_framedEndAt(end, 0, 0, 0, get);
+      muro_http_reset();
+      if (at0 != fe) return fail("past-slice framed unknown");
+      if (atp != fe) return fail("past-slice framed past");
+      if (atok != fe) return fail("past-slice framed stored");
+    }
   }
 
   hend_get = slice_end(GET);
@@ -176,7 +206,7 @@ int main(void) {
     done(&st, &hin, inb, outb);
     return 1;
   }
-  if (!out.write_more || st.hend != hend_get) {
+  if (!out.write_more || expect_fr(&st, hend_get, 0, 0, 0, "ka-get") != 0) {
     fprintf(stderr, "book host hend: ka-get host=%llu want=%llu write=%d\n",
             (unsigned long long)st.hend, (unsigned long long)hend_get, out.write_more);
     done(&st, &hin, inb, outb);
@@ -186,7 +216,7 @@ int main(void) {
     done(&st, &hin, inb, outb);
     return 1;
   }
-  if (st.hend != 0 || muro_http_step_in_len(&st) != 0) {
+  if (expect_fr(&st, 0, 0, 0, 0, "ka-idle") != 0 || muro_http_step_in_len(&st) != 0) {
     fprintf(stderr, "book host hend: ka-idle host=%llu in_len=%zu\n", (unsigned long long)st.hend,
             muro_http_step_in_len(&st));
     done(&st, &hin, inb, outb);
@@ -206,7 +236,7 @@ int main(void) {
     done(&st, &hin, inb, outb);
     return 1;
   }
-  if (st.hend != 0 || muro_http_step_in_len(&st) != 0) {
+  if (expect_fr(&st, 0, 0, 0, 0, "ka-second-idle") != 0 || muro_http_step_in_len(&st) != 0) {
     fprintf(stderr, "book host hend: ka-second-idle host=%llu in_len=%zu\n",
             (unsigned long long)st.hend, muro_http_step_in_len(&st));
     done(&st, &hin, inb, outb);
@@ -222,7 +252,7 @@ int main(void) {
     done(&st, &hin, inb, outb);
     return 1;
   }
-  if (!out.write_more || st.hend != hend_get) {
+  if (!out.write_more || expect_fr(&st, hend_get, 0, 0, 0, "pipe-diff-one") != 0) {
     fprintf(stderr, "book host hend: pipe-diff-one host=%llu want=%llu\n",
             (unsigned long long)st.hend, (unsigned long long)hend_get);
     done(&st, &hin, inb, outb);
@@ -233,7 +263,7 @@ int main(void) {
     return 1;
   }
   if (muro_http_step_in_len(&st) != strlen(GET2) || memcmp(inb, GET2, strlen(GET2)) != 0 ||
-      st.hend != hend_get2) {
+      expect_fr(&st, hend_get2, 0, 0, 0, "pipe-diff-second") != 0) {
     fprintf(stderr, "book host hend: pipe-diff-second host=%llu want=%llu in_len=%zu\n",
             (unsigned long long)st.hend, (unsigned long long)hend_get2,
             muro_http_step_in_len(&st));
@@ -244,7 +274,7 @@ int main(void) {
     done(&st, &hin, inb, outb);
     return 1;
   }
-  if (st.hend != 0 || muro_http_step_in_len(&st) != 0) {
+  if (expect_fr(&st, 0, 0, 0, 0, "pipe-diff-done") != 0 || muro_http_step_in_len(&st) != 0) {
     fprintf(stderr, "book host hend: pipe-diff-done host=%llu in_len=%zu\n",
             (unsigned long long)st.hend, muro_http_step_in_len(&st));
     done(&st, &hin, inb, outb);
@@ -270,10 +300,42 @@ int main(void) {
     done(&st, &hin, inb, outb);
     return 1;
   }
-  if (st.hend != 0 || muro_http_step_in_len(&st) != strlen(CLOSE_THEN) ||
+  if (expect_fr(&st, 0, 0, 0, 0, "close-skip") != 0 ||
+      muro_http_step_in_len(&st) != strlen(CLOSE_THEN) ||
       memcmp(inb, CLOSE_THEN, strlen(CLOSE_THEN)) != 0) {
     fprintf(stderr, "book host hend: close-skip host=%llu in_len=%zu want_len=%zu\n",
             (unsigned long long)st.hend, muro_http_step_in_len(&st), strlen(CLOSE_THEN));
+    done(&st, &hin, inb, outb);
+    return 1;
+  }
+  done(&st, &hin, inb, outb);
+
+  /* Chunked TE: facts are te=1, sawcl=0, cl=0 on the header step and
+     after the last-chunk bytes arrive. */
+  if (bind_fresh(&st, &hin, &inb, &outb, &rd, &wr, &in, &out) != 0) return 1;
+  have = strlen(CHUNK_HDR);
+  memcpy(inb, CHUNK_HDR, have);
+  muro_http_step_set_in_len(&st, have);
+  set_in(&in, MURO_STEP_BYTES, 0, 1);
+  memset(&out, 0, sizeof out);
+  rc = muro_http_step(&st, &in, &out);
+  hend = slice_end(CHUNK_HDR);
+  if (rc < 0 || out.close_conn || out.write_more || !out.read_more || hend == 0 ||
+      expect_fr(&st, hend, 1, 0, 0, "chunk-hdr") != 0) {
+    fprintf(stderr, "book host facts: chunk-hdr rc=%d hend host=%llu want=%llu\n", rc,
+            (unsigned long long)st.hend, (unsigned long long)hend);
+    done(&st, &hin, inb, outb);
+    return 1;
+  }
+  rest = strlen(CHUNK_DONE) - have;
+  memcpy(inb + have, CHUNK_DONE + have, rest);
+  muro_http_step_set_in_len(&st, have + rest);
+  set_in(&in, MURO_STEP_BYTES, 0, 0);
+  memset(&out, 0, sizeof out);
+  rc = muro_http_step(&st, &in, &out);
+  if (rc < 0 || !out.write_more || expect_fr(&st, hend, 1, 0, 0, "chunk-done") != 0) {
+    fprintf(stderr, "book host facts: chunk-done rc=%d hend host=%llu want=%llu write=%d\n", rc,
+            (unsigned long long)st.hend, (unsigned long long)hend, out.write_more);
     done(&st, &hin, inb, outb);
     return 1;
   }

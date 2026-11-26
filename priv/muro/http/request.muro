@@ -1419,9 +1419,63 @@ def statusOfAt : run Π (+ hend : U64) → Π (+ st : HSt) → Π (+ s : Slice) 
                   | true => status-malformed
                   | false => status-need-more))
 
-def framedEndHs : run Π (+ hend : U64) → Π (+ st : HSt) → Π (+ s : Slice) → U64 :=
-  λ (+ hend : U64) → λ (+ st : HSt) → λ (+ s : Slice) →
+-- 1 when the first scan saw a chunked Transfer-Encoding, else 0.
+def teBit : run Π (+ st : HSt) → U64 :=
+  λ (+ st : HSt) →
     match (teChunkSt st) motive (λ _ → U64)
+      | true => toU64 1
+      | false => toU64 0
+
+-- 1 when the first scan saw Content-Length, else 0.
+def sawCLBit : run Π (+ st : HSt) → U64 :=
+  λ (+ st : HSt) →
+    match (sawCLSt st) motive (λ _ → U64)
+      | true => toU64 1
+      | false => toU64 0
+
+-- Framing facts are stored next to hend. They are only used when
+-- that end is known for this slice; otherwise they are 0.
+def teWhen : run Π (+ hend : U64) → Π (+ hs : HSt) → Π (+ s : Slice) → U64 :=
+  λ (+ hend : U64) → λ (+ hs : HSt) → λ (+ s : Slice) →
+    match (endKnown hend s) motive (λ _ → U64)
+      | true => teBit hs
+      | false => toU64 0
+
+def sawCLWhen : run Π (+ hend : U64) → Π (+ hs : HSt) → Π (+ s : Slice) → U64 :=
+  λ (+ hend : U64) → λ (+ hs : HSt) → λ (+ s : Slice) →
+    match (endKnown hend s) motive (λ _ → U64)
+      | true => sawCLBit hs
+      | false => toU64 0
+
+def clWhen : run Π (+ hend : U64) → Π (+ hs : HSt) → Π (+ s : Slice) → U64 :=
+  λ (+ hend : U64) → λ (+ hs : HSt) → λ (+ s : Slice) →
+    match (endKnown hend s) motive (λ _ → U64)
+      | true => contentLengthSt hs
+      | false => toU64 0
+
+-- bodyShort / streamLen / bodyLen from stored facts, not a new scan.
+def bodyShortFacts : run Π (+ hend : U64) → Π (+ sawCL : U64) → Π (+ cl : U64) → Π (+ s : Slice) → Bool :=
+  λ (+ hend : U64) → λ (+ sawCL : U64) → λ (+ cl : U64) → λ (+ s : Slice) →
+    and (u64eq sawCL (toU64 1)) (u64lt (sliceLen s) (addi (headerEndAt hend s) cl))
+
+def streamLenFacts : run Π (+ hend : U64) → Π (+ sawCL : U64) → Π (+ cl : U64) → Π (+ s : Slice) → Bool :=
+  λ (+ hend : U64) → λ (+ sawCL : U64) → λ (+ cl : U64) → λ (+ s : Slice) →
+    and (headersDoneAt hend s) (and (bodyShortFacts hend sawCL cl s) (gt16384 cl))
+
+def bodyLenFacts : run Π (+ hend : U64) → Π (+ sawCL : U64) → Π (+ cl : U64) → Π (+ s : Slice) → U64 :=
+  λ (+ hend : U64) → λ (+ sawCL : U64) → λ (+ cl : U64) → λ (+ s : Slice) →
+    match (headersDoneAt hend s) motive (λ _ → U64)
+      | true =>
+          (match (and (u64eq sawCL (toU64 1)) (not (bodyShortFacts hend sawCL cl s))) motive (λ _ → U64)
+            | true => cl
+            | false => toU64 0)
+      | false => toU64 0
+
+-- Same arms as the old HSt form, but the first-scan facts are
+-- arguments. A later finish does not fold the headers again.
+def framedEndHs : run Π (+ hend : U64) → Π (+ te : U64) → Π (+ sawCL : U64) → Π (+ cl : U64) → Π (+ s : Slice) → U64 :=
+  λ (+ hend : U64) → λ (+ te : U64) → λ (+ sawCL : U64) → λ (+ cl : U64) → λ (+ s : Slice) →
+    match (u64eq te (toU64 1)) motive (λ _ → U64)
       | true =>
           (match (chunkScanAt hend s) motive (λ _ → U64)
             | ck ph _acc _rem _total _fl at =>
@@ -1429,12 +1483,23 @@ def framedEndHs : run Π (+ hend : U64) → Π (+ st : HSt) → Π (+ s : Slice)
                   | true => addi (headerEndAt hend s) at
                   | false => sliceLen s))
       | false =>
-          (match (streamLenAt hend st s) motive (λ _ → U64)
+          (match (streamLenFacts hend sawCL cl s) motive (λ _ → U64)
             | true => sliceLen s
-            | false => addi (bodyAtAt hend s) (bodyLenAt hend st s))
+            | false => addi (bodyAtAt hend s) (bodyLenFacts hend sawCL cl s))
 
-def framedEndAt : run Π (+ hend : U64) → Π (+ s : Slice) → U64 :=
-  λ (+ hend : U64) → λ (+ s : Slice) → framedEndHs hend (scan s) s
+-- Fallback when the stored end is unknown or past this slice:
+-- one scan, then the same arms.
+def framedEndStAt : run Π (+ hend : U64) → Π (+ st : HSt) → Π (+ s : Slice) → U64 :=
+  λ (+ hend : U64) → λ (+ st : HSt) → λ (+ s : Slice) →
+    framedEndHs hend (teBit st) (sawCLBit st) (contentLengthSt st) s
+
+-- When the stored end is in (0, sliceLen], use the stored facts
+-- and do not scan. Otherwise scan once and ignore those facts.
+def framedEndAt : run Π (+ hend : U64) → Π (+ te : U64) → Π (+ sawCL : U64) → Π (+ cl : U64) → Π (+ s : Slice) → U64 :=
+  λ (+ hend : U64) → λ (+ te : U64) → λ (+ sawCL : U64) → λ (+ cl : U64) → λ (+ s : Slice) →
+    match (endKnown hend s) motive (λ _ → U64)
+      | true => framedEndHs hend te sawCL cl s
+      | false => framedEndStAt hend (scan s) s
 
 def chunkScan : run Π (+ s : Slice) → Ck :=
   λ (+ s : Slice) →
@@ -1869,16 +1934,35 @@ def remember-get : evidence {rememberEnd (toU64 0) b"GET / HTTP/1.1\r\nHost: h\r
 
 def header-end-at-stored : evidence {headerEndAt (headerEnd b"GET / HTTP/1.1\r\nHost: h\r\n\r\n") b"GET / HTTP/1.1\r\nHost: h\r\n\r\n" ≡ headerEnd b"GET / HTTP/1.1\r\nHost: h\r\n\r\n" : U64} := refl
 
-def framed-end-at-get : evidence {framedEndAt (headerEnd b"GET / HTTP/1.1\r\nHost: h\r\n\r\n") b"GET / HTTP/1.1\r\nHost: h\r\n\r\n" ≡ framedEnd b"GET / HTTP/1.1\r\nHost: h\r\n\r\n" : U64} := refl
+def framed-end-at-get : evidence {framedEndAt (headerEnd b"GET / HTTP/1.1\r\nHost: h\r\n\r\n") (toU64 0) (toU64 0) (toU64 0) b"GET / HTTP/1.1\r\nHost: h\r\n\r\n" ≡ framedEnd b"GET / HTTP/1.1\r\nHost: h\r\n\r\n" : U64} := refl
 
 def stored-end-incomplete : evidence {storedEnd (headerEnd b"GET / HTTP/1.1\r\nHost: h\r\n") b"GET / HTTP/1.1\r\nHost: h\r\n" ≡ toU64 0 : U64} := refl
 
 def status-of-at-remember : evidence {statusOfAt (rememberEnd (toU64 0) b"GET / HTTP/1.1\r\nHost: h\r\n\r\n") (scan b"GET / HTTP/1.1\r\nHost: h\r\n\r\n") b"GET / HTTP/1.1\r\nHost: h\r\n\r\n" ≡ statusOf b"GET / HTTP/1.1\r\nHost: h\r\n\r\n" : Status} := refl
 
-def framed-end-at-post : evidence {framedEndAt (headerEnd b"POST /posts HTTP/1.1\r\nHost: t\r\nContent-Length: 2\r\n\r\nab") b"POST /posts HTTP/1.1\r\nHost: t\r\nContent-Length: 2\r\n\r\nab" ≡ framedEnd b"POST /posts HTTP/1.1\r\nHost: t\r\nContent-Length: 2\r\n\r\nab" : U64} := refl
+def framed-end-at-post : evidence {framedEndAt (headerEnd b"POST /posts HTTP/1.1\r\nHost: t\r\nContent-Length: 2\r\n\r\nab") (toU64 0) (toU64 1) (toU64 2) b"POST /posts HTTP/1.1\r\nHost: t\r\nContent-Length: 2\r\n\r\nab" ≡ framedEnd b"POST /posts HTTP/1.1\r\nHost: t\r\nContent-Length: 2\r\n\r\nab" : U64} := refl
 
-def framed-end-at-chunk : evidence {framedEndAt (headerEnd b"POST /p HTTP/1.1\r\nHost: t\r\nTransfer-Encoding: chunked\r\n\r\n0\r\n\r\n") b"POST /p HTTP/1.1\r\nHost: t\r\nTransfer-Encoding: chunked\r\n\r\n0\r\n\r\n" ≡ framedEnd b"POST /p HTTP/1.1\r\nHost: t\r\nTransfer-Encoding: chunked\r\n\r\n0\r\n\r\n" : U64} := refl
+def framed-end-at-chunk : evidence {framedEndAt (headerEnd b"POST /p HTTP/1.1\r\nHost: t\r\nTransfer-Encoding: chunked\r\n\r\n0\r\n\r\n") (toU64 1) (toU64 0) (toU64 0) b"POST /p HTTP/1.1\r\nHost: t\r\nTransfer-Encoding: chunked\r\n\r\n0\r\n\r\n" ≡ framedEnd b"POST /p HTTP/1.1\r\nHost: t\r\nTransfer-Encoding: chunked\r\n\r\n0\r\n\r\n" : U64} := refl
 
-def framed-end-at-stream : evidence {framedEndAt (headerEnd b"POST /p HTTP/1.1\r\nHost: t\r\nContent-Length: 16385\r\n\r\n") b"POST /p HTTP/1.1\r\nHost: t\r\nContent-Length: 16385\r\n\r\n" ≡ framedEnd b"POST /p HTTP/1.1\r\nHost: t\r\nContent-Length: 16385\r\n\r\n" : U64} := refl
+def framed-end-at-stream : evidence {framedEndAt (headerEnd b"POST /p HTTP/1.1\r\nHost: t\r\nContent-Length: 16385\r\n\r\n") (toU64 0) (toU64 1) (toU64 16385) b"POST /p HTTP/1.1\r\nHost: t\r\nContent-Length: 16385\r\n\r\n" ≡ framedEnd b"POST /p HTTP/1.1\r\nHost: t\r\nContent-Length: 16385\r\n\r\n" : U64} := refl
 
 def header-end-at-past : evidence {headerEndAt (toU64 99) b"GET / HTTP/1.1\r\nHost: h\r\n\r\n" ≡ headerEnd b"GET / HTTP/1.1\r\nHost: h\r\n\r\n" : U64} := refl
+
+-- Wrong stored facts are ignored when the end is unknown or past
+-- the slice: framedEndAt falls back to one scan.
+def framed-end-at-unknown-get : evidence {framedEndAt (toU64 0) (toU64 1) (toU64 1) (toU64 99) b"GET / HTTP/1.1\r\nHost: h\r\n\r\n" ≡ framedEnd b"GET / HTTP/1.1\r\nHost: h\r\n\r\n" : U64} := refl
+
+def framed-end-at-past-get : evidence {framedEndAt (toU64 99) (toU64 1) (toU64 1) (toU64 99) b"GET / HTTP/1.1\r\nHost: h\r\n\r\n" ≡ framedEnd b"GET / HTTP/1.1\r\nHost: h\r\n\r\n" : U64} := refl
+
+def framed-end-at-unknown-post : evidence {framedEndAt (toU64 0) (toU64 1) (toU64 0) (toU64 0) b"POST /posts HTTP/1.1\r\nHost: t\r\nContent-Length: 2\r\n\r\nab" ≡ framedEnd b"POST /posts HTTP/1.1\r\nHost: t\r\nContent-Length: 2\r\n\r\nab" : U64} := refl
+
+def framed-end-at-past-post : evidence {framedEndAt (toU64 99) (toU64 1) (toU64 0) (toU64 0) b"POST /posts HTTP/1.1\r\nHost: t\r\nContent-Length: 2\r\n\r\nab" ≡ framedEnd b"POST /posts HTTP/1.1\r\nHost: t\r\nContent-Length: 2\r\n\r\nab" : U64} := refl
+
+def framed-end-hs-get : evidence {framedEndHs (headerEnd b"GET / HTTP/1.1\r\nHost: h\r\n\r\n") (toU64 0) (toU64 0) (toU64 0) b"GET / HTTP/1.1\r\nHost: h\r\n\r\n" ≡ framedEnd b"GET / HTTP/1.1\r\nHost: h\r\n\r\n" : U64} := refl
+
+def framed-end-hs-post : evidence {framedEndHs (headerEnd b"POST /posts HTTP/1.1\r\nHost: t\r\nContent-Length: 2\r\n\r\nab") (toU64 0) (toU64 1) (toU64 2) b"POST /posts HTTP/1.1\r\nHost: t\r\nContent-Length: 2\r\n\r\nab" ≡ framedEnd b"POST /posts HTTP/1.1\r\nHost: t\r\nContent-Length: 2\r\n\r\nab" : U64} := refl
+
+def framed-end-hs-chunk : evidence {framedEndHs (headerEnd b"POST /p HTTP/1.1\r\nHost: t\r\nTransfer-Encoding: chunked\r\n\r\n0\r\n\r\n") (toU64 1) (toU64 0) (toU64 0) b"POST /p HTTP/1.1\r\nHost: t\r\nTransfer-Encoding: chunked\r\n\r\n0\r\n\r\n" ≡ framedEnd b"POST /p HTTP/1.1\r\nHost: t\r\nTransfer-Encoding: chunked\r\n\r\n0\r\n\r\n" : U64} := refl
+
+def framed-end-hs-stream : evidence {framedEndHs (headerEnd b"POST /p HTTP/1.1\r\nHost: t\r\nContent-Length: 16385\r\n\r\n") (toU64 0) (toU64 1) (toU64 16385) b"POST /p HTTP/1.1\r\nHost: t\r\nContent-Length: 16385\r\n\r\n" ≡ framedEnd b"POST /p HTTP/1.1\r\nHost: t\r\nContent-Length: 16385\r\n\r\n" : U64} := refl
+
