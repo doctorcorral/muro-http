@@ -22,6 +22,7 @@ c/test_workers
 c/test_http11
 c/test_step
 c/test_step_slice
+c/test_book_host
 c/muro-httpd
 c/muro-hello
 c/muro-hello-book

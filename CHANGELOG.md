@@ -2,6 +2,51 @@
 
 ## 0.1.0-dev — unreleased
 
+- Persist the first-scan framing facts next to `hend` and skip the
+  `framedEndAt` rescan on a later finish. After classify, `St` and
+  `Out` carry `te` (1 when Transfer-Encoding is chunked), `sawCL` (1
+  when Content-Length was seen), and `cl` (that length, or 0). Those
+  facts are recorded only when `endKnown` (`hend` in `(0, sliceLen]`);
+  otherwise they stay 0. `framedEndAt` now takes the stored facts and
+  uses `framedEndHs` without a new `scan` when the end is known. An
+  unknown or past-slice end falls back to one `scan` and ignores the
+  stored facts. `finishWrite` still binds that end once. A keep-alive
+  tail starts the next request with `hend` and the facts reset to 0.
+  Adapter `BookStep` stores `bte`, `bsawcl`, and `bcl`;
+  `http_step_still` / `http_step_hand` / `http_step_overStatus` /
+  `http_step_framedEndAt` take them; `out_field` 12–14 are the new
+  facts (fields 0–11 unchanged). The production book host persists
+  them on `HttpStep.{te,sawcl,cl}` through `load_http` / `store_http`.
+  Evidence is honest `refl`: GET / short POST / chunked / stream facts
+  on the step, idle and pipelined tails at 0, `framedEndHs` of those
+  same requests, and `framedEndAt` falling back on an unknown or
+  past-slice end even when the stored facts are wrong. No specs were
+  weakened. `book_is` compares fields 12–14. Keep-alive and pipeline
+  cases assert idle facts are 0 and that a pipelined GET then GET /x
+  rebinds after the buffer slides. A C test ignores wrong facts when
+  the end is unknown or past the slice. `carry_header_end_book` and
+  `./c/test_book_host` check a short POST carries `sawCL`/`cl` into the
+  body step, a chunked request carries `te=1`, keep-alive idle clears
+  the facts, and the same pipelined pair rebinds them after
+  `consume()`. `mix muro.check --fuel 5000000` on `request.muro` and
+  `step.muro` reports `All terms check`. `./c/test_step_slice` is
+  scripted 535, book-cmp 10971, book-skip 0, quiet-read-shut 74.
+  `c/muro-hello` and `c/muro-hello-book` each pass 71 conformance
+  cases. Versus `origin/main` the book adds 18 evidence theorems on
+  `step.muro` (204 total) and 8 on `request.muro` (114 total). On
+  omarzo, instructions/request (user-space `perf_event_open`, 200k
+  keepalive, workers 4) went from 41757 to 20721 on a one-read GET,
+  41943 to 21999 when headers were split over three reads
+  (`--split-headers=200`), and 55025 to 26282 on a late POST body
+  (`--split-body=200`). The C server stayed at 5879 / 12147 / 6881
+  (main binary). Median of five interleaved sittings (each sitting is
+  the median of three 5 s keepalive runs, `c=128`, workers 4,
+  `taskset` 0–3 / 4–7, governor `powersave`): book 125030 rps to
+  164018 rps on GET (1.312×), 79846 rps to 89171 rps on split headers
+  (1.117×), and 87048 rps to 113048 rps on the late POST body
+  (1.299×). Load was high during the rps sittings (1-minute load
+  often 14–29); the instruction counts are the tighter comparison.
+
 - Pin muro `0.22.33` from Hex (`{:muro, "~> 0.22.33"}` in
   `mix.exs`, `muro: "0.22.33"` in `muro.exs`), the work-saved
   inliner and known-dead-arm specialization from
