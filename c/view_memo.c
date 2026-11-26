@@ -95,7 +95,7 @@ Classified *classify(muro__slice s) {
   sl = slot_for(s);
   if (sl->has_cls) return &sl->cls;
   c = classify_uncached(s);
-  if (!c || !c->muro__as.classified.muro__f_0 || !c->muro__as.classified.muro__f_1) return c;
+  if (!c) return c;
   sl->cls.muro__field_tag = c->muro__field_tag;
   sl->cls.muro__as.classified.muro__f_0 = c->muro__as.classified.muro__f_0;
   sl->cls.muro__as.classified.muro__f_1 = c->muro__as.classified.muro__f_1;

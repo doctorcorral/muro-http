@@ -131,7 +131,7 @@ static int step_ev(HttpStep *st, StepOut *out, Ev ev) {
       (phase == MURO_STEP_PH_READ || phase == MURO_STEP_PH_IDLE) &&
       (tag == EV_BYTES || (tag == EV_EOF && buf.n > 0))) {
     Classified *c = classify(buf);
-    status = c->muro__as.classified.muro__f_0->muro__field_tag;
+    status = (int)c->muro__as.classified.muro__f_0;
   }
   /* n1 is 1 for an HTTP status 400..599. That is reply-bad and
      closes the connection. Any other handler status is reply-ok. */

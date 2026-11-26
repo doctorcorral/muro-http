@@ -513,8 +513,8 @@ static void read_class(const uint8_t *p, size_t n, int *status, int *keep_no) {
   Classified *c;
   sl = muro__slice_of(p ? p : (const uint8_t *)"", n);
   c = classify(sl);
-  *status = (int)c->muro__as.classified.muro__f_0->muro__field_tag;
-  *keep_no = (int)c->muro__as.classified.muro__f_1->muro__field_tag;
+  *status = (int)c->muro__as.classified.muro__f_0;
+  *keep_no = (int)c->muro__as.classified.muro__f_1;
   muro_http_reset();
 }
 
