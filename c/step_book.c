@@ -76,21 +76,27 @@ static uint64_t out_field(http_step_Out o, int i) {
   case 10: return o.muro__as.out.muro__f_10;
   case 9: return o.muro__as.out.muro__f_9;
   case 11: return o.muro__as.out.muro__f_11;
+  case 12: return o.muro__as.out.muro__f_12;
+  case 13: return o.muro__as.out.muro__f_13;
+  case 14: return o.muro__as.out.muro__f_14;
   default: return 0;
   }
 }
 
 static http_step_St book_st(const BookStep *b) {
-  return http_step_take(http_step_still(b->bphase, b->bcode, b->bleft, b->bkeep, b->bhend));
+  return http_step_take(http_step_still(b->bphase, b->bcode, b->bleft, b->bkeep, b->bhend, b->bte, b->bsawcl, b->bcl));
 }
 
 static void remember(BookStep *b, uint64_t phase, uint64_t code, uint64_t left, uint64_t keep,
-                     uint64_t hend) {
+                     uint64_t hend, uint64_t te, uint64_t sawcl, uint64_t cl) {
   b->bphase = phase;
   b->bcode = code;
   b->bleft = left;
   b->bkeep = keep;
   b->bhend = hend;
+  b->bte = te;
+  b->bsawcl = sawcl;
+  b->bcl = cl;
 }
 
 static void image_of(BookStep *b, uint64_t phase, int status_now) {
@@ -153,7 +159,7 @@ static void prepare_in(BookStep *b, const StepIn *in) {
     b->bcode = 0;
     b->bleft = 0;
     b->bkeep = 0;
-    /* bhend stays: this is the same request whose headers were already found. */
+    /* bhend and the framing facts stay: this is the same request whose headers were already found. */
   }
   if (b->hin && b->in && b->in_len) host_in_capture(b->hin, b->in, b->in_len);
 }
@@ -344,7 +350,7 @@ static int render_handler(BookStep *b, const StepIn *in, uint64_t book_keep, int
       uint64_t ocode;
       uint64_t ocover;
       muro_http_reset();
-      ob = http_step_overStatus((uint64_t)over, b->bhend);
+      ob = http_step_overStatus((uint64_t)over, b->bhend, b->bte, b->bsawcl, b->bcl);
       muro_http_reset();
       ophase = out_field(ob, 0);
       ocode = out_field(ob, 1);
@@ -352,7 +358,7 @@ static int render_handler(BookStep *b, const StepIn *in, uint64_t book_keep, int
       if (ocover || ophase != 1) return -1;
       clear_pull(b);
       if (render_literal(b, in, 0, ocode, note) < 0) return -1;
-      remember(b, 1, ocode, 0, 1, b->bhend);
+      remember(b, 1, ocode, 0, 1, b->bhend, b->bte, b->bsawcl, b->bcl);
       b->reply_on = 1;
       b->reply_bit = 1;
       b->reply_bad = 1;
@@ -376,7 +382,7 @@ static int render_handler(BookStep *b, const StepIn *in, uint64_t book_keep, int
     size_t n;
     muro_http_reset();
     bk = http_step_hand(book_keep, hclose, hbad, howe, (uint64_t)href, hpull, hver, hhead,
-                        (uint64_t)fit, b->bhend);
+                        (uint64_t)fit, b->bhend, b->bte, b->bsawcl, b->bcl);
     muro_http_reset();
     phase = out_field(bk, 0);
     code = out_field(bk, 1);
@@ -384,7 +390,7 @@ static int render_handler(BookStep *b, const StepIn *in, uint64_t book_keep, int
     keep = out_field(bk, 10);
     if (phase == 5) {
       clear_pull(b);
-      remember(b, 5, code, 0, 1, 0);
+      remember(b, 5, code, 0, 1, 0, 0, 0, 0);
       b->out_len = 0;
       b->out_off = 0;
       b->rendered = 0;
@@ -408,14 +414,14 @@ static int render_handler(BookStep *b, const StepIn *in, uint64_t book_keep, int
       clear_pull(b);
       if (render_literal(b, in, 0, 500, note) < 0) {
         *note = MURO_STEP_NOTE_TOO_BIG;
-        remember(b, 5, 0, 0, 1, 0);
+        remember(b, 5, 0, 0, 1, 0, 0, 0, 0);
         b->rendered = 0;
         b->owe = howe ? 1 : 0;
         return 2;
       }
       *note = MURO_STEP_NOTE_TOO_BIG_COMMIT;
       b->owe = 1;
-      remember(b, 3, 500, 0, 1, b->bhend);
+      remember(b, 3, 500, 0, 1, b->bhend, b->bte, b->bsawcl, b->bcl);
       b->reply_on = 1;
       b->reply_bit = 1;
       b->reply_bad = 1;
@@ -428,7 +434,7 @@ static int render_handler(BookStep *b, const StepIn *in, uint64_t book_keep, int
       b->out_off = 0;
       b->rendered = 1;
       b->owe = resp.owe_status ? 1 : 0;
-      remember(b, 3, 0, 0, keep, b->bhend);
+      remember(b, 3, 0, 0, keep, b->bhend, b->bte, b->bsawcl, b->bcl);
       b->reply_on = 1;
       /* Span 5 is close-delimited: HEAD or not HTTP/1.1. c/step.c
          forces the reply bit, so the image keep becomes 1. */
@@ -439,7 +445,7 @@ static int render_handler(BookStep *b, const StepIn *in, uint64_t book_keep, int
     clear_pull(b);
     if (!fit) {
       *note = MURO_STEP_NOTE_TOO_BIG;
-      remember(b, 5, 0, 0, 1, 0);
+      remember(b, 5, 0, 0, 1, 0, 0, 0, 0);
       b->rendered = 0;
       b->out_len = 0;
       b->owe = 0;
@@ -666,7 +672,7 @@ int muro_book_step(BookStep *st, const StepIn *in, StepOut *out) {
   muro__slice sl;
   http_step_Out bk;
   uint64_t owed;
-  uint64_t prev_phase, prev_code, prev_left, prev_keep, prev_hend;
+  uint64_t prev_phase, prev_code, prev_left, prev_keep, prev_hend, prev_te, prev_sawcl, prev_cl;
   uint64_t phase, code, close_b, status_b, rd, wr, span, cover, left, wake, keep;
   uint64_t fin_end = 0;
   int finishing = 0;
@@ -707,6 +713,9 @@ int muro_book_step(BookStep *st, const StepIn *in, StepOut *out) {
   prev_left = st->bleft;
   prev_keep = st->bkeep;
   prev_hend = st->bhend;
+  prev_te = st->bte;
+  prev_sawcl = st->bsawcl;
+  prev_cl = st->bcl;
   if ((in->kind == MURO_STEP_BYTES || in->kind == MURO_STEP_PEER_CLOSED) && !st->shut)
     prepare_in(st, in);
   /* Progress is take_fact, before the pump fills another pull span.
@@ -733,7 +742,7 @@ int muro_book_step(BookStep *st, const StepIn *in, StepOut *out) {
         return 0;
       }
       if (st->out_len > 0) {
-        remember(st, prev_phase, prev_code, 0, prev_keep, st->bhend);
+        remember(st, prev_phase, prev_code, 0, prev_keep, st->bhend, st->bte, st->bsawcl, st->bcl);
         st->image = MURO_STEP_PH_WRITE;
         st->rendered = 1;
         out->wake_at = 0;
@@ -767,12 +776,12 @@ int muro_book_step(BookStep *st, const StepIn *in, StepOut *out) {
   if ((prev_phase == 1 || prev_phase == 3) && in->kind == MURO_STEP_WROTE) {
     uint64_t base = prev_left == 0 ? owed : prev_left;
     if ((uint64_t)in->n >= base) finishing = 1;
-    if (finishing && prev_keep == 0) fin_end = http_step_framedEndAt(prev_hend, sl);
+    if (finishing && prev_keep == 0) fin_end = http_step_framedEndAt(prev_hend, prev_te, prev_sawcl, prev_cl, sl);
     muro_http_reset();
   } else {
     muro_http_reset();
   }
-  remember(st, phase, code, left, keep, out_field(bk, 11));
+  remember(st, phase, code, left, keep, out_field(bk, 11), out_field(bk, 12), out_field(bk, 13), out_field(bk, 14));
   if (cover) {
     st->last_cover = 1;
     return closed_out(st, out, MURO_BOOK_NOTE_COVER, 1);
@@ -960,6 +969,9 @@ static void load_http(BookStep *b, HttpStep *st) {
   if (b->cont_off > b->cont_len) b->cont_off = b->cont_len;
   if (b->cont_len) memcpy(b->cont, st->cont, b->cont_len);
   b->bhend = st->hend;
+  b->bte = st->te;
+  b->bsawcl = st->sawcl;
+  b->bcl = st->cl;
 }
 
 static void store_http(HttpStep *st, const BookStep *b, StepOut *out) {
@@ -993,6 +1005,9 @@ static void store_http(HttpStep *st, const BookStep *b, StepOut *out) {
   if (st->cont_len > sizeof st->cont) st->cont_len = sizeof st->cont;
   if (st->cont_len) memcpy(st->cont, b->cont, st->cont_len);
   st->hend = b->bhend;
+  st->te = b->bte;
+  st->sawcl = b->bsawcl;
+  st->cl = b->bcl;
   if (out && out->status && b->spare_len && out->status >= b->spare &&
       out->status < b->spare + sizeof b->spare) {
     out->status = st->spare + (size_t)(out->status - b->spare);

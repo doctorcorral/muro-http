@@ -193,6 +193,9 @@ static uint64_t bo_left(http_step_Out o) { return o.muro__as.out.muro__f_8; }
 static uint64_t bo_wake(http_step_Out o) { return o.muro__as.out.muro__f_9; }
 static uint64_t bo_keep(http_step_Out o) { return o.muro__as.out.muro__f_10; }
 static uint64_t bo_hend(http_step_Out o) { return o.muro__as.out.muro__f_11; }
+static uint64_t bo_te(http_step_Out o) { return o.muro__as.out.muro__f_12; }
+static uint64_t bo_sawCL(http_step_Out o) { return o.muro__as.out.muro__f_13; }
+static uint64_t bo_cl(http_step_Out o) { return o.muro__as.out.muro__f_14; }
 
 static muro__slice sl_of(const char *s) {
   muro__slice sl;
@@ -215,6 +218,42 @@ static uint64_t slice_hend(const char *buf) {
   uint64_t h = http_step_headerEnd(sl);
   if (h == 0 || h == sl.n + 1) return 0;
   return h;
+}
+
+static void slice_fr(const char *buf, uint64_t *te, uint64_t *sawCL, uint64_t *cl) {
+  muro__slice sl = sl_of(buf);
+  uint64_t hend = slice_hend(buf);
+  http_step_HSt hs;
+  if (hend == 0) {
+    *te = 0;
+    *sawCL = 0;
+    *cl = 0;
+    return;
+  }
+  muro_http_reset();
+  hs = http_step_scan(sl);
+  *te = http_step_teWhen(hend, hs, sl);
+  *sawCL = http_step_sawCLWhen(hend, hs, sl);
+  *cl = http_step_clWhen(hend, hs, sl);
+  muro_http_reset();
+}
+
+static uint64_t slice_te(const char *buf) {
+  uint64_t te, sawCL, cl;
+  slice_fr(buf, &te, &sawCL, &cl);
+  return te;
+}
+
+static uint64_t slice_sawCL(const char *buf) {
+  uint64_t te, sawCL, cl;
+  slice_fr(buf, &te, &sawCL, &cl);
+  return sawCL;
+}
+
+static uint64_t slice_cl(const char *buf) {
+  uint64_t te, sawCL, cl;
+  slice_fr(buf, &te, &sawCL, &cl);
+  return cl;
 }
 
 static void set_fact(Box *b, int kind, size_t n) {
@@ -314,21 +353,25 @@ static int box_bind(Box *b, uint64_t max_body) {
 static void dump_book(const char *name, http_step_Out o) {
   fprintf(stderr,
           "%s: book phase=%llu code=%llu close=%llu status=%llu read=%llu write=%llu span=%llu "
-          "cover=%llu left=%llu wake=%llu keep=%llu hend=%llu\n",
+          "cover=%llu left=%llu wake=%llu keep=%llu hend=%llu te=%llu sawCL=%llu cl=%llu\n",
           name, (unsigned long long)bo_phase(o), (unsigned long long)bo_code(o),
           (unsigned long long)bo_close(o), (unsigned long long)bo_status(o),
           (unsigned long long)bo_read(o), (unsigned long long)bo_write(o),
           (unsigned long long)bo_span(o), (unsigned long long)bo_cover(o),
           (unsigned long long)bo_left(o), (unsigned long long)bo_wake(o),
-          (unsigned long long)bo_keep(o), (unsigned long long)bo_hend(o));
+          (unsigned long long)bo_keep(o), (unsigned long long)bo_hend(o),
+          (unsigned long long)bo_te(o), (unsigned long long)bo_sawCL(o),
+          (unsigned long long)bo_cl(o));
 }
 
 static int book_is(http_step_Out o, uint64_t phase, uint64_t code, uint64_t close, uint64_t status,
                    uint64_t rd, uint64_t wr, uint64_t span, uint64_t cover, uint64_t left,
-                   uint64_t wake, uint64_t keep, uint64_t hend, const char *name) {
+                   uint64_t wake, uint64_t keep, uint64_t hend, uint64_t te, uint64_t sawCL,
+                   uint64_t cl, const char *name) {
   if (bo_phase(o) == phase && bo_code(o) == code && bo_close(o) == close && bo_status(o) == status &&
       bo_read(o) == rd && bo_write(o) == wr && bo_span(o) == span && bo_cover(o) == cover &&
-      bo_left(o) == left && bo_wake(o) == wake && bo_keep(o) == keep && bo_hend(o) == hend)
+      bo_left(o) == left && bo_wake(o) == wake && bo_keep(o) == keep && bo_hend(o) == hend &&
+      bo_te(o) == te && bo_sawCL(o) == sawCL && bo_cl(o) == cl)
     return 0;
   dump_book(name, o);
   return -1;
@@ -341,6 +384,15 @@ static int book_hend(http_step_Out o, uint64_t hend, const char *name) {
   return -1;
 }
 
+static int book_facts(http_step_Out o, uint64_t te, uint64_t sawCL, uint64_t cl, const char *name) {
+  if (bo_te(o) == te && bo_sawCL(o) == sawCL && bo_cl(o) == cl) return 0;
+  fprintf(stderr, "%s: book facts te=%llu sawCL=%llu cl=%llu want %llu %llu %llu\n", name,
+          (unsigned long long)bo_te(o), (unsigned long long)bo_sawCL(o),
+          (unsigned long long)bo_cl(o), (unsigned long long)te, (unsigned long long)sawCL,
+          (unsigned long long)cl);
+  return -1;
+}
+
 /* Host HttpStep.hend, adapter BookStep.bhend, and the book's Out.hend
    must agree. This is how a dropped host-bridge field is caught. */
 static int hend_agree(const HttpStep *st, const BookStep *bk, http_step_Out o, uint64_t hend,
@@ -349,6 +401,24 @@ static int hend_agree(const HttpStep *st, const BookStep *bk, http_step_Out o, u
   fprintf(stderr, "%s: hend out %llu host %llu book %llu want %llu\n", name,
           (unsigned long long)bo_hend(o), (unsigned long long)(st ? st->hend : 0),
           (unsigned long long)(bk ? bk->bhend : 0), (unsigned long long)hend);
+  return -1;
+}
+
+static int facts_agree(const HttpStep *st, const BookStep *bk, http_step_Out o, uint64_t te,
+                       uint64_t sawCL, uint64_t cl, const char *name) {
+  int ok = bo_te(o) == te && bo_sawCL(o) == sawCL && bo_cl(o) == cl && bk && bk->bte == te &&
+           bk->bsawcl == sawCL && bk->bcl == cl;
+  if (ok && st && (st->te != te || st->sawcl != sawCL || st->cl != cl)) ok = 0;
+  if (ok) return 0;
+  fprintf(stderr,
+          "%s: facts out %llu %llu %llu book %llu %llu %llu host %llu %llu %llu want %llu %llu "
+          "%llu\n",
+          name, (unsigned long long)bo_te(o), (unsigned long long)bo_sawCL(o),
+          (unsigned long long)bo_cl(o), (unsigned long long)(bk ? bk->bte : 0),
+          (unsigned long long)(bk ? bk->bsawcl : 0), (unsigned long long)(bk ? bk->bcl : 0),
+          (unsigned long long)(st ? st->te : 0), (unsigned long long)(st ? st->sawcl : 0),
+          (unsigned long long)(st ? st->cl : 0), (unsigned long long)te, (unsigned long long)sawCL,
+          (unsigned long long)cl);
   return -1;
 }
 
@@ -407,10 +477,10 @@ static uint64_t st_phase(http_step_St st) { return st.muro__as.st.muro__f_0; }
 
 static int check_shape(int kind, const StepOut *o, http_step_Out bk, const Box *b, uint64_t code,
                        const char *word, uint64_t left, uint64_t wake, uint64_t keep, uint64_t hend,
-                       const char *name) {
+                       uint64_t te, uint64_t sawCL, uint64_t cl, const char *name) {
   if (wake_is(o, wake, name) < 0) return -1;
   if (kind == DEC_MORE) {
-    if (book_is(bk, 0, 0, 0, 0, 1, 0, 0, 0, 0, wake, 0, hend,  name) < 0) return -1;
+    if (book_is(bk, 0, 0, 0, 0, 1, 0, 0, 0, 0, wake, 0, hend, te, sawCL, cl, name) < 0) return -1;
     if (host_flags(o, 0, 0, 1, 0, name) < 0) return -1;
     if ((o->bytes && o->len) || (o->status && o->status_len)) return fail(name);
     if (phase_is(b, MURO_STEP_PH_READ, name) < 0) return -1;
@@ -418,7 +488,7 @@ static int check_shape(int kind, const StepOut *o, http_step_Out bk, const Box *
     return 0;
   }
   if (kind == DEC_QUIET) {
-    if (book_is(bk, 2, code, 1, 0, 0, 0, 0, 0, 0, 0, 0, hend,  name) < 0) return -1;
+    if (book_is(bk, 2, code, 1, 0, 0, 0, 0, 0, 0, 0, 0, hend, te, sawCL, cl, name) < 0) return -1;
     if (host_flags(o, 1, 0, 0, 0, name) < 0) return -1;
     if ((o->bytes && o->len) || (o->status && o->status_len) || o->status_now) return fail(name);
     if (phase_is(b, MURO_STEP_PH_CLOSED, name) < 0) return -1;
@@ -426,7 +496,7 @@ static int check_shape(int kind, const StepOut *o, http_step_Out bk, const Box *
     return 0;
   }
   if (kind == DEC_REPLY) {
-    if (book_is(bk, 3, 0, 0, 0, 0, 1, 2, 0, left, 0, keep, hend,  name) < 0) return -1;
+    if (book_is(bk, 3, 0, 0, 0, 0, 1, 2, 0, left, 0, keep, hend, te, sawCL, cl, name) < 0) return -1;
     if (host_flags(o, 0, 0, 0, 1, name) < 0) return -1;
     if (!o->bytes || !o->len) return fail(name);
     if (!in_range(o->bytes, o->len, b->outb, OUT_CAP)) return fail(name);
@@ -442,7 +512,7 @@ static int check_shape(int kind, const StepOut *o, http_step_Out bk, const Box *
     return 0;
   }
   if (kind == DEC_IDLE) {
-    if (book_is(bk, 4, 0, 0, 0, 1, 0, 0, 0, 0, wake, 0, hend,  name) < 0) return -1;
+    if (book_is(bk, 4, 0, 0, 0, 1, 0, 0, 0, 0, wake, 0, hend, te, sawCL, cl, name) < 0) return -1;
     if (host_flags(o, 0, 0, 1, 0, name) < 0) return -1;
     if ((o->bytes && o->len) || (o->status && o->status_len)) return fail(name);
     if (phase_is(b, MURO_STEP_PH_IDLE, name) < 0) return -1;
@@ -450,7 +520,7 @@ static int check_shape(int kind, const StepOut *o, http_step_Out bk, const Box *
     return 0;
   }
   if (kind == DEC_STATUS) {
-    if (book_is(bk, 2, code, 1, 1, 0, 0, 1, 0, 0, 0, 0, hend,  name) < 0) return -1;
+    if (book_is(bk, 2, code, 1, 1, 0, 0, 1, 0, 0, 0, 0, hend, te, sawCL, cl, name) < 0) return -1;
     if (host_flags(o, 1, 1, 0, 0, name) < 0) return -1;
     if (o->bytes && o->len) return fail(name);
     if (!o->status || !o->status_len) return fail(name);
@@ -462,7 +532,7 @@ static int check_shape(int kind, const StepOut *o, http_step_Out bk, const Box *
     return 0;
   }
   if (kind == DEC_OWE) {
-    if (book_is(bk, 1, code, 0, 0, 0, 1, 2, 0, 0, 0, 1, hend,  name) < 0) return -1;
+    if (book_is(bk, 1, code, 0, 0, 0, 1, 2, 0, 0, 0, 1, hend, te, sawCL, cl, name) < 0) return -1;
     if (host_flags(o, 0, 0, 0, 1, name) < 0) return -1;
     if (!o->bytes || !o->len || o->bytes != b->outb) return fail(name);
     if (!in_range(o->bytes, o->len, b->outb, OUT_CAP)) return fail(name);
@@ -477,9 +547,10 @@ static int check_shape(int kind, const StepOut *o, http_step_Out bk, const Box *
 
 /* phase is the book phase: 1 protocol write, 3 handler write. */
 static int check_still(int phase, const StepOut *o, http_step_Out bk, const Box *b, uint64_t code,
-                       uint64_t left, uint64_t keep, uint64_t hend, const char *name) {
+                       uint64_t left, uint64_t keep, uint64_t hend, uint64_t te, uint64_t sawCL,
+                       uint64_t cl, const char *name) {
   if (phase != 1 && phase != 3) return fail(name);
-  if (book_is(bk, (uint64_t)phase, code, 0, 0, 0, 1, 2, 0, left, 0, keep, hend,  name) < 0) return -1;
+  if (book_is(bk, (uint64_t)phase, code, 0, 0, 0, 1, 2, 0, left, 0, keep, hend, te, sawCL, cl, name) < 0) return -1;
   if (host_flags(o, 0, 0, 0, 1, name) < 0) return -1;
   if (!o->bytes || o->len != left) return fail(name);
   if (!in_range(o->bytes, o->len, b->outb, OUT_CAP)) return fail(name);
@@ -659,6 +730,7 @@ static int decide(int kind, int fact, const char *buf, uint64_t max_body, uint64
   StepOut o;
   http_step_Out bk;
   uint64_t hend = 0;
+  uint64_t te = 0, sawCL = 0, cl = 0;
   if (box_bind(&b, max_body) < 0) return -1;
   memset(&o, 0, sizeof o);
   if (fact != MURO_STEP_ACCEPTED) {
@@ -691,7 +763,8 @@ static int decide(int kind, int fact, const char *buf, uint64_t max_body, uint64
   }
   if ((kind == DEC_REPLY || kind == DEC_OWE || (kind == DEC_MORE && fact == MURO_STEP_BYTES)))
     hend = slice_hend(buf);
-  if (check_shape(kind, &o, bk, &b, code, word, left, wake, keep, hend, name) < 0) {
+  if (hend) slice_fr(buf, &te, &sawCL, &cl);
+  if (check_shape(kind, &o, bk, &b, code, word, left, wake, keep, hend, te, sawCL, cl, name) < 0) {
     box_free(&b);
     return -1;
   }
@@ -737,7 +810,7 @@ static int later_fact(const char *req, uint64_t max_body, uint64_t code, int fac
   bk = book_at(closed, fact, sl_of(fact == MURO_STEP_BYTES ? next : req), max_body, 0, 0,
                b.in.now_ms, b.in.deadline, b.st.idle_ms);
   rc = muro_http_step(&b.st, &b.in, &o);
-  if (book_is(bk, 2, code, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, name) < 0) {
+  if (book_is(bk, 2, code, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, name) < 0) {
     box_free(&b);
     return -1;
   }
@@ -798,7 +871,7 @@ static int owe_then(const char *req, uint64_t max_body, uint64_t code, const cha
     return -1;
   }
   snprintf(tag, sizeof tag, "%s-peer", name);
-  if (check_shape(DEC_OWE, &o, bk, &b, code, word, 0, 0, 1, slice_hend(req), tag) < 0) {
+  if (check_shape(DEC_OWE, &o, bk, &b, code, word, 0, 0, 1, slice_hend(req), slice_te(req), slice_sawCL(req), slice_cl(req), tag) < 0) {
     box_free(&b);
     return -1;
   }
@@ -821,7 +894,7 @@ static int owe_then(const char *req, uint64_t max_body, uint64_t code, const cha
     return fail(name);
   }
   snprintf(tag, sizeof tag, "%s-now", name);
-  if (check_shape(DEC_OWE, &o, bk, &b, code, word, 0, 0, 1, slice_hend(req), tag) < 0) {
+  if (check_shape(DEC_OWE, &o, bk, &b, code, word, 0, 0, 1, slice_hend(req), slice_te(req), slice_sawCL(req), slice_cl(req), tag) < 0) {
     box_free(&b);
     return -1;
   }
@@ -845,7 +918,7 @@ static int owe_then(const char *req, uint64_t max_body, uint64_t code, const cha
     return -1;
   }
   snprintf(tag, sizeof tag, "%s-wrote", name);
-  if (check_shape(DEC_QUIET, &o, bk, &b, code, NULL, 0, 0, 0, 0, tag) < 0) {
+  if (check_shape(DEC_QUIET, &o, bk, &b, code, NULL, 0, 0, 0, 0, 0, 0, 0, tag) < 0) {
     box_free(&b);
     return -1;
   }
@@ -855,7 +928,7 @@ static int owe_then(const char *req, uint64_t max_body, uint64_t code, const cha
   bk = book_at(owing, MURO_STEP_PEER_CLOSED, sl_of(req), max_body, 0, 0, b.in.now_ms, b.in.deadline,
                b.st.idle_ms);
   rc = muro_http_step(&b.st, &b.in, &o);
-  if (book_is(bk, 2, code, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, name) < 0) {
+  if (book_is(bk, 2, code, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, name) < 0) {
     box_free(&b);
     return -1;
   }
@@ -891,7 +964,7 @@ static int owe_failed(const char *req, uint64_t max_body, uint64_t code, const c
     fprintf(stderr, "%s: handwritten-owe-failed step failed\n", name);
     return -1;
   }
-  if (check_shape(DEC_QUIET, &o, bk, &b, code, NULL, 0, 0, 0, 0, name) < 0) {
+  if (check_shape(DEC_QUIET, &o, bk, &b, code, NULL, 0, 0, 0, 0, 0, 0, 0, name) < 0) {
     box_free(&b);
     return -1;
   }
@@ -927,7 +1000,7 @@ static int owe_short(const char *req, uint64_t max_body, uint64_t code, const ch
     return fail(name);
   }
   snprintf(tag, sizeof tag, "%s-short", name);
-  if (check_still(1, &o, bk, &b, code, (uint64_t)seen.len - 1, 1, slice_hend(req), tag) < 0) {
+  if (check_still(1, &o, bk, &b, code, (uint64_t)seen.len - 1, 1, slice_hend(req), slice_te(req), slice_sawCL(req), slice_cl(req), tag) < 0) {
     box_free(&b);
     return -1;
   }
@@ -941,7 +1014,7 @@ static int owe_short(const char *req, uint64_t max_body, uint64_t code, const ch
     return fail(name);
   }
   snprintf(tag, sizeof tag, "%s-rest", name);
-  if (check_shape(DEC_QUIET, &o, bk, &b, code, NULL, 0, 0, 0, 0, tag) < 0) {
+  if (check_shape(DEC_QUIET, &o, bk, &b, code, NULL, 0, 0, 0, 0, 0, 0, 0, tag) < 0) {
     box_free(&b);
     return -1;
   }
@@ -979,7 +1052,7 @@ static int owe_edges(const char *req, uint64_t max_body, uint64_t code, const ch
     box_free(&b);
     return fail(tag);
   }
-  if (check_shape(DEC_QUIET, &o, bk, &b, code, NULL, 0, 0, 0, 0, tag) < 0) {
+  if (check_shape(DEC_QUIET, &o, bk, &b, code, NULL, 0, 0, 0, 0, 0, 0, 0, tag) < 0) {
     box_free(&b);
     return -1;
   }
@@ -992,7 +1065,7 @@ static int owe_edges(const char *req, uint64_t max_body, uint64_t code, const ch
   owing = http_step_take(first);
   bk = book_at(owing, MURO_STEP_WROTE, sl_of(req), max_body, 0, 0, b.in.now_ms, b.in.deadline,
                b.st.idle_ms);
-  if (book_is(bk, 2, code, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, tag) < 0) {
+  if (book_is(bk, 2, code, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, tag) < 0) {
     box_free(&b);
     return -1;
   }
@@ -1016,7 +1089,7 @@ static int owe_edges(const char *req, uint64_t max_body, uint64_t code, const ch
     box_free(&b);
     return fail(tag);
   }
-  if (check_still(1, &o, bk, &b, code, (uint64_t)seen.len, 1, slice_hend(req), tag) < 0) {
+  if (check_still(1, &o, bk, &b, code, (uint64_t)seen.len, 1, slice_hend(req), slice_te(req), slice_sawCL(req), slice_cl(req), tag) < 0) {
     box_free(&b);
     return -1;
   }
@@ -1030,7 +1103,7 @@ static int owe_edges(const char *req, uint64_t max_body, uint64_t code, const ch
     box_free(&b);
     return fail(tag);
   }
-  if (check_shape(DEC_QUIET, &o, bk, &b, code, NULL, 0, 0, 0, 0, tag) < 0) {
+  if (check_shape(DEC_QUIET, &o, bk, &b, code, NULL, 0, 0, 0, 0, 0, 0, 0, tag) < 0) {
     box_free(&b);
     return -1;
   }
@@ -1121,7 +1194,7 @@ static int cap_span(int which, const char *name) {
     return fail(name);
   }
   snprintf(tag, sizeof tag, "%s-short", name);
-  if (check_still(1, &o, bk, &b, code, (uint64_t)seen.len - 1, 1, slice_hend(req), tag) < 0) {
+  if (check_still(1, &o, bk, &b, code, (uint64_t)seen.len - 1, 1, slice_hend(req), slice_te(req), slice_sawCL(req), slice_cl(req), tag) < 0) {
     box_free(&b);
     free(req);
     return -1;
@@ -1137,7 +1210,7 @@ static int cap_span(int which, const char *name) {
     return fail(name);
   }
   snprintf(tag, sizeof tag, "%s-done", name);
-  if (check_shape(DEC_QUIET, &o, bk, &b, code, NULL, 0, 0, 0, 0, tag) < 0) {
+  if (check_shape(DEC_QUIET, &o, bk, &b, code, NULL, 0, 0, 0, 0, 0, 0, 0, tag) < 0) {
     box_free(&b);
     free(req);
     return -1;
@@ -1205,7 +1278,7 @@ static int open_acc(Box *b, uint64_t max_body, uint64_t now, uint64_t dl) {
     box_free(b);
     return fail("accept");
   }
-  if (check_shape(DEC_MORE, &o, bk, b, 0, NULL, 0, wake, 0, 0,  "accept") < 0) {
+  if (check_shape(DEC_MORE, &o, bk, b, 0, NULL, 0, wake, 0, 0, 0, 0, 0,  "accept") < 0) {
     box_free(b);
     return -1;
   }
@@ -1217,7 +1290,7 @@ static int reply_bytes(Box *b, http_step_St *st, const char *buf, uint64_t keep,
   StepOut o;
   http_step_Out bk;
   if (step_both(b, st, MURO_STEP_BYTES, buf, 0, 0, &o, &bk, name) < 0) return -1;
-  if (check_shape(DEC_REPLY, &o, bk, b, 0, NULL, 0, 0, keep, slice_hend(buf), name) < 0) return -1;
+  if (check_shape(DEC_REPLY, &o, bk, b, 0, NULL, 0, 0, keep, slice_hend(buf), slice_te(buf), slice_sawCL(buf), slice_cl(buf), name) < 0) return -1;
   *st = http_step_take(bk);
   if (seen) *seen = o;
   return 0;
@@ -1230,7 +1303,7 @@ static int full_write(Box *b, http_step_St *st, StepOut seen, int kind, uint64_t
   if (step_both(b, st, MURO_STEP_WROTE, NULL, (uint64_t)seen.len, (uint64_t)seen.len, &o, &bk,
                 name) < 0)
     return -1;
-  if (check_shape(kind, &o, bk, b, code, NULL, 0, wake, 0, 0, name) < 0) return -1;
+  if (check_shape(kind, &o, bk, b, code, NULL, 0, wake, 0, 0, 0, 0, 0, name) < 0) return -1;
   *st = http_step_take(bk);
   return 0;
 }
@@ -1261,7 +1334,7 @@ static int keep_alive(void) {
     http_step_Out idle_bk =
         book_at(st, MURO_STEP_NOW, sl_mem(b.inb, muro_http_step_in_len(&b.st)), b.st.max_body, 0, 0,
                 b.in.now_ms, b.in.deadline, b.st.idle_ms);
-    if (book_hend(idle_bk, 0, "ka-idle") < 0) {
+    if (book_hend(idle_bk, 0, "ka-idle") < 0 || book_facts(idle_bk, 0, 0, 0, "ka-idle") < 0) {
       box_free(&b);
       return -1;
     }
@@ -1280,7 +1353,7 @@ static int keep_alive(void) {
     http_step_Out idle_bk =
         book_at(st, MURO_STEP_NOW, sl_mem(b.inb, muro_http_step_in_len(&b.st)), b.st.max_body, 0, 0,
                 b.in.now_ms, b.in.deadline, b.st.idle_ms);
-    if (book_hend(idle_bk, 0, "ka-second-idle") < 0) {
+    if (book_hend(idle_bk, 0, "ka-second-idle") < 0 || book_facts(idle_bk, 0, 0, 0, "ka-second-idle") < 0) {
       box_free(&b);
       return -1;
     }
@@ -1289,7 +1362,7 @@ static int keep_alive(void) {
     box_free(&b);
     return -1;
   }
-  if (check_shape(DEC_QUIET, &o, bk, &b, 0, NULL, 0, 0, 0, 0,  "ka-peer") < 0) {
+  if (check_shape(DEC_QUIET, &o, bk, &b, 0, NULL, 0, 0, 0, 0, 0, 0, 0,  "ka-peer") < 0) {
     box_free(&b);
     return -1;
   }
@@ -1308,7 +1381,7 @@ static int keep_alive(void) {
   }
   set_clock(&b, 1000, 61000);
   if (step_both(&b, &st, MURO_STEP_NOW, NULL, 0, 0, &o, &bk, "now-before") < 0 ||
-      check_shape(DEC_QUIET, &o, bk, &b, 0, NULL, 0, 0, 0, 0,  "now-before") < 0) {
+      check_shape(DEC_QUIET, &o, bk, &b, 0, NULL, 0, 0, 0, 0, 0, 0, 0,  "now-before") < 0) {
     box_free(&b);
     return -1;
   }
@@ -1323,7 +1396,7 @@ static int keep_alive(void) {
   }
   set_clock(&b, 70000, 61000);
   if (step_both(&b, &st, MURO_STEP_NOW, NULL, 0, 0, &o, &bk, "now-after") < 0 ||
-      check_shape(DEC_QUIET, &o, bk, &b, 0, NULL, 0, 0, 0, 0,  "now-after") < 0) {
+      check_shape(DEC_QUIET, &o, bk, &b, 0, NULL, 0, 0, 0, 0, 0, 0, 0,  "now-after") < 0) {
     box_free(&b);
     return -1;
   }
@@ -1346,7 +1419,7 @@ static int clocks(void) {
   idle = (uint64_t)b.st.idle_ms;
   set_clock(&b, 1000, 424242);
   if (step_both(&b, &st, MURO_STEP_BYTES, LINE, 0, 0, &o, &bk, "line-keep") < 0 ||
-      check_shape(DEC_MORE, &o, bk, &b, 0, NULL, 0, 424242, 0, 0,  "line-keep") < 0) {
+      check_shape(DEC_MORE, &o, bk, &b, 0, NULL, 0, 424242, 0, 0, 0, 0, 0,  "line-keep") < 0) {
     box_free(&b);
     return -1;
   }
@@ -1356,7 +1429,7 @@ static int clocks(void) {
   st = http_step_readSt();
   set_clock(&b, 1000, 0);
   if (step_both(&b, &st, MURO_STEP_BYTES, LINE, 0, 0, &o, &bk, "line-arm") < 0 ||
-      check_shape(DEC_MORE, &o, bk, &b, 0, NULL, 0, armed(1000, 0, idle), 0, 0,  "line-arm") < 0) {
+      check_shape(DEC_MORE, &o, bk, &b, 0, NULL, 0, armed(1000, 0, idle), 0, 0, 0, 0, 0,  "line-arm") < 0) {
     box_free(&b);
     return -1;
   }
@@ -1366,7 +1439,7 @@ static int clocks(void) {
   st = http_step_readSt();
   set_clock(&b, 1000, 424242);
   if (step_both(&b, &st, MURO_STEP_BYTES, GET, 0, 0, &o, &bk, "reply-wake") < 0 ||
-      check_shape(DEC_REPLY, &o, bk, &b, 0, NULL, 0, 0, 0, slice_hend(GET), "reply-wake") < 0) {
+      check_shape(DEC_REPLY, &o, bk, &b, 0, NULL, 0, 0, 0, slice_hend(GET), slice_te(GET), slice_sawCL(GET), slice_cl(GET), "reply-wake") < 0) {
     box_free(&b);
     return -1;
   }
@@ -1416,7 +1489,7 @@ static int one_byte(const char *buf, uint64_t keep, int done_kind, const char *n
       return fail(name);
     }
     snprintf(tag, sizeof tag, "%s-1", name);
-    if (check_still(3, &o, bk, &b, 0, owed - 1, keep, slice_hend(buf), tag) < 0) {
+    if (check_still(3, &o, bk, &b, 0, owed - 1, keep, slice_hend(buf), slice_te(buf), slice_sawCL(buf), slice_cl(buf), tag) < 0) {
       box_free(&b);
       return -1;
     }
@@ -1452,7 +1525,7 @@ static int pipeline(void) {
   }
   if (step_both(&b, &st, MURO_STEP_WROTE, NULL, (uint64_t)seen.len, (uint64_t)seen.len, &o, &bk,
                 "pipe-second") < 0 ||
-      check_shape(DEC_REPLY, &o, bk, &b, 0, NULL, 0, 0, 0, slice_hend(GET), "pipe-second") < 0) {
+      check_shape(DEC_REPLY, &o, bk, &b, 0, NULL, 0, 0, 0, slice_hend(GET), slice_te(GET), slice_sawCL(GET), slice_cl(GET), "pipe-second") < 0) {
     box_free(&b);
     return -1;
   }
@@ -1474,8 +1547,8 @@ static int pipeline(void) {
     http_step_Out tail =
         book_at(st, MURO_STEP_WROTE, sl_mem(b.inb, muro_http_step_in_len(&b.st)), b.st.max_body,
                 (uint64_t)seen.len, (uint64_t)seen.len, b.in.now_ms, b.in.deadline, b.st.idle_ms);
-    if (book_is(again, 3, 0, 0, 0, 0, 1, 2, 0, 0, 0, 0, slice_hend(GET), "pipe-full-again") < 0 ||
-        book_is(tail, 4, 0, 0, 0, 1, 0, 0, 0, 0, armed(1000, 0, 60000), 0, 0,  "pipe-tail-contract") <
+    if (book_is(again, 3, 0, 0, 0, 0, 1, 2, 0, 0, 0, 0, slice_hend(GET), slice_te(GET), slice_sawCL(GET), slice_cl(GET), "pipe-full-again") < 0 ||
+        book_is(tail, 4, 0, 0, 0, 1, 0, 0, 0, 0, armed(1000, 0, 60000), 0, 0, 0, 0, 0,  "pipe-tail-contract") <
             0) {
       box_free(&b);
       return -1;
@@ -1498,7 +1571,7 @@ static int pipeline(void) {
     http_step_Out idle_bk =
         book_at(st, MURO_STEP_NOW, sl_mem(b.inb, muro_http_step_in_len(&b.st)), b.st.max_body, 0, 0,
                 b.in.now_ms, b.in.deadline, b.st.idle_ms);
-    if (book_hend(idle_bk, 0, "pipe-done") < 0) {
+    if (book_hend(idle_bk, 0, "pipe-done") < 0 || book_facts(idle_bk, 0, 0, 0, "pipe-done") < 0) {
       box_free(&b);
       return -1;
     }
@@ -1513,7 +1586,7 @@ static int pipeline(void) {
   }
   if (step_both(&b, &st, MURO_STEP_WROTE, NULL, (uint64_t)seen.len, (uint64_t)seen.len, &o, &bk,
                 "pipe-partial") < 0 ||
-      check_shape(DEC_MORE, &o, bk, &b, 0, NULL, 0, armed(1000, 0, 60000), 0, 0,  "pipe-partial") < 0) {
+      check_shape(DEC_MORE, &o, bk, &b, 0, NULL, 0, armed(1000, 0, 60000), 0, 0, 0, 0, 0,  "pipe-partial") < 0) {
     box_free(&b);
     return -1;
   }
@@ -1543,7 +1616,7 @@ static int pipeline(void) {
   }
   if (step_both(&b, &st, MURO_STEP_WROTE, NULL, (uint64_t)seen.len, (uint64_t)seen.len, &o, &bk,
                 "pipe-diff-second") < 0 ||
-      check_shape(DEC_REPLY, &o, bk, &b, 0, NULL, 0, 0, 0, slice_hend(GET2),
+      check_shape(DEC_REPLY, &o, bk, &b, 0, NULL, 0, 0, 0, slice_hend(GET2), slice_te(GET2), slice_sawCL(GET2), slice_cl(GET2),
                   "pipe-diff-second") < 0) {
     box_free(&b);
     return -1;
@@ -1553,7 +1626,8 @@ static int pipeline(void) {
     box_free(&b);
     return -1;
   }
-  if (slice_hend(GET) == slice_hend(GET2) || book_hend(bk, slice_hend(GET2), "pipe-diff-second") < 0) {
+  if (slice_hend(GET) == slice_hend(GET2) || book_hend(bk, slice_hend(GET2), "pipe-diff-second") < 0 ||
+        book_facts(bk, 0, 0, 0, "pipe-diff-second") < 0) {
     box_free(&b);
     return fail("pipe-diff-hend");
   }
@@ -1571,7 +1645,7 @@ static int pipeline(void) {
     http_step_Out idle_bk =
         book_at(st, MURO_STEP_NOW, sl_mem(b.inb, muro_http_step_in_len(&b.st)), b.st.max_body, 0, 0,
                 b.in.now_ms, b.in.deadline, b.st.idle_ms);
-    if (book_hend(idle_bk, 0, "pipe-diff-done") < 0) {
+    if (book_hend(idle_bk, 0, "pipe-diff-done") < 0 || book_facts(idle_bk, 0, 0, 0, "pipe-diff-done") < 0) {
       box_free(&b);
       return -1;
     }
@@ -1603,7 +1677,7 @@ static int peer_drops(void) {
     box_free(&b);
     return -1;
   }
-  if (book_is(bk, 3, 0, 0, 0, 0, 1, 2, 0, 0, 0, 1, slice_hend(GET), "drop-peer") < 0 ||
+  if (book_is(bk, 3, 0, 0, 0, 0, 1, 2, 0, 0, 0, 1, slice_hend(GET), slice_te(GET), slice_sawCL(GET), slice_cl(GET), "drop-peer") < 0 ||
       host_flags(&o, 0, 0, 0, 1, "drop-peer") < 0 || wake_is(&o, 0, "drop-peer") < 0 ||
       o.len != before || o.bytes != b.outb || !conn_is(o.bytes, o.len, 0)) {
     dump_book("drop-peer", bk);
@@ -1614,7 +1688,7 @@ static int peer_drops(void) {
   st = http_step_take(bk);
   if (step_both(&b, &st, MURO_STEP_WROTE, NULL, (uint64_t)o.len, (uint64_t)o.len, &o, &bk,
                 "drop-done") < 0 ||
-      check_shape(DEC_QUIET, &o, bk, &b, 0, NULL, 0, 0, 0, 0,  "drop-done") < 0) {
+      check_shape(DEC_QUIET, &o, bk, &b, 0, NULL, 0, 0, 0, 0, 0, 0, 0,  "drop-done") < 0) {
     box_free(&b);
     return -1;
   }
@@ -1658,7 +1732,7 @@ static int peer_short(void) {
   }
   if (step_both(&b, &st, MURO_STEP_WROTE, NULL, 1, (uint64_t)full, &o, &bk, "peer-short-wrote") <
           0 ||
-      check_still(3, &o, bk, &b, 0, (uint64_t)full - 1, 0, slice_hend(GET), "peer-short-wrote") < 0) {
+      check_still(3, &o, bk, &b, 0, (uint64_t)full - 1, 0, slice_hend(GET), slice_te(GET), slice_sawCL(GET), slice_cl(GET), "peer-short-wrote") < 0) {
     box_free(&b);
     return -1;
   }
@@ -1667,7 +1741,7 @@ static int peer_short(void) {
     box_free(&b);
     return -1;
   }
-  if (book_is(bk, 3, 0, 0, 0, 0, 1, 2, 0, (uint64_t)full - 1, 0, 1, slice_hend(GET), "peer-short") < 0 ||
+  if (book_is(bk, 3, 0, 0, 0, 0, 1, 2, 0, (uint64_t)full - 1, 0, 1, slice_hend(GET), slice_te(GET), slice_sawCL(GET), slice_cl(GET), "peer-short") < 0 ||
       host_flags(&o, 0, 0, 0, 1, "peer-short") < 0 || wake_is(&o, 0, "peer-short") < 0 ||
       o.len != full - 1 || phase_is(&b, MURO_STEP_PH_WRITE, "peer-short") < 0) {
     dump_book("peer-short", bk);
@@ -1678,7 +1752,7 @@ static int peer_short(void) {
   st = http_step_take(bk);
   if (step_both(&b, &st, MURO_STEP_WROTE, NULL, (uint64_t)o.len, 0, &o, &bk, "peer-short-done") <
           0 ||
-      check_shape(DEC_QUIET, &o, bk, &b, 0, NULL, 0, 0, 0, 0,  "peer-short-done") < 0) {
+      check_shape(DEC_QUIET, &o, bk, &b, 0, NULL, 0, 0, 0, 0, 0, 0, 0,  "peer-short-done") < 0) {
     box_free(&b);
     return -1;
   }
@@ -1713,6 +1787,22 @@ static int past_slice_hend(void) {
   }
   if (http_step_headerEndAt(end, get) != end) return fail("past-slice stored");
   if (http_step_headerEndAt(0, get) != end) return fail("past-slice unknown");
+  /* Wrong stored facts are ignored when the end is unknown or past the slice. */
+  {
+    uint64_t fe = http_step_framedEnd(get);
+    uint64_t bad_te = 1, bad_saw = 1, bad_cl = 99;
+    uint64_t at0, atp, atok;
+    muro_http_reset();
+    at0 = http_step_framedEndAt(0, bad_te, bad_saw, bad_cl, get);
+    muro_http_reset();
+    atp = http_step_framedEndAt(99, bad_te, bad_saw, bad_cl, get);
+    muro_http_reset();
+    atok = http_step_framedEndAt(end, 0, 0, 0, get);
+    muro_http_reset();
+    if (at0 != fe) return fail("past-slice framed unknown");
+    if (atp != fe) return fail("past-slice framed past");
+    if (atok != fe) return fail("past-slice framed stored");
+  }
   return 0;
 }
 
@@ -1746,13 +1836,15 @@ static int carry_header_end_book(void) {
     box_free(&b);
     return fail("cl-short-carry end");
   }
-  if (check_shape(DEC_MORE, &o, bk, &b, 0, NULL, 0, armed(1000, 0, 60000), 0, hend,
+  if (check_shape(DEC_MORE, &o, bk, &b, 0, NULL, 0, armed(1000, 0, 60000), 0, hend, 0, 1, 4,
                   "cl-short-carry") < 0) {
     box_free(&b);
     return -1;
   }
   if (book_hend(bk, hend, "cl-short-carry") < 0 ||
-      hend_agree(NULL, &b.bk, bk, hend, "cl-short-carry") < 0) {
+      book_facts(bk, 0, 1, 4, "cl-short-carry") < 0 ||
+      hend_agree(NULL, &b.bk, bk, hend, "cl-short-carry") < 0 ||
+      facts_agree(NULL, &b.bk, bk, 0, 1, 4, "cl-short-carry") < 0) {
     box_free(&b);
     return -1;
   }
@@ -1775,12 +1867,14 @@ static int carry_header_end_book(void) {
     box_free(&b);
     return fail("cl-short-body");
   }
-  if (check_shape(DEC_REPLY, &o, bk, &b, 0, NULL, 0, 0, 0, hend, "cl-short-body") < 0) {
+  if (check_shape(DEC_REPLY, &o, bk, &b, 0, NULL, 0, 0, 0, hend, 0, 1, 4, "cl-short-body") < 0) {
     box_free(&b);
     return -1;
   }
   if (book_hend(bk, hend, "cl-short-body") < 0 ||
-      hend_agree(NULL, &b.bk, bk, hend, "cl-short-body") < 0) {
+      book_facts(bk, 0, 1, 4, "cl-short-body") < 0 ||
+      hend_agree(NULL, &b.bk, bk, hend, "cl-short-body") < 0 ||
+      facts_agree(NULL, &b.bk, bk, 0, 1, 4, "cl-short-body") < 0) {
     box_free(&b);
     return -1;
   }
@@ -1805,7 +1899,7 @@ static int leftover_append(void) {
   }
   if (step_both(&b, &st, MURO_STEP_WROTE, NULL, (uint64_t)seen.len, (uint64_t)seen.len, &o, &bk,
                 "left-more") < 0 ||
-      check_shape(DEC_MORE, &o, bk, &b, 0, NULL, 0, armed(1000, 0, 60000), 0, 0,  "left-more") < 0) {
+      check_shape(DEC_MORE, &o, bk, &b, 0, NULL, 0, armed(1000, 0, 60000), 0, 0, 0, 0, 0,  "left-more") < 0) {
     box_free(&b);
     return -1;
   }
@@ -1831,7 +1925,7 @@ static int leftover_append(void) {
     box_free(&b);
     return fail("left-append");
   }
-  if (check_shape(DEC_REPLY, &o, bk, &b, 0, NULL, 0, 0, 0, slice_hend(GET), "left-append") < 0) {
+  if (check_shape(DEC_REPLY, &o, bk, &b, 0, NULL, 0, 0, 0, slice_hend(GET), slice_te(GET), slice_sawCL(GET), slice_cl(GET), "left-append") < 0) {
     box_free(&b);
     return -1;
   }
@@ -1867,7 +1961,7 @@ static int idle_edges(void) {
     box_free(&b);
     return fail("idle-peer-partial");
   }
-  if (check_shape(DEC_OWE, &o, bk, &b, 400, "malformed", 0, 0, 1, 0,  "idle-peer-partial") < 0) {
+  if (check_shape(DEC_OWE, &o, bk, &b, 400, "malformed", 0, 0, 1, 0, 0, 0, 0,  "idle-peer-partial") < 0) {
     box_free(&b);
     return -1;
   }
@@ -1883,7 +1977,7 @@ static int idle_edges(void) {
   /* ACCEPTED on a live slot. take_fact frees the previous Proto.
      Both sides return to READ with wake now+idle. */
   if (step_both(&b, &st, MURO_STEP_ACCEPTED, NULL, 0, 0, &o, &bk, "idle-accept") < 0 ||
-      check_shape(DEC_MORE, &o, bk, &b, 0, NULL, 0, armed(1000, 0, 60000), 0, 0,  "idle-accept") < 0) {
+      check_shape(DEC_MORE, &o, bk, &b, 0, NULL, 0, armed(1000, 0, 60000), 0, 0, 0, 0, 0,  "idle-accept") < 0) {
     box_free(&b);
     return -1;
   }
@@ -1905,7 +1999,7 @@ static int reply_fail_and_now(void) {
     return -1;
   }
   if (step_both(&b, &st, MURO_STEP_WRITE_FAILED, NULL, 0, 0, &o, &bk, "fail-reply") < 0 ||
-      check_shape(DEC_QUIET, &o, bk, &b, 0, NULL, 0, 0, 0, 0,  "fail-reply") < 0) {
+      check_shape(DEC_QUIET, &o, bk, &b, 0, NULL, 0, 0, 0, 0, 0, 0, 0,  "fail-reply") < 0) {
     box_free(&b);
     return -1;
   }
@@ -1919,26 +2013,26 @@ static int reply_fail_and_now(void) {
   }
   full = seen.len;
   if (step_both(&b, &st, MURO_STEP_NOW, NULL, 0, 0, &o, &bk, "now-span") < 0 ||
-      check_shape(DEC_REPLY, &o, bk, &b, 0, NULL, 0, 0, 0, slice_hend(GET), "now-span") < 0 || o.len != full) {
+      check_shape(DEC_REPLY, &o, bk, &b, 0, NULL, 0, 0, 0, slice_hend(GET), slice_te(GET), slice_sawCL(GET), slice_cl(GET), "now-span") < 0 || o.len != full) {
     box_free(&b);
     return fail("now-span len");
   }
   st = http_step_take(bk);
   if (step_both(&b, &st, MURO_STEP_WROTE, NULL, 1, (uint64_t)full, &o, &bk, "now-left") < 0 ||
-      check_still(3, &o, bk, &b, 0, (uint64_t)full - 1, 0, slice_hend(GET), "now-left") < 0) {
+      check_still(3, &o, bk, &b, 0, (uint64_t)full - 1, 0, slice_hend(GET), slice_te(GET), slice_sawCL(GET), slice_cl(GET), "now-left") < 0) {
     box_free(&b);
     return -1;
   }
   st = http_step_take(bk);
   full = o.len;
   if (step_both(&b, &st, MURO_STEP_NOW, NULL, 0, 0, &o, &bk, "now-keeps-left") < 0 ||
-      check_still(3, &o, bk, &b, 0, (uint64_t)full, 0, slice_hend(GET), "now-keeps-left") < 0) {
+      check_still(3, &o, bk, &b, 0, (uint64_t)full, 0, slice_hend(GET), slice_te(GET), slice_sawCL(GET), slice_cl(GET), "now-keeps-left") < 0) {
     box_free(&b);
     return -1;
   }
   st = http_step_take(bk);
   if (step_both(&b, &st, MURO_STEP_WRITE_FAILED, NULL, 0, 0, &o, &bk, "fail-mid") < 0 ||
-      check_shape(DEC_QUIET, &o, bk, &b, 0, NULL, 0, 0, 0, 0,  "fail-mid") < 0) {
+      check_shape(DEC_QUIET, &o, bk, &b, 0, NULL, 0, 0, 0, 0, 0, 0, 0,  "fail-mid") < 0) {
     box_free(&b);
     return -1;
   }
@@ -1965,7 +2059,7 @@ static int stays_quiet(Box *b, http_step_St st, int fact, const char *name) {
   bk = book_at(st, fact, sl_mem(b->inb, before), b->st.max_body, fact == MURO_STEP_WROTE ? 1 : 0, 0,
                b->in.now_ms, b->in.deadline, b->st.idle_ms);
   rc = muro_http_step(&b->st, &b->in, &o);
-  if (book_is(bk, 2, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, name) < 0) return -1;
+  if (book_is(bk, 2, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, name) < 0) return -1;
   if (rc < 0) {
     fprintf(stderr, "%s: host step failed after close\n", name);
     return -1;
@@ -2051,10 +2145,11 @@ static int stream_forced_close(const Box *b, http_step_Out bk) {
   return stream && pol == 0;
 }
 
-static http_step_St st_of(uint64_t phase, uint64_t code, uint64_t left, uint64_t keep, uint64_t hend) {
+static http_step_St st_of(uint64_t phase, uint64_t code, uint64_t left, uint64_t keep, uint64_t hend,
+                         uint64_t te, uint64_t sawCL, uint64_t cl) {
   http_step_St st;
   muro_http_reset();
-  st = http_step_take(http_step_still(phase, code, left, keep, hend));
+  st = http_step_take(http_step_still(phase, code, left, keep, hend, te, sawCL, cl));
   muro_http_reset();
   return st;
 }
@@ -2230,7 +2325,8 @@ static int run_seq(const char *buf, const int *facts, int depth, uint64_t max_bo
        The next fact has to see that keep, or the book would idle
        while the host closes. Any other disagreement is a bug. */
     if (b.bk.bphase != bo_phase(bk) || b.bk.bcode != bo_code(bk) || b.bk.bleft != bo_left(bk) ||
-        b.bk.bkeep != bo_keep(bk) || b.bk.bhend != bo_hend(bk)) {
+        b.bk.bkeep != bo_keep(bk) || b.bk.bhend != bo_hend(bk) || b.bk.bte != bo_te(bk) ||
+            b.bk.bsawcl != bo_sawCL(bk) || b.bk.bcl != bo_cl(bk)) {
       if (!(stream_forced_close(&b, bk) && b.bk.bphase == 3 && b.bk.bcode == 0 && b.bk.bleft == 0 &&
             b.bk.bkeep == 1)) {
         fprintf(stderr, "sweep hand state phase %llu/%llu keep %llu/%llu hend %llu/%llu\n",
@@ -2240,7 +2336,7 @@ static int run_seq(const char *buf, const int *facts, int depth, uint64_t max_bo
         box_free(&b);
         return -1;
       }
-      st = st_of(b.bk.bphase, b.bk.bcode, b.bk.bleft, b.bk.bkeep, b.bk.bhend);
+      st = st_of(b.bk.bphase, b.bk.bcode, b.bk.bleft, b.bk.bkeep, b.bk.bhend, b.bk.bte, b.bk.bsawcl, b.bk.bcl);
     } else {
       st = http_step_take(bk);
     }
@@ -2385,7 +2481,7 @@ static int idle_peer_get(void) {
     box_free(&b);
     return fail("idle-peer-get");
   }
-  if (check_shape(DEC_REPLY, &o, bk, &b, 0, NULL, 0, 0, 1, slice_hend(GET), "idle-peer-get") < 0) {
+  if (check_shape(DEC_REPLY, &o, bk, &b, 0, NULL, 0, 0, 1, slice_hend(GET), slice_te(GET), slice_sawCL(GET), slice_cl(GET), "idle-peer-get") < 0) {
     box_free(&b);
     return -1;
   }
@@ -2415,7 +2511,7 @@ static int write_accept(void) {
     return -1;
   }
   if (step_both(&b, &st, MURO_STEP_ACCEPTED, NULL, 0, 0, &o, &bk, "write-accept") < 0 ||
-      check_shape(DEC_MORE, &o, bk, &b, 0, NULL, 0, armed(1000, 0, 60000), 0, 0,  "write-accept") < 0) {
+      check_shape(DEC_MORE, &o, bk, &b, 0, NULL, 0, armed(1000, 0, 60000), 0, 0, 0, 0, 0,  "write-accept") < 0) {
     box_free(&b);
     return -1;
   }
@@ -2426,7 +2522,7 @@ static int write_accept(void) {
     return -1;
   st = http_step_take(first);
   if (step_both(&b, &st, MURO_STEP_ACCEPTED, NULL, 0, 0, &o, &bk, "owe-accept") < 0 ||
-      check_shape(DEC_MORE, &o, bk, &b, 0, NULL, 0, armed(1000, 0, 60000), 0, 0,  "owe-accept") < 0) {
+      check_shape(DEC_MORE, &o, bk, &b, 0, NULL, 0, armed(1000, 0, 60000), 0, 0, 0, 0, 0,  "owe-accept") < 0) {
     box_free(&b);
     return -1;
   }
@@ -2447,7 +2543,7 @@ static int stream_open(void) {
     box_free(&b);
     return -1;
   }
-  if (book_is(bk, 3, 0, 0, 0, 0, 1, 2, 0, 0, 0, 0, slice_hend(STREAM), "stream-open") < 0 ||
+  if (book_is(bk, 3, 0, 0, 0, 0, 1, 2, 0, 0, 0, 0, slice_hend(STREAM), slice_te(STREAM), slice_sawCL(STREAM), slice_cl(STREAM), "stream-open") < 0 ||
       host_flags(&o, 0, 0, 0, 1, "stream-open") < 0 ||
       phase_is(&b, MURO_STEP_PH_WRITE, "stream-open") < 0 || !o.bytes || o.bytes != b.outb ||
       !status_token(o.bytes, o.len, 200) || !conn_is(o.bytes, o.len, 1) || o.wake_at != 0 ||
@@ -2456,10 +2552,10 @@ static int stream_open(void) {
     return fail("stream-open");
   }
   scripted += 1;
-  st = st_of(b.bk.bphase, b.bk.bcode, b.bk.bleft, b.bk.bkeep, b.bk.bhend);
+  st = st_of(b.bk.bphase, b.bk.bcode, b.bk.bleft, b.bk.bkeep, b.bk.bhend, b.bk.bte, b.bk.bsawcl, b.bk.bcl);
   if (step_both(&b, &st, MURO_STEP_WROTE, NULL, (uint64_t)o.len, (uint64_t)o.len, &o, &bk,
                 "stream-open-done") < 0 ||
-      check_shape(DEC_QUIET, &o, bk, &b, 0, NULL, 0, 0, 0, 0,  "stream-open-done") < 0) {
+      check_shape(DEC_QUIET, &o, bk, &b, 0, NULL, 0, 0, 0, 0, 0, 0, 0,  "stream-open-done") < 0) {
     box_free(&b);
     return -1;
   }
@@ -3212,7 +3308,7 @@ static int chunk_cases(void) {
   }
   if (step_both(&b, &st, MURO_STEP_WROTE, NULL, (uint64_t)seen.len, (uint64_t)seen.len, &o, &bk,
                 "chunk-pipe-next") < 0 ||
-      check_shape(DEC_REPLY, &o, bk, &b, 0, NULL, 0, 0, 0, slice_hend(GET), "chunk-pipe-next") < 0) {
+      check_shape(DEC_REPLY, &o, bk, &b, 0, NULL, 0, 0, 0, slice_hend(GET), slice_te(GET), slice_sawCL(GET), slice_cl(GET), "chunk-pipe-next") < 0) {
     box_free(&b);
     return -1;
   }
@@ -3233,8 +3329,8 @@ static int chunk_cases(void) {
 
 static int check_interim(const StepOut *o, http_step_Out bk, const Box *b, uint64_t phase,
                          uint64_t left, int interim, uint64_t wake, int image, uint64_t hend,
-                         const char *name) {
-  if (book_is(bk, phase, 100, 0, 0, 0, 1, 6, 0, left, wake, 0, hend, name) < 0) return -1;
+                         uint64_t te, uint64_t sawCL, uint64_t cl, const char *name) {
+  if (book_is(bk, phase, 100, 0, 0, 0, 1, 6, 0, left, wake, 0, hend, te, sawCL, cl, name) < 0) return -1;
   if (o->close_conn || o->status_now || o->read_more || !o->write_more || !o->cont) return fail(name);
   if ((int)o->interim != interim) {
     fprintf(stderr, "%s: interim %d want %d len %zu\n", name, o->interim, interim, o->len);
@@ -3258,8 +3354,8 @@ static int check_interim(const StepOut *o, http_step_Out bk, const Box *b, uint6
 }
 
 static int check_sent(const StepOut *o, http_step_Out bk, const Box *b, uint64_t wake, uint64_t hend,
-                      const char *name) {
-  if (book_is(bk, 7, 0, 0, 0, 1, 0, 0, 0, 0, wake, 0, hend, name) < 0) return -1;
+                      uint64_t te, uint64_t sawCL, uint64_t cl, const char *name) {
+  if (book_is(bk, 7, 0, 0, 0, 1, 0, 0, 0, 0, wake, 0, hend, te, sawCL, cl, name) < 0) return -1;
   if (host_flags(o, 0, 0, 1, 0, name) < 0) return -1;
   if ((o->bytes && o->len) || (o->status && o->status_len)) return fail(name);
   if (wake_is(o, wake, name) < 0) return -1;
@@ -3297,7 +3393,7 @@ static int cont_open(const char *buf, uint64_t max_body, const char *name) {
   if (open_acc(&b, max_body, 1000, 0) < 0) return -1;
   st = http_step_readSt();
   if (step_both(&b, &st, MURO_STEP_BYTES, buf, 0, 0, &o, &bk, name) < 0 ||
-      check_interim(&o, bk, &b, 6, 0, 1, wake, MURO_STEP_PH_READ, slice_hend(buf), name) < 0) {
+      check_interim(&o, bk, &b, 6, 0, 1, wake, MURO_STEP_PH_READ, slice_hend(buf), slice_te(buf), slice_sawCL(buf), slice_cl(buf), name) < 0) {
     box_free(&b);
     return -1;
   }
@@ -3310,7 +3406,7 @@ static int park_cont_case(Box *b, http_step_St *st, const char *buf, StepOut *se
   http_step_Out bk;
   uint64_t wake = armed(1000, 0, 60000);
   if (step_both(b, st, MURO_STEP_BYTES, buf, 0, 0, &o, &bk, name) < 0 ||
-      check_interim(&o, bk, b, 6, 0, 1, wake, MURO_STEP_PH_READ, slice_hend(buf), name) < 0)
+      check_interim(&o, bk, b, 6, 0, 1, wake, MURO_STEP_PH_READ, slice_hend(buf), slice_te(buf), slice_sawCL(buf), slice_cl(buf), name) < 0)
     return -1;
   *seen = o;
   *st = http_step_take(bk);
@@ -3352,13 +3448,13 @@ static int cont_cases(void) {
   }
   if (step_both(&b, &st, MURO_STEP_WROTE, NULL, (uint64_t)seen.len, (uint64_t)seen.len, &o, &bk,
                 "cont-wrote") < 0 ||
-      check_sent(&o, bk, &b, wake, slice_hend(CONT), "cont-wrote") < 0) {
+      check_sent(&o, bk, &b, wake, slice_hend(CONT), slice_te(CONT), slice_sawCL(CONT), slice_cl(CONT), "cont-wrote") < 0) {
     box_free(&b);
     return -1;
   }
   st = http_step_take(bk);
   if (feed_kept(&b, &st, MURO_STEP_BYTES, CONT, 0, &o, &bk, "cont-hold") < 0 ||
-      check_sent(&o, bk, &b, wake, slice_hend(CONT), "cont-hold") < 0) {
+      check_sent(&o, bk, &b, wake, slice_hend(CONT), slice_te(CONT), slice_sawCL(CONT), slice_cl(CONT), "cont-hold") < 0) {
     box_free(&b);
     return -1;
   }
@@ -3369,13 +3465,13 @@ static int cont_cases(void) {
   if (park_cont_case(&b, &st, CONT, &seen, "cont-again-owed") < 0 ||
       step_both(&b, &st, MURO_STEP_WROTE, NULL, (uint64_t)seen.len, (uint64_t)seen.len, &o, &bk,
                 "cont-again-sent") < 0 ||
-      check_sent(&o, bk, &b, wake, slice_hend(CONT), "cont-again-sent") < 0) {
+      check_sent(&o, bk, &b, wake, slice_hend(CONT), slice_te(CONT), slice_sawCL(CONT), slice_cl(CONT), "cont-again-sent") < 0) {
     box_free(&b);
     return -1;
   }
   st = http_step_take(bk);
   if (step_both(&b, &st, MURO_STEP_BYTES, CONT, 0, 0, &o, &bk, "cont-again") < 0 ||
-      check_interim(&o, bk, &b, 6, 0, 1, wake, MURO_STEP_PH_READ, slice_hend(CONT), "cont-again") < 0) {
+      check_interim(&o, bk, &b, 6, 0, 1, wake, MURO_STEP_PH_READ, slice_hend(CONT), slice_te(CONT), slice_sawCL(CONT), slice_cl(CONT), "cont-again") < 0) {
     box_free(&b);
     return -1;
   }
@@ -3386,13 +3482,13 @@ static int cont_cases(void) {
   if (park_cont_case(&b, &st, CONT, &seen, "cont-body-owed") < 0 ||
       step_both(&b, &st, MURO_STEP_WROTE, NULL, (uint64_t)seen.len, (uint64_t)seen.len, &o, &bk,
                 "cont-body-sent") < 0 ||
-      check_sent(&o, bk, &b, wake, slice_hend(CONT), "cont-body-sent") < 0) {
+      check_sent(&o, bk, &b, wake, slice_hend(CONT), slice_te(CONT), slice_sawCL(CONT), slice_cl(CONT), "cont-body-sent") < 0) {
     box_free(&b);
     return -1;
   }
   st = http_step_take(bk);
   if (feed_kept(&b, &st, MURO_STEP_BYTES, CONT_FULL, 0, &o, &bk, "cont-body") < 0 ||
-      check_shape(DEC_REPLY, &o, bk, &b, 0, NULL, 0, 0, 0, slice_hend(CONT), "cont-body") < 0) {
+      check_shape(DEC_REPLY, &o, bk, &b, 0, NULL, 0, 0, 0, slice_hend(CONT), slice_te(CONT), slice_sawCL(CONT), slice_cl(CONT), "cont-body") < 0) {
     box_free(&b);
     return -1;
   }
@@ -3409,7 +3505,7 @@ static int cont_cases(void) {
   if (park_cont_case(&b, &st, CONT, &seen, "cont-short-owed") < 0 ||
       step_both(&b, &st, MURO_STEP_WROTE, NULL, 1, (uint64_t)seen.len, &o, &bk, "cont-short") < 0 ||
       check_interim(&o, bk, &b, 6, (uint64_t)seen.len - 1, 0, wake, MURO_STEP_PH_READ,
-                    slice_hend(CONT), "cont-short") < 0) {
+                    slice_hend(CONT), slice_te(CONT), slice_sawCL(CONT), slice_cl(CONT), "cont-short") < 0) {
     box_free(&b);
     return -1;
   }
@@ -3417,7 +3513,7 @@ static int cont_cases(void) {
   st = http_step_take(bk);
   if (step_both(&b, &st, MURO_STEP_WROTE, NULL, (uint64_t)seen.len, (uint64_t)seen.len, &o, &bk,
                 "cont-short-done") < 0 ||
-      check_sent(&o, bk, &b, wake, slice_hend(CONT), "cont-short-done") < 0) {
+      check_sent(&o, bk, &b, wake, slice_hend(CONT), slice_te(CONT), slice_sawCL(CONT), slice_cl(CONT), "cont-short-done") < 0) {
     box_free(&b);
     return -1;
   }
@@ -3428,7 +3524,7 @@ static int cont_cases(void) {
   if (park_cont_case(&b, &st, CONT, &seen, "cont-fail-owed") < 0 ||
       step_both(&b, &st, MURO_STEP_WRITE_FAILED, NULL, 0, (uint64_t)seen.len, &o, &bk,
                 "cont-fail") < 0 ||
-      check_interim(&o, bk, &b, 6, 0, 1, wake, MURO_STEP_PH_READ, slice_hend(CONT), "cont-fail") < 0) {
+      check_interim(&o, bk, &b, 6, 0, 1, wake, MURO_STEP_PH_READ, slice_hend(CONT), slice_te(CONT), slice_sawCL(CONT), slice_cl(CONT), "cont-fail") < 0) {
     box_free(&b);
     return -1;
   }
@@ -3438,7 +3534,7 @@ static int cont_cases(void) {
   st = http_step_readSt();
   if (park_cont_case(&b, &st, CONT, &seen, "cont-now-owed") < 0 ||
       step_both(&b, &st, MURO_STEP_NOW, NULL, 0, 0, &o, &bk, "cont-now") < 0 ||
-      check_shape(DEC_QUIET, &o, bk, &b, 0, NULL, 0, 0, 0, 0,  "cont-now") < 0) {
+      check_shape(DEC_QUIET, &o, bk, &b, 0, NULL, 0, 0, 0, 0, 0, 0, 0,  "cont-now") < 0) {
     box_free(&b);
     return -1;
   }
@@ -3448,7 +3544,7 @@ static int cont_cases(void) {
   st = http_step_readSt();
   if (park_cont_case(&b, &st, CONT, &seen, "cont-clear-owed") < 0 ||
       step_both(&b, &st, MURO_STEP_PEER_CLOSED, CONT, 0, 0, &o, &bk, "cont-peer-clear") < 0 ||
-      check_shape(DEC_OWE, &o, bk, &b, 400, "malformed", 0, 0, 1, slice_hend(CONT), "cont-peer-clear") < 0) {
+      check_shape(DEC_OWE, &o, bk, &b, 400, "malformed", 0, 0, 1, slice_hend(CONT), slice_te(CONT), slice_sawCL(CONT), slice_cl(CONT), "cont-peer-clear") < 0) {
     box_free(&b);
     return -1;
   }
@@ -3458,7 +3554,7 @@ static int cont_cases(void) {
   st = http_step_readSt();
   if (park_cont_case(&b, &st, CONT, &seen, "cont-peer-owed") < 0 ||
       feed_kept(&b, &st, MURO_STEP_PEER_CLOSED, CONT, 0, &o, &bk, "cont-peer") < 0 ||
-      check_interim(&o, bk, &b, 8, 0, 1, 0, MURO_STEP_PH_WRITE, slice_hend(CONT), "cont-peer") < 0) {
+      check_interim(&o, bk, &b, 8, 0, 1, 0, MURO_STEP_PH_WRITE, slice_hend(CONT), slice_te(CONT), slice_sawCL(CONT), slice_cl(CONT), "cont-peer") < 0) {
     box_free(&b);
     return -1;
   }
@@ -3466,7 +3562,7 @@ static int cont_cases(void) {
   st = http_step_take(bk);
   if (step_both(&b, &st, MURO_STEP_WROTE, NULL, (uint64_t)seen.len, (uint64_t)seen.len, &o, &bk,
                 "cont-peer-done") < 0 ||
-      check_shape(DEC_OWE, &o, bk, &b, 400, "malformed", 0, 0, 1, slice_hend(CONT), "cont-peer-done") < 0) {
+      check_shape(DEC_OWE, &o, bk, &b, 400, "malformed", 0, 0, 1, slice_hend(CONT), slice_te(CONT), slice_sawCL(CONT), slice_cl(CONT), "cont-peer-done") < 0) {
     box_free(&b);
     return -1;
   }
@@ -3476,7 +3572,7 @@ static int cont_cases(void) {
   st = http_step_readSt();
   if (park_cont_case(&b, &st, CONT, &seen, "cont-accept-owed") < 0 ||
       step_both(&b, &st, MURO_STEP_ACCEPTED, NULL, 0, 0, &o, &bk, "cont-accept") < 0 ||
-      check_shape(DEC_MORE, &o, bk, &b, 0, NULL, 0, wake, 0, 0,  "cont-accept") < 0) {
+      check_shape(DEC_MORE, &o, bk, &b, 0, NULL, 0, wake, 0, 0, 0, 0, 0,  "cont-accept") < 0) {
     box_free(&b);
     return -1;
   }

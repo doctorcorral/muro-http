@@ -117,18 +117,31 @@
 -- hend is the header-block end, found once. 0 means it is not yet
 -- known. A complete block is never at offset 0. After the headers
 -- finish, later steps reuse that offset and do not fold the header
--- again. keep-alive tails start a new request and reset it to 0.
--- Versus origin/main: 4 evidence names added (cl-short-then-body,
--- hend-of-get, hend-of-short, remember-get-step), 0 removed, 186
--- total, plus equations that name the stored end. Each one is an
--- equation mix muro.check reduces.
+-- again. te, sawCL, and cl are the first-scan framing facts stored
+-- next to it: te is 1 when Transfer-Encoding is chunked, sawCL is 1
+-- when Content-Length was seen, and cl is that length (0 if not).
+-- When endKnown (hend in (0, sliceLen]), framedEndAt trusts those
+-- stored facts and does not scan. When hend is 0 or past the slice,
+-- it falls back to one scan and ignores the stored facts.
+-- keep-alive tails start a new request and reset hend and the facts
+-- to 0.
+-- Versus origin/main: 18 evidence names added (te-of-get, sawCL-of-get,
+-- cl-of-get, te-of-short, sawCL-of-short, cl-of-short, te-of-body,
+-- sawCL-of-body, cl-of-body, te-of-chunk, sawCL-of-chunk, cl-of-chunk,
+-- te-of-stream, sawCL-of-stream, cl-of-stream, facts-idle,
+-- facts-pipe-done, facts-pipe-done-cl), 0 removed, 204 total, plus
+-- equations that name the stored framing facts. facts-idle is te of
+-- the idle constructor. facts-pipe-done and facts-pipe-done-cl are
+-- te and cl of a GET-then-GET pipelined idle (pipeTail is idle). The
+-- non-zero fact values are the te-of- / sawCL-of- / cl-of- theorems
+-- on classify. Each one is an equation mix muro.check reduces.
 import "request.muro"
 
 unboxed data St : Type where
-  st : Π (+ phase : U64) → Π (+ code : U64) → Π (+ left : U64) → Π (+ keep : U64) → Π (+ hend : U64) → St
+  st : Π (+ phase : U64) → Π (+ code : U64) → Π (+ left : U64) → Π (+ keep : U64) → Π (+ hend : U64) → Π (+ te : U64) → Π (+ sawCL : U64) → Π (+ cl : U64) → St
 
 unboxed data Out : Type where
-  out : Π (+ phase : U64) → Π (+ code : U64) → Π (+ close : U64) → Π (+ statusNow : U64) → Π (+ readMore : U64) → Π (+ writeMore : U64) → Π (+ span : U64) → Π (+ cover : U64) → Π (+ left : U64) → Π (+ wake : U64) → Π (+ keep : U64) → Π (+ hend : U64) → Out
+  out : Π (+ phase : U64) → Π (+ code : U64) → Π (+ close : U64) → Π (+ statusNow : U64) → Π (+ readMore : U64) → Π (+ writeMore : U64) → Π (+ span : U64) → Π (+ cover : U64) → Π (+ left : U64) → Π (+ wake : U64) → Π (+ keep : U64) → Π (+ hend : U64) → Π (+ te : U64) → Π (+ sawCL : U64) → Π (+ cl : U64) → Out
 
 def factAccepted : run U64 :=
   toU64 1
@@ -149,7 +162,7 @@ def factNow : run U64 :=
   toU64 6
 
 def readSt : run St :=
-  st (toU64 0) (toU64 0) (toU64 0) (toU64 0) (toU64 0)
+  st (toU64 0) (toU64 0) (toU64 0) (toU64 0) (toU64 0) (toU64 0) (toU64 0) (toU64 0)
 
 def arm : run Π (+ now : U64) → Π (+ dl : U64) → Π (+ idle : U64) → U64 :=
   λ (+ now : U64) → λ (+ dl : U64) → λ (+ idle : U64) →
@@ -157,81 +170,96 @@ def arm : run Π (+ now : U64) → Π (+ dl : U64) → Π (+ idle : U64) → U64
       | true => addi now idle
       | false => dl
 
-def moreAt : run Π (+ now : U64) → Π (+ dl : U64) → Π (+ idle : U64) → Π (+ hend : U64) → Out :=
-  λ (+ now : U64) → λ (+ dl : U64) → λ (+ idle : U64) → λ (+ hend : U64) →
-    out (toU64 0) (toU64 0) (toU64 0) (toU64 0) (toU64 1) (toU64 0) (toU64 0) (toU64 0) (toU64 0) (arm now dl idle) (toU64 0) hend
+def moreAt : run Π (+ now : U64) → Π (+ dl : U64) → Π (+ idle : U64) → Π (+ hend : U64) → Π (+ te : U64) → Π (+ sawCL : U64) → Π (+ cl : U64) → Out :=
+  λ (+ now : U64) → λ (+ dl : U64) → λ (+ idle : U64) → λ (+ hend : U64) → λ (+ te : U64) → λ (+ sawCL : U64) → λ (+ cl : U64) →
+    out (toU64 0) (toU64 0) (toU64 0) (toU64 0) (toU64 1) (toU64 0) (toU64 0) (toU64 0) (toU64 0) (arm now dl idle) (toU64 0) hend te sawCL cl
 
 def more : run Out :=
-  moreAt (toU64 0) (toU64 0) (toU64 0) (toU64 0)
+  moreAt (toU64 0) (toU64 0) (toU64 0) (toU64 0) (toU64 0) (toU64 0) (toU64 0)
 
-def moreEnd : run Π (+ hend : U64) → Out :=
-  λ (+ hend : U64) → moreAt (toU64 0) (toU64 0) (toU64 0) hend
+def moreEnd : run Π (+ hend : U64) → Π (+ te : U64) → Π (+ sawCL : U64) → Π (+ cl : U64) → Out :=
+  λ (+ hend : U64) → λ (+ te : U64) → λ (+ sawCL : U64) → λ (+ cl : U64) → moreAt (toU64 0) (toU64 0) (toU64 0) hend te sawCL cl
 
 def idleAt : run Π (+ now : U64) → Π (+ dl : U64) → Π (+ idle : U64) → Out :=
   λ (+ now : U64) → λ (+ dl : U64) → λ (+ idle : U64) →
-    out (toU64 4) (toU64 0) (toU64 0) (toU64 0) (toU64 1) (toU64 0) (toU64 0) (toU64 0) (toU64 0) (arm now dl idle) (toU64 0) (toU64 0)
+    out (toU64 4) (toU64 0) (toU64 0) (toU64 0) (toU64 1) (toU64 0) (toU64 0) (toU64 0) (toU64 0) (arm now dl idle) (toU64 0) (toU64 0) (toU64 0) (toU64 0) (toU64 0)
 
 def idle : run Out :=
   idleAt (toU64 0) (toU64 0) (toU64 0)
 
 def outside : run Out :=
-  out (toU64 0) (toU64 0) (toU64 0) (toU64 0) (toU64 0) (toU64 0) (toU64 0) (toU64 1) (toU64 0) (toU64 0) (toU64 0) (toU64 0)
+  out (toU64 0) (toU64 0) (toU64 0) (toU64 0) (toU64 0) (toU64 0) (toU64 0) (toU64 1) (toU64 0) (toU64 0) (toU64 0) (toU64 0) (toU64 0) (toU64 0) (toU64 0)
 
 def quiet : run Π (+ code : U64) → Out :=
   λ (+ code : U64) →
-    out (toU64 2) code (toU64 1) (toU64 0) (toU64 0) (toU64 0) (toU64 0) (toU64 0) (toU64 0) (toU64 0) (toU64 0) (toU64 0)
+    out (toU64 2) code (toU64 1) (toU64 0) (toU64 0) (toU64 0) (toU64 0) (toU64 0) (toU64 0) (toU64 0) (toU64 0) (toU64 0) (toU64 0) (toU64 0) (toU64 0)
 
 def statusNow : run Π (+ code : U64) → Out :=
   λ (+ code : U64) →
-    out (toU64 2) code (toU64 1) (toU64 1) (toU64 0) (toU64 0) (toU64 1) (toU64 0) (toU64 0) (toU64 0) (toU64 0) (toU64 0)
+    out (toU64 2) code (toU64 1) (toU64 1) (toU64 0) (toU64 0) (toU64 1) (toU64 0) (toU64 0) (toU64 0) (toU64 0) (toU64 0) (toU64 0) (toU64 0) (toU64 0)
 
-def still : run Π (+ phase : U64) → Π (+ code : U64) → Π (+ left : U64) → Π (+ keep : U64) → Π (+ hend : U64) → Out :=
-  λ (+ phase : U64) → λ (+ code : U64) → λ (+ left : U64) → λ (+ keep : U64) → λ (+ hend : U64) →
-    out phase code (toU64 0) (toU64 0) (toU64 0) (toU64 1) (toU64 2) (toU64 0) left (toU64 0) keep hend
+def still : run Π (+ phase : U64) → Π (+ code : U64) → Π (+ left : U64) → Π (+ keep : U64) → Π (+ hend : U64) → Π (+ te : U64) → Π (+ sawCL : U64) → Π (+ cl : U64) → Out :=
+  λ (+ phase : U64) → λ (+ code : U64) → λ (+ left : U64) → λ (+ keep : U64) → λ (+ hend : U64) → λ (+ te : U64) → λ (+ sawCL : U64) → λ (+ cl : U64) →
+    out phase code (toU64 0) (toU64 0) (toU64 0) (toU64 1) (toU64 2) (toU64 0) left (toU64 0) keep hend te sawCL cl
 
-def owe : run Π (+ code : U64) → Π (+ hend : U64) → Out :=
-  λ (+ code : U64) → λ (+ hend : U64) →
-    still (toU64 1) code (toU64 0) (toU64 1) hend
+def owe : run Π (+ code : U64) → Π (+ hend : U64) → Π (+ te : U64) → Π (+ sawCL : U64) → Π (+ cl : U64) → Out :=
+  λ (+ code : U64) → λ (+ hend : U64) → λ (+ te : U64) → λ (+ sawCL : U64) → λ (+ cl : U64) →
+    still (toU64 1) code (toU64 0) (toU64 1) hend te sawCL cl
 
-def reply : run Π (+ keep : U64) → Π (+ hend : U64) → Out :=
-  λ (+ keep : U64) → λ (+ hend : U64) →
-    still (toU64 3) (toU64 0) (toU64 0) keep hend
+def reply : run Π (+ keep : U64) → Π (+ hend : U64) → Π (+ te : U64) → Π (+ sawCL : U64) → Π (+ cl : U64) → Out :=
+  λ (+ keep : U64) → λ (+ hend : U64) → λ (+ te : U64) → λ (+ sawCL : U64) → λ (+ cl : U64) →
+    still (toU64 3) (toU64 0) (toU64 0) keep hend te sawCL cl
 
 def take : run Π (+ o : Out) → St :=
   λ (+ o : Out) →
     match o motive (λ _ → St)
-      | out phase code _close _statusNow _readMore _writeMore _span _cover left _wake keep hend =>
-          st phase code left keep hend
+      | out phase code _close _statusNow _readMore _writeMore _span _cover left _wake keep hend te sawCL cl =>
+          st phase code left keep hend te sawCL cl
 
 def spanOf : run Π (+ o : Out) → U64 :=
   λ (+ o : Out) →
     match o motive (λ _ → U64)
-      | out _phase _code _close _statusNow _readMore _writeMore span _cover _left _wake _keep _hend => span
+      | out _phase _code _close _statusNow _readMore _writeMore span _cover _left _wake _keep _hend _te _sawCL _cl => span
 
 def coverOf : run Π (+ o : Out) → U64 :=
   λ (+ o : Out) →
     match o motive (λ _ → U64)
-      | out _phase _code _close _statusNow _readMore _writeMore _span cover _left _wake _keep _hend => cover
+      | out _phase _code _close _statusNow _readMore _writeMore _span cover _left _wake _keep _hend _te _sawCL _cl => cover
 
 def leftOf : run Π (+ o : Out) → U64 :=
   λ (+ o : Out) →
     match o motive (λ _ → U64)
-      | out _phase _code _close _statusNow _readMore _writeMore _span _cover left _wake _keep _hend => left
+      | out _phase _code _close _statusNow _readMore _writeMore _span _cover left _wake _keep _hend _te _sawCL _cl => left
 
 def wakeOf : run Π (+ o : Out) → U64 :=
   λ (+ o : Out) →
     match o motive (λ _ → U64)
-      | out _phase _code _close _statusNow _readMore _writeMore _span _cover _left wake _keep _hend => wake
+      | out _phase _code _close _statusNow _readMore _writeMore _span _cover _left wake _keep _hend _te _sawCL _cl => wake
 
 def keepOut : run Π (+ o : Out) → U64 :=
   λ (+ o : Out) →
     match o motive (λ _ → U64)
-      | out _phase _code _close _statusNow _readMore _writeMore _span _cover _left _wake keep _hend => keep
+      | out _phase _code _close _statusNow _readMore _writeMore _span _cover _left _wake keep _hend _te _sawCL _cl => keep
 
 def hendOf : run Π (+ o : Out) → U64 :=
   λ (+ o : Out) →
     match o motive (λ _ → U64)
-      | out _phase _code _close _statusNow _readMore _writeMore _span _cover _left _wake _keep hend => hend
+      | out _phase _code _close _statusNow _readMore _writeMore _span _cover _left _wake _keep hend _te _sawCL _cl => hend
+
+def teOf : run Π (+ o : Out) → U64 :=
+  λ (+ o : Out) →
+    match o motive (λ _ → U64)
+      | out _phase _code _close _statusNow _readMore _writeMore _span _cover _left _wake _keep _hend te _sawCL _cl => te
+
+def sawCLOf : run Π (+ o : Out) → U64 :=
+  λ (+ o : Out) →
+    match o motive (λ _ → U64)
+      | out _phase _code _close _statusNow _readMore _writeMore _span _cover _left _wake _keep _hend _te sawCL _cl => sawCL
+
+def clOf : run Π (+ o : Out) → U64 :=
+  λ (+ o : Out) →
+    match o motive (λ _ → U64)
+      | out _phase _code _close _statusNow _readMore _writeMore _span _cover _left _wake _keep _hend _te _sawCL cl => cl
 
 def chunked : run Π (+ s : Slice) → Bool :=
   λ (+ s : Slice) → u64eq (teCode s) (toU64 1)
@@ -434,27 +462,27 @@ def wantCont : run Π (+ s : Slice) → Bool :=
       | false => false
 
 -- Phase 6 is the interim span. The read timer stays armed.
-def contAt : run Π (+ now : U64) → Π (+ dl : U64) → Π (+ idle : U64) → Π (+ hend : U64) → Out :=
-  λ (+ now : U64) → λ (+ dl : U64) → λ (+ idle : U64) → λ (+ hend : U64) →
-    out (toU64 6) (toU64 100) (toU64 0) (toU64 0) (toU64 0) (toU64 1) (toU64 6) (toU64 0) (toU64 0) (arm now dl idle) (toU64 0) hend
+def contAt : run Π (+ now : U64) → Π (+ dl : U64) → Π (+ idle : U64) → Π (+ hend : U64) → Π (+ te : U64) → Π (+ sawCL : U64) → Π (+ cl : U64) → Out :=
+  λ (+ now : U64) → λ (+ dl : U64) → λ (+ idle : U64) → λ (+ hend : U64) → λ (+ te : U64) → λ (+ sawCL : U64) → λ (+ cl : U64) →
+    out (toU64 6) (toU64 100) (toU64 0) (toU64 0) (toU64 0) (toU64 1) (toU64 6) (toU64 0) (toU64 0) (arm now dl idle) (toU64 0) hend te sawCL cl
 
 -- A short write, a held fact, or a peer close while the 100 is still
 -- going out. Phase 8 means the peer has already closed.
-def contHold : run Π (+ phase : U64) → Π (+ left : U64) → Π (+ now : U64) → Π (+ dl : U64) → Π (+ idle : U64) → Π (+ hend : U64) → Out :=
-  λ (+ phase : U64) → λ (+ left : U64) → λ (+ now : U64) → λ (+ dl : U64) → λ (+ idle : U64) → λ (+ hend : U64) →
-    out phase (toU64 100) (toU64 0) (toU64 0) (toU64 0) (toU64 1) (toU64 6) (toU64 0) left (arm now dl idle) (toU64 0) hend
+def contHold : run Π (+ phase : U64) → Π (+ left : U64) → Π (+ now : U64) → Π (+ dl : U64) → Π (+ idle : U64) → Π (+ hend : U64) → Π (+ te : U64) → Π (+ sawCL : U64) → Π (+ cl : U64) → Out :=
+  λ (+ phase : U64) → λ (+ left : U64) → λ (+ now : U64) → λ (+ dl : U64) → λ (+ idle : U64) → λ (+ hend : U64) → λ (+ te : U64) → λ (+ sawCL : U64) → λ (+ cl : U64) →
+    out phase (toU64 100) (toU64 0) (toU64 0) (toU64 0) (toU64 1) (toU64 6) (toU64 0) left (arm now dl idle) (toU64 0) hend te sawCL cl
 
 -- Phase 7 is the read after the 100 has been sent. A later short
 -- body must not park a second interim.
-def moreSent : run Π (+ now : U64) → Π (+ dl : U64) → Π (+ idle : U64) → Π (+ hend : U64) → Out :=
-  λ (+ now : U64) → λ (+ dl : U64) → λ (+ idle : U64) → λ (+ hend : U64) →
-    out (toU64 7) (toU64 0) (toU64 0) (toU64 0) (toU64 1) (toU64 0) (toU64 0) (toU64 0) (toU64 0) (arm now dl idle) (toU64 0) hend
+def moreSent : run Π (+ now : U64) → Π (+ dl : U64) → Π (+ idle : U64) → Π (+ hend : U64) → Π (+ te : U64) → Π (+ sawCL : U64) → Π (+ cl : U64) → Out :=
+  λ (+ now : U64) → λ (+ dl : U64) → λ (+ idle : U64) → λ (+ hend : U64) → λ (+ te : U64) → λ (+ sawCL : U64) → λ (+ cl : U64) →
+    out (toU64 7) (toU64 0) (toU64 0) (toU64 0) (toU64 1) (toU64 0) (toU64 0) (toU64 0) (toU64 0) (arm now dl idle) (toU64 0) hend te sawCL cl
 
-def parkRead : run Π (+ sent : U64) → Π (+ now : U64) → Π (+ dl : U64) → Π (+ idle : U64) → Π (+ hend : U64) → Out :=
-  λ (+ sent : U64) → λ (+ now : U64) → λ (+ dl : U64) → λ (+ idle : U64) → λ (+ hend : U64) →
+def parkRead : run Π (+ sent : U64) → Π (+ now : U64) → Π (+ dl : U64) → Π (+ idle : U64) → Π (+ hend : U64) → Π (+ te : U64) → Π (+ sawCL : U64) → Π (+ cl : U64) → Out :=
+  λ (+ sent : U64) → λ (+ now : U64) → λ (+ dl : U64) → λ (+ idle : U64) → λ (+ hend : U64) → λ (+ te : U64) → λ (+ sawCL : U64) → λ (+ cl : U64) →
     match (u64eq sent (toU64 1)) motive (λ _ → Out)
-      | true => moreSent now dl idle hend
-      | false => moreAt now dl idle hend
+      | true => moreSent now dl idle hend te sawCL cl
+      | false => moreAt now dl idle hend te sawCL cl
 
 def isPol : run Π (+ n : U64) → Π (+ c : U64) → Bool :=
   λ (+ n : U64) → λ (+ c : U64) → u64eq n c
@@ -482,79 +510,79 @@ def capCode : run Π (+ s : Slice) → U64 :=
       | true => toU64 414
       | false => toU64 431
 
-def replyKeep : run Π (k : Keep) → Π (+ hend : U64) → Out :=
-  λ (k : Keep) → λ (+ hend : U64) →
+def replyKeep : run Π (k : Keep) → Π (+ hend : U64) → Π (+ te : U64) → Π (+ sawCL : U64) → Π (+ cl : U64) → Out :=
+  λ (k : Keep) → λ (+ hend : U64) → λ (+ te : U64) → λ (+ sawCL : U64) → λ (+ cl : U64) →
     match k motive (λ _ → Out)
-      | keep-yes => reply (toU64 0) hend
-      | keep-no => reply (toU64 1) hend
+      | keep-yes => reply (toU64 0) hend te sawCL cl
+      | keep-no => reply (toU64 1) hend te sawCL cl
 
 -- reading 1: classify still wants bytes, so a policy status is
 -- status_now and the step closes. reading 0: classify finished, so
 -- the handwritten step answers through the write span. code 0 only
 -- arrives with reading 1. A finished request (reading 0, code 0) is
 -- replyKeep, before this call, so there is no reply arm here.
-def usePol : run Π (+ code : U64) → Π (+ reading : U64) → Π (+ now : U64) → Π (+ dl : U64) → Π (+ idle : U64) → Π (+ hend : U64) → Out :=
-  λ (+ code : U64) → λ (+ reading : U64) → λ (+ now : U64) → λ (+ dl : U64) → λ (+ idle : U64) → λ (+ hend : U64) →
+def usePol : run Π (+ code : U64) → Π (+ reading : U64) → Π (+ now : U64) → Π (+ dl : U64) → Π (+ idle : U64) → Π (+ hend : U64) → Π (+ te : U64) → Π (+ sawCL : U64) → Π (+ cl : U64) → Out :=
+  λ (+ code : U64) → λ (+ reading : U64) → λ (+ now : U64) → λ (+ dl : U64) → λ (+ idle : U64) → λ (+ hend : U64) → λ (+ te : U64) → λ (+ sawCL : U64) → λ (+ cl : U64) →
     match (isPol code (toU64 0)) motive (λ _ → Out)
-      | true => moreAt now dl idle hend
+      | true => moreAt now dl idle hend te sawCL cl
       | false =>
           (match (u64eq reading (toU64 1)) motive (λ _ → Out)
             | true => statusNow code
-            | false => owe code hend)
+            | false => owe code hend te sawCL cl)
 
 -- A finished request on a peer close is the handler span with
 -- keep 1. The completing write closes and drops a pipelined tail.
 -- A policy status is an owed span. 100-continue is not a policy code.
-def finOk : run Π (+ code : U64) → Π (+ hend : U64) → Out :=
-  λ (+ code : U64) → λ (+ hend : U64) →
+def finOk : run Π (+ code : U64) → Π (+ hend : U64) → Π (+ te : U64) → Π (+ sawCL : U64) → Π (+ cl : U64) → Out :=
+  λ (+ code : U64) → λ (+ hend : U64) → λ (+ te : U64) → λ (+ sawCL : U64) → λ (+ cl : U64) →
     match (isPol code (toU64 0)) motive (λ _ → Out)
-      | true => reply (toU64 1) hend
-      | false => owe code hend
+      | true => reply (toU64 1) hend te sawCL cl
+      | false => owe code hend te sawCL cl
 
 -- sent 1 means the 100 was already written. A second short body
 -- reads again. sent 0 and wantCont parks the interim. A peer close
 -- does not park it: fin is 1, and the status is the final one.
-def onStatus : run Π (+ st : Status) → Π (+ hs : HSt) → Π (+ hend : U64) → Π (+ fin : U64) → Π (+ sent : U64) → Π (+ s : Slice) → Π (+ max : U64) → Π (+ now : U64) → Π (+ dl : U64) → Π (+ idle : U64) → Out :=
-  λ (+ st : Status) → λ (+ hs : HSt) → λ (+ hend : U64) → λ (+ fin : U64) → λ (+ sent : U64) → λ (+ s : Slice) → λ (+ max : U64) → λ (+ now : U64) → λ (+ dl : U64) → λ (+ idle : U64) →
+def onStatus : run Π (+ st : Status) → Π (+ hs : HSt) → Π (+ hend : U64) → Π (+ te : U64) → Π (+ sawCL : U64) → Π (+ cl : U64) → Π (+ fin : U64) → Π (+ sent : U64) → Π (+ s : Slice) → Π (+ max : U64) → Π (+ now : U64) → Π (+ dl : U64) → Π (+ idle : U64) → Out :=
+  λ (+ st : Status) → λ (+ hs : HSt) → λ (+ hend : U64) → λ (+ te : U64) → λ (+ sawCL : U64) → λ (+ cl : U64) → λ (+ fin : U64) → λ (+ sent : U64) → λ (+ s : Slice) → λ (+ max : U64) → λ (+ now : U64) → λ (+ dl : U64) → λ (+ idle : U64) →
     match st motive (λ _ → Out)
       | status-ok =>
           (match (u64eq fin (toU64 1)) motive (λ _ → Out)
-            | true => finOk (policyHs hs hend s max) hend
+            | true => finOk (policyHs hs hend s max) hend te sawCL cl
             | false =>
                 (match (isPol (policyHs hs hend s max) (toU64 0)) motive (λ _ → Out)
                   | true =>
                       (match (and (u64eq sent (toU64 0)) (wantContHs hs hend s)) motive (λ _ → Out)
-                        | true => contAt now dl idle hend
-                        | false => replyKeep (keepOfSt hs s) hend)
-                  | false => usePol (policyHs hs hend s max) (toU64 0) now dl idle hend))
+                        | true => contAt now dl idle hend te sawCL cl
+                        | false => replyKeep (keepOfSt hs s) hend te sawCL cl)
+                  | false => usePol (policyHs hs hend s max) (toU64 0) now dl idle hend te sawCL cl))
       | status-malformed =>
           (match (headersDoneAt hend s) motive (λ _ → Out)
             | true =>
                 (match (gt16384 (headerEndAt hend s)) motive (λ _ → Out)
-                  | true => owe (capCode s) hend
-                  | false => owe (toU64 400) hend)
+                  | true => owe (capCode s) hend te sawCL cl
+                  | false => owe (toU64 400) hend te sawCL cl)
             | false =>
                 (match (gt16384 (sliceLen s)) motive (λ _ → Out)
-                  | true => owe (capCode s) (toU64 0)
-                  | false => owe (toU64 400) (toU64 0)))
+                  | true => owe (capCode s) (toU64 0) (toU64 0) (toU64 0) (toU64 0)
+                  | false => owe (toU64 400) (toU64 0) (toU64 0) (toU64 0) (toU64 0)))
       | status-need-more =>
           (match (u64eq fin (toU64 1)) motive (λ _ → Out)
-            | true => owe (toU64 400) hend
+            | true => owe (toU64 400) hend te sawCL cl
             | false =>
                 (match (headersDoneAt hend s) motive (λ _ → Out)
                   | true =>
                       (match (isPol (policyHs hs hend s max) (toU64 0)) motive (λ _ → Out)
                         | true =>
                             (match (and (u64eq sent (toU64 0)) (wantContHs hs hend s)) motive (λ _ → Out)
-                              | true => contAt now dl idle hend
-                              | false => parkRead sent now dl idle hend)
-                        | false => usePol (policyHs hs hend s max) (toU64 1) now dl idle hend)
-                  | false => parkRead sent now dl idle (toU64 0)))
-      | status-unimplemented => owe (toU64 501) hend
+                              | true => contAt now dl idle hend te sawCL cl
+                              | false => parkRead sent now dl idle hend te sawCL cl)
+                        | false => usePol (policyHs hs hend s max) (toU64 1) now dl idle hend te sawCL cl)
+                  | false => parkRead sent now dl idle (toU64 0) (toU64 0) (toU64 0) (toU64 0)))
+      | status-unimplemented => owe (toU64 501) hend te sawCL cl
 
 def onBufScan : run Π (+ hs : HSt) → Π (+ hend : U64) → Π (+ fin : U64) → Π (+ sent : U64) → Π (+ s : Slice) → Π (+ max : U64) → Π (+ now : U64) → Π (+ dl : U64) → Π (+ idle : U64) → Out :=
   λ (+ hs : HSt) → λ (+ hend : U64) → λ (+ fin : U64) → λ (+ sent : U64) → λ (+ s : Slice) → λ (+ max : U64) → λ (+ now : U64) → λ (+ dl : U64) → λ (+ idle : U64) →
-    onStatus (statusOfAt hend hs s) hs hend fin sent s max now dl idle
+    onStatus (statusOfAt hend hs s) hs hend (teWhen hend hs s) (sawCLWhen hend hs s) (clWhen hend hs s) fin sent s max now dl idle
 
 def onBuf : run Π (+ fin : U64) → Π (+ sent : U64) → Π (+ s : Slice) → Π (+ max : U64) → Π (+ now : U64) → Π (+ dl : U64) → Π (+ idle : U64) → Π (+ hend : U64) → Out :=
   λ (+ fin : U64) → λ (+ sent : U64) → λ (+ s : Slice) → λ (+ max : U64) → λ (+ now : U64) → λ (+ dl : U64) → λ (+ idle : U64) → λ (+ hend : U64) →
@@ -573,12 +601,12 @@ def tailOf : run Π (+ buf : Slice) → Slice :=
   λ (+ buf : Slice) →
     slice buf (framedEnd buf) (subi (sliceLen buf) (framedEnd buf))
 
-def pastEndAt : run Π (+ hend : U64) → Π (+ buf : Slice) → Bool :=
-  λ (+ hend : U64) → λ (+ buf : Slice) → u64lt (framedEndAt hend buf) (sliceLen buf)
+def pastEndAt : run Π (+ hend : U64) → Π (+ te : U64) → Π (+ sawCL : U64) → Π (+ cl : U64) → Π (+ buf : Slice) → Bool :=
+  λ (+ hend : U64) → λ (+ te : U64) → λ (+ sawCL : U64) → λ (+ cl : U64) → λ (+ buf : Slice) → u64lt (framedEndAt hend te sawCL cl buf) (sliceLen buf)
 
-def tailOfAt : run Π (+ hend : U64) → Π (+ buf : Slice) → Slice :=
-  λ (+ hend : U64) → λ (+ buf : Slice) →
-    slice buf (framedEndAt hend buf) (subi (sliceLen buf) (framedEndAt hend buf))
+def tailOfAt : run Π (+ hend : U64) → Π (+ te : U64) → Π (+ sawCL : U64) → Π (+ cl : U64) → Π (+ buf : Slice) → Slice :=
+  λ (+ hend : U64) → λ (+ te : U64) → λ (+ sawCL : U64) → λ (+ cl : U64) → λ (+ buf : Slice) →
+    slice buf (framedEndAt hend te sawCL cl buf) (subi (sliceLen buf) (framedEndAt hend te sawCL cl buf))
 
 -- keep 1 closes. keep 0 classifies bytes past this request, or
 -- returns to idle when the buffer holds nothing past it.
@@ -591,9 +619,11 @@ def tailOfAt : run Π (+ hend : U64) → Π (+ buf : Slice) → Slice :=
 -- outside the contract: pipe-done passes the tail and is idle,
 -- pipe-full-again passes twoGet again and is another reply, and
 -- pipe-again-differs is that those spans are not the same.
--- Bind framedEndAt once so a pipelined finish does not scan the
+-- Bind framedEndAt once so a pipelined finish does not walk the
 -- just-completed request twice (pastEndAt and tailOfAt each called
--- framedEndAt, and the emitter did not hoist that call).
+-- framedEndAt, and the emitter did not hoist that call). When hend
+-- is known, framedEndAt uses the stored framing facts and does not
+-- scan.
 def finishWriteAt : run Π (+ end : U64) → Π (+ code : U64) → Π (+ keep : U64) → Π (+ buf : Slice) → Π (+ max : U64) → Π (+ now : U64) → Π (+ dl : U64) → Π (+ idle : U64) → Out :=
   λ (+ end : U64) → λ (+ code : U64) → λ (+ keep : U64) → λ (+ buf : Slice) → λ (+ max : U64) → λ (+ now : U64) → λ (+ dl : U64) → λ (+ idle : U64) →
     match (u64eq keep (toU64 1)) motive (λ _ → Out)
@@ -603,38 +633,38 @@ def finishWriteAt : run Π (+ end : U64) → Π (+ code : U64) → Π (+ keep : 
             | true => onBuf (toU64 0) (toU64 0) (slice buf end (subi (sliceLen buf) end)) max now dl idle (toU64 0)
             | false => idleAt now dl idle)
 
-def finishWrite : run Π (+ code : U64) → Π (+ keep : U64) → Π (+ buf : Slice) → Π (+ max : U64) → Π (+ now : U64) → Π (+ dl : U64) → Π (+ idle : U64) → Π (+ hend : U64) → Out :=
-  λ (+ code : U64) → λ (+ keep : U64) → λ (+ buf : Slice) → λ (+ max : U64) → λ (+ now : U64) → λ (+ dl : U64) → λ (+ idle : U64) → λ (+ hend : U64) →
-    finishWriteAt (framedEndAt hend buf) code keep buf max now dl idle
+def finishWrite : run Π (+ code : U64) → Π (+ keep : U64) → Π (+ buf : Slice) → Π (+ max : U64) → Π (+ now : U64) → Π (+ dl : U64) → Π (+ idle : U64) → Π (+ hend : U64) → Π (+ te : U64) → Π (+ sawCL : U64) → Π (+ cl : U64) → Out :=
+  λ (+ code : U64) → λ (+ keep : U64) → λ (+ buf : Slice) → λ (+ max : U64) → λ (+ now : U64) → λ (+ dl : U64) → λ (+ idle : U64) → λ (+ hend : U64) → λ (+ te : U64) → λ (+ sawCL : U64) → λ (+ cl : U64) →
+    finishWriteAt (framedEndAt hend te sawCL cl buf) code keep buf max now dl idle
 
-def writeFact : run Π (+ phase : U64) → Π (+ code : U64) → Π (+ left : U64) → Π (+ keep : U64) → Π (+ hend : U64) → Π (+ fact : U64) → Π (+ n : U64) → Π (+ owed : U64) → Π (+ buf : Slice) → Π (+ max : U64) → Π (+ now : U64) → Π (+ dl : U64) → Π (+ idle : U64) → Out :=
-  λ (+ phase : U64) → λ (+ code : U64) → λ (+ left : U64) → λ (+ keep : U64) → λ (+ hend : U64) → λ (+ fact : U64) → λ (+ n : U64) → λ (+ owed : U64) → λ (+ buf : Slice) → λ (+ max : U64) → λ (+ now : U64) → λ (+ dl : U64) → λ (+ idle : U64) →
+def writeFact : run Π (+ phase : U64) → Π (+ code : U64) → Π (+ left : U64) → Π (+ keep : U64) → Π (+ hend : U64) → Π (+ te : U64) → Π (+ sawCL : U64) → Π (+ cl : U64) → Π (+ fact : U64) → Π (+ n : U64) → Π (+ owed : U64) → Π (+ buf : Slice) → Π (+ max : U64) → Π (+ now : U64) → Π (+ dl : U64) → Π (+ idle : U64) → Out :=
+  λ (+ phase : U64) → λ (+ code : U64) → λ (+ left : U64) → λ (+ keep : U64) → λ (+ hend : U64) → λ (+ te : U64) → λ (+ sawCL : U64) → λ (+ cl : U64) → λ (+ fact : U64) → λ (+ n : U64) → λ (+ owed : U64) → λ (+ buf : Slice) → λ (+ max : U64) → λ (+ now : U64) → λ (+ dl : U64) → λ (+ idle : U64) →
     match (u64eq fact factWrote) motive (λ _ → Out)
       | true =>
           (match (u64lt n (baseOf left owed)) motive (λ _ → Out)
-            | true => still phase code (subi (baseOf left owed) n) keep hend
-            | false => finishWrite code keep buf max now dl idle hend)
+            | true => still phase code (subi (baseOf left owed) n) keep hend te sawCL cl
+            | false => finishWrite code keep buf max now dl idle hend te sawCL cl)
       | false =>
           (match (u64eq fact factFailed) motive (λ _ → Out)
             | true => quiet code
             | false =>
                 (match (u64eq fact factPeer) motive (λ _ → Out)
-                  | true => still phase code left (toU64 1) hend
+                  | true => still phase code left (toU64 1) hend te sawCL cl
                   | false =>
                       (match (u64eq fact factNow) motive (λ _ → Out)
-                        | true => still phase code left keep hend
+                        | true => still phase code left keep hend te sawCL cl
                         | false =>
                             (match (u64eq fact factBytes) motive (λ _ → Out)
-                              | true => still phase code left keep hend
+                              | true => still phase code left keep hend te sawCL cl
                               | false =>
                                   (match (u64eq fact factAccepted) motive (λ _ → Out)
-                                    | true => moreAt now (toU64 0) idle (toU64 0)
+                                    | true => moreAt now (toU64 0) idle (toU64 0) (toU64 0) (toU64 0) (toU64 0)
                                     | false => outside)))))
 
-def readFact : run Π (+ fact : U64) → Π (+ s : Slice) → Π (+ max : U64) → Π (+ now : U64) → Π (+ dl : U64) → Π (+ idle : U64) → Π (+ hend : U64) → Out :=
-  λ (+ fact : U64) → λ (+ s : Slice) → λ (+ max : U64) → λ (+ now : U64) → λ (+ dl : U64) → λ (+ idle : U64) → λ (+ hend : U64) →
+def readFact : run Π (+ fact : U64) → Π (+ s : Slice) → Π (+ max : U64) → Π (+ now : U64) → Π (+ dl : U64) → Π (+ idle : U64) → Π (+ hend : U64) → Π (+ te : U64) → Π (+ sawCL : U64) → Π (+ cl : U64) → Out :=
+  λ (+ fact : U64) → λ (+ s : Slice) → λ (+ max : U64) → λ (+ now : U64) → λ (+ dl : U64) → λ (+ idle : U64) → λ (+ hend : U64) → λ (+ te : U64) → λ (+ sawCL : U64) → λ (+ cl : U64) →
     match (u64eq fact factAccepted) motive (λ _ → Out)
-      | true => moreAt now (toU64 0) idle hend
+      | true => moreAt now (toU64 0) idle hend te sawCL cl
       | false =>
           (match (u64eq fact factBytes) motive (λ _ → Out)
             | true => onBuf (toU64 0) (toU64 0) s max now dl idle hend
@@ -649,7 +679,7 @@ def readFact : run Π (+ fact : U64) → Π (+ s : Slice) → Π (+ max : U64) �
                         | true => quiet (toU64 0)
                         | false =>
                             (match (or (u64eq fact factWrote) (u64eq fact factFailed)) motive (λ _ → Out)
-                              | true => moreAt now dl idle hend
+                              | true => moreAt now dl idle hend te sawCL cl
                               | false => outside))))
 
 def idleFact : run Π (+ fact : U64) → Π (+ s : Slice) → Π (+ max : U64) → Π (+ now : U64) → Π (+ dl : U64) → Π (+ idle : U64) → Out :=
@@ -670,7 +700,7 @@ def idleFact : run Π (+ fact : U64) → Π (+ s : Slice) → Π (+ max : U64) �
                         | true => idleAt now dl idle
                         | false =>
                             (match (u64eq fact factAccepted) motive (λ _ → Out)
-                              | true => moreAt now (toU64 0) idle (toU64 0)
+                              | true => moreAt now (toU64 0) idle (toU64 0) (toU64 0) (toU64 0) (toU64 0)
                               | false => outside))))
 
 -- Phase 6 or 8: the 100 is still the span. A full wrote classifies
@@ -680,39 +710,39 @@ def idleFact : run Π (+ fact : U64) → Π (+ s : Slice) → Π (+ max : U64) �
 -- when the adapter has not already cleared it. A peer close keeps
 -- the interim too, but the image is then a write, so the timer is
 -- off and the wake is 0.
-def contFact : run Π (+ phase : U64) → Π (+ left : U64) → Π (+ hend : U64) → Π (+ fact : U64) → Π (+ n : U64) → Π (+ owed : U64) → Π (+ buf : Slice) → Π (+ max : U64) → Π (+ now : U64) → Π (+ dl : U64) → Π (+ idle : U64) → Out :=
-  λ (+ phase : U64) → λ (+ left : U64) → λ (+ hend : U64) → λ (+ fact : U64) → λ (+ n : U64) → λ (+ owed : U64) → λ (+ buf : Slice) → λ (+ max : U64) → λ (+ now : U64) → λ (+ dl : U64) → λ (+ idle : U64) →
+def contFact : run Π (+ phase : U64) → Π (+ left : U64) → Π (+ hend : U64) → Π (+ te : U64) → Π (+ sawCL : U64) → Π (+ cl : U64) → Π (+ fact : U64) → Π (+ n : U64) → Π (+ owed : U64) → Π (+ buf : Slice) → Π (+ max : U64) → Π (+ now : U64) → Π (+ dl : U64) → Π (+ idle : U64) → Out :=
+  λ (+ phase : U64) → λ (+ left : U64) → λ (+ hend : U64) → λ (+ te : U64) → λ (+ sawCL : U64) → λ (+ cl : U64) → λ (+ fact : U64) → λ (+ n : U64) → λ (+ owed : U64) → λ (+ buf : Slice) → λ (+ max : U64) → λ (+ now : U64) → λ (+ dl : U64) → λ (+ idle : U64) →
     match (u64eq fact factWrote) motive (λ _ → Out)
       | true =>
           (match (u64lt n (baseOf left owed)) motive (λ _ → Out)
-            | true => contHold phase (subi (baseOf left owed) n) now dl idle hend
+            | true => contHold phase (subi (baseOf left owed) n) now dl idle hend te sawCL cl
             | false =>
                 (match (u64eq phase (toU64 8)) motive (λ _ → Out)
                   | true => onBuf (toU64 1) (toU64 1) buf max now dl idle hend
                   | false => onBuf (toU64 0) (toU64 1) buf max now dl idle hend))
       | false =>
           (match (u64eq fact factFailed) motive (λ _ → Out)
-            | true => contHold phase left now dl idle hend
+            | true => contHold phase left now dl idle hend te sawCL cl
             | false =>
                 (match (u64eq fact factNow) motive (λ _ → Out)
                   | true => quiet (toU64 0)
                   | false =>
                       (match (u64eq fact factPeer) motive (λ _ → Out)
-                        | true => contHold (toU64 8) left (toU64 0) (toU64 0) (toU64 0) hend
+                        | true => contHold (toU64 8) left (toU64 0) (toU64 0) (toU64 0) hend te sawCL cl
                         | false =>
                             (match (u64eq fact factBytes) motive (λ _ → Out)
-                              | true => contHold phase left now dl idle hend
+                              | true => contHold phase left now dl idle hend te sawCL cl
                               | false =>
                                   (match (u64eq fact factAccepted) motive (λ _ → Out)
-                                    | true => moreAt now (toU64 0) idle (toU64 0)
+                                    | true => moreAt now (toU64 0) idle (toU64 0) (toU64 0) (toU64 0) (toU64 0)
                                     | false => outside)))))
 
 -- Phase 7: the 100 is already sent. Bytes and a peer close classify
 -- with sent 1, so a still-short body does not park another interim.
-def sentFact : run Π (+ fact : U64) → Π (+ s : Slice) → Π (+ max : U64) → Π (+ now : U64) → Π (+ dl : U64) → Π (+ idle : U64) → Π (+ hend : U64) → Out :=
-  λ (+ fact : U64) → λ (+ s : Slice) → λ (+ max : U64) → λ (+ now : U64) → λ (+ dl : U64) → λ (+ idle : U64) → λ (+ hend : U64) →
+def sentFact : run Π (+ fact : U64) → Π (+ s : Slice) → Π (+ max : U64) → Π (+ now : U64) → Π (+ dl : U64) → Π (+ idle : U64) → Π (+ hend : U64) → Π (+ te : U64) → Π (+ sawCL : U64) → Π (+ cl : U64) → Out :=
+  λ (+ fact : U64) → λ (+ s : Slice) → λ (+ max : U64) → λ (+ now : U64) → λ (+ dl : U64) → λ (+ idle : U64) → λ (+ hend : U64) → λ (+ te : U64) → λ (+ sawCL : U64) → λ (+ cl : U64) →
     match (u64eq fact factAccepted) motive (λ _ → Out)
-      | true => moreAt now (toU64 0) idle hend
+      | true => moreAt now (toU64 0) idle hend te sawCL cl
       | false =>
           (match (u64eq fact factBytes) motive (λ _ → Out)
             | true => onBuf (toU64 0) (toU64 1) s max now dl idle hend
@@ -727,28 +757,28 @@ def sentFact : run Π (+ fact : U64) → Π (+ s : Slice) → Π (+ max : U64) �
                         | true => quiet (toU64 0)
                         | false =>
                             (match (or (u64eq fact factWrote) (u64eq fact factFailed)) motive (λ _ → Out)
-                              | true => moreSent now dl idle hend
+                              | true => moreSent now dl idle hend te sawCL cl
                               | false => outside))))
 
 def stepFact : run Π (+ st : St) → Π (+ fact : U64) → Π (+ buf : Slice) → Π (+ max : U64) → Π (+ n : U64) → Π (+ owed : U64) → Π (+ now : U64) → Π (+ dl : U64) → Π (+ idle : U64) → Out :=
   λ (+ st : St) → λ (+ fact : U64) → λ (+ buf : Slice) → λ (+ max : U64) → λ (+ n : U64) → λ (+ owed : U64) → λ (+ now : U64) → λ (+ dl : U64) → λ (+ idle : U64) →
     match st motive (λ _ → Out)
-      | st phase code left keep hend =>
+      | st phase code left keep hend te sawCL cl =>
           (match (or (u64eq phase (toU64 2)) (u64eq phase (toU64 5))) motive (λ _ → Out)
             | true => quiet code
             | false =>
                 (match (or (u64eq phase (toU64 1)) (u64eq phase (toU64 3))) motive (λ _ → Out)
-                  | true => writeFact phase code left keep hend fact n owed buf max now dl idle
+                  | true => writeFact phase code left keep hend te sawCL cl fact n owed buf max now dl idle
                   | false =>
                       (match (or (u64eq phase (toU64 6)) (u64eq phase (toU64 8))) motive (λ _ → Out)
-                        | true => contFact phase left hend fact n owed buf max now dl idle
+                        | true => contFact phase left hend te sawCL cl fact n owed buf max now dl idle
                         | false =>
                             (match (u64eq phase (toU64 7)) motive (λ _ → Out)
-                              | true => sentFact fact buf max now dl idle hend
+                              | true => sentFact fact buf max now dl idle hend te sawCL cl
                               | false =>
                                   (match (u64eq phase (toU64 4)) motive (λ _ → Out)
                                     | true => idleFact fact buf max now dl idle
-                                    | false => readFact fact buf max now dl idle hend)))))
+                                    | false => readFact fact buf max now dl idle hend te sawCL cl)))))
 
 def step0 : run Π (+ st : St) → Π (+ fact : U64) → Π (+ buf : Slice) → Π (+ max : U64) → Π (+ n : U64) → Π (+ owed : U64) → Out :=
   λ (+ st : St) → λ (+ fact : U64) → λ (+ buf : Slice) → λ (+ max : U64) → λ (+ n : U64) → λ (+ owed : U64) →
@@ -758,7 +788,7 @@ def step0 : run Π (+ st : St) → Π (+ fact : U64) → Π (+ buf : Slice) → 
 -- image stays in handle. A later fact is quiet, like phase 2.
 def shutHandle : run Π (+ code : U64) → Out :=
   λ (+ code : U64) →
-    out (toU64 5) code (toU64 1) (toU64 0) (toU64 0) (toU64 0) (toU64 0) (toU64 0) (toU64 0) (toU64 0) (toU64 1) (toU64 0)
+    out (toU64 5) code (toU64 1) (toU64 0) (toU64 0) (toU64 0) (toU64 0) (toU64 0) (toU64 0) (toU64 0) (toU64 1) (toU64 0) (toU64 0) (toU64 0) (toU64 0)
 
 -- close_after or a 4xx/5xx forces keep 1. Otherwise the request keep stands.
 def keepHand : run Π (+ reqKeep : U64) → Π (+ hclose : U64) → Π (+ hbad : U64) → U64 :=
@@ -771,17 +801,17 @@ def keepHand : run Π (+ reqKeep : U64) → Π (+ hclose : U64) → Π (+ hbad :
             | false => reqKeep)
 
 -- span 3 content-length pull, 4 chunked pull, 5 close-delimited pull.
-def spanPull : run Π (+ keep : U64) → Π (+ span : U64) → Π (+ hend : U64) → Out :=
-  λ (+ keep : U64) → λ (+ span : U64) → λ (+ hend : U64) →
-    out (toU64 3) (toU64 0) (toU64 0) (toU64 0) (toU64 0) (toU64 1) span (toU64 0) (toU64 0) (toU64 0) keep hend
+def spanPull : run Π (+ keep : U64) → Π (+ span : U64) → Π (+ hend : U64) → Π (+ te : U64) → Π (+ sawCL : U64) → Π (+ cl : U64) → Out :=
+  λ (+ keep : U64) → λ (+ span : U64) → λ (+ hend : U64) → λ (+ te : U64) → λ (+ sawCL : U64) → λ (+ cl : U64) →
+    out (toU64 3) (toU64 0) (toU64 0) (toU64 0) (toU64 0) (toU64 1) span (toU64 0) (toU64 0) (toU64 0) keep hend te sawCL cl
 
 -- A buffered body that does not fit, after a commit, is a 500 span.
-def oweFit : run Π (+ hend : U64) → Out :=
-  λ (+ hend : U64) →
-    still (toU64 3) (toU64 500) (toU64 0) (toU64 1) hend
+def oweFit : run Π (+ hend : U64) → Π (+ te : U64) → Π (+ sawCL : U64) → Π (+ cl : U64) → Out :=
+  λ (+ hend : U64) → λ (+ te : U64) → λ (+ sawCL : U64) → λ (+ cl : U64) →
+    still (toU64 3) (toU64 500) (toU64 0) (toU64 1) hend te sawCL cl
 
-def hand : run Π (+ reqKeep : U64) → Π (+ hclose : U64) → Π (+ hbad : U64) → Π (+ howe : U64) → Π (+ href : U64) → Π (+ hpull : U64) → Π (+ hver : U64) → Π (+ hhead : U64) → Π (+ hfit : U64) → Π (+ hend : U64) → Out :=
-  λ (+ reqKeep : U64) → λ (+ hclose : U64) → λ (+ hbad : U64) → λ (+ howe : U64) → λ (+ href : U64) → λ (+ hpull : U64) → λ (+ hver : U64) → λ (+ hhead : U64) → λ (+ hfit : U64) → λ (+ hend : U64) →
+def hand : run Π (+ reqKeep : U64) → Π (+ hclose : U64) → Π (+ hbad : U64) → Π (+ howe : U64) → Π (+ href : U64) → Π (+ hpull : U64) → Π (+ hver : U64) → Π (+ hhead : U64) → Π (+ hfit : U64) → Π (+ hend : U64) → Π (+ te : U64) → Π (+ sawCL : U64) → Π (+ cl : U64) → Out :=
+  λ (+ reqKeep : U64) → λ (+ hclose : U64) → λ (+ hbad : U64) → λ (+ howe : U64) → λ (+ href : U64) → λ (+ hpull : U64) → λ (+ hver : U64) → λ (+ hhead : U64) → λ (+ hfit : U64) → λ (+ hend : U64) → λ (+ te : U64) → λ (+ sawCL : U64) → λ (+ cl : U64) →
     match (u64eq href (toU64 1)) motive (λ _ → Out)
       | true =>
           (match (u64eq howe (toU64 1)) motive (λ _ → Out)
@@ -789,28 +819,28 @@ def hand : run Π (+ reqKeep : U64) → Π (+ hclose : U64) → Π (+ hbad : U64
             | false => shutHandle (toU64 0))
       | false =>
           (match (u64eq hpull (toU64 1)) motive (λ _ → Out)
-            | true => spanPull (keepHand reqKeep hclose hbad) (toU64 3) hend
+            | true => spanPull (keepHand reqKeep hclose hbad) (toU64 3) hend te sawCL cl
             | false =>
                 (match (u64eq hpull (toU64 2)) motive (λ _ → Out)
                   | true =>
                       (match (or (u64eq hhead (toU64 1)) (u64eq hver (toU64 0))) motive (λ _ → Out)
-                        | true => spanPull (toU64 1) (toU64 5) hend
-                        | false => spanPull (keepHand reqKeep hclose hbad) (toU64 4) hend)
+                        | true => spanPull (toU64 1) (toU64 5) hend te sawCL cl
+                        | false => spanPull (keepHand reqKeep hclose hbad) (toU64 4) hend te sawCL cl)
                   | false =>
                       (match (u64eq hfit (toU64 0)) motive (λ _ → Out)
                         | true =>
                             (match (u64eq howe (toU64 1)) motive (λ _ → Out)
-                              | true => oweFit hend
+                              | true => oweFit hend te sawCL cl
                               | false => shutHandle (toU64 0))
-                        | false => reply (keepHand reqKeep hclose hbad) hend)))
+                        | false => reply (keepHand reqKeep hclose hbad) hend te sawCL cl)))
 
 -- After a successful handler, 400 or 413 on the body reader is an
 -- owed protocol span. The host reader sets only those two. Any
 -- other code stays outside, and the adapter shuts.
-def overStatus : run Π (+ code : U64) → Π (+ hend : U64) → Out :=
-  λ (+ code : U64) → λ (+ hend : U64) →
+def overStatus : run Π (+ code : U64) → Π (+ hend : U64) → Π (+ te : U64) → Π (+ sawCL : U64) → Π (+ cl : U64) → Out :=
+  λ (+ code : U64) → λ (+ hend : U64) → λ (+ te : U64) → λ (+ sawCL : U64) → λ (+ cl : U64) →
     match (or (u64eq code (toU64 400)) (u64eq code (toU64 413))) motive (λ _ → Out)
-      | true => owe code hend
+      | true => owe code hend te sawCL cl
       | false => outside
 
 def lineBuf : run Slice :=
@@ -1084,7 +1114,7 @@ def sawContChunkDone : run Out :=
   step0 readSt factBytes contChunkDone max10 (toU64 0) (toU64 0)
 
 def contSent : run St :=
-  take (moreSent (toU64 0) (toU64 0) (toU64 0) (headerEnd contBuf))
+  take (moreSent (toU64 0) (toU64 0) (toU64 0) (headerEnd contBuf) (toU64 0) (toU64 1) (toU64 4))
 
 def sawNow : run Out :=
   step0 readSt factNow getBuf max10 (toU64 0) (toU64 0)
@@ -1138,11 +1168,11 @@ def line-more : evidence {sawLine ≡ more : Out} := refl
 
 def headers-more : evidence {sawHdr ≡ more : Out} := refl
 
-def get-reply : evidence {sawGet ≡ reply (toU64 0) (headerEnd getBuf) : Out} := refl
+def get-reply : evidence {sawGet ≡ reply (toU64 0) (headerEnd getBuf) (toU64 0) (toU64 0) (toU64 0) : Out} := refl
 
-def cl-short : evidence {sawShort ≡ moreEnd (headerEnd postShort) : Out} := refl
+def cl-short : evidence {sawShort ≡ moreEnd (headerEnd postShort) (toU64 0) (toU64 1) (toU64 4) : Out} := refl
 
-def cl-body : evidence {sawBody ≡ reply (toU64 0) (headerEnd postBody) : Out} := refl
+def cl-body : evidence {sawBody ≡ reply (toU64 0) (headerEnd postBody) (toU64 0) (toU64 1) (toU64 4) : Out} := refl
 
 -- Short body, then the remaining bytes, with the header end stored
 -- on the first step. Matches a full read of the same request.
@@ -1150,107 +1180,119 @@ def cl-short-then-body : evidence {step0 (take sawShort) factBytes postBody max1
 
 def hend-of-short : evidence {hendOf sawShort ≡ headerEnd postShort : U64} := refl
 
+def te-of-short : evidence {teOf sawShort ≡ toU64 0 : U64} := refl
+
+def sawCL-of-short : evidence {sawCLOf sawShort ≡ toU64 1 : U64} := refl
+
+def cl-of-short : evidence {clOf sawShort ≡ toU64 4 : U64} := refl
+
+def te-of-body : evidence {teOf sawBody ≡ toU64 0 : U64} := refl
+
+def sawCL-of-body : evidence {sawCLOf sawBody ≡ toU64 1 : U64} := refl
+
+def cl-of-body : evidence {clOf sawBody ≡ toU64 4 : U64} := refl
+
 def close-413 : evidence {saw413 ≡ statusNow (toU64 413) : Out} := refl
 
-def owe-413 : evidence {saw413Body ≡ owe (toU64 413) (headerEnd postBody) : Out} := refl
+def owe-413 : evidence {saw413Body ≡ owe (toU64 413) (headerEnd postBody) (toU64 0) (toU64 1) (toU64 4) : Out} := refl
 
 def close-417 : evidence {saw417 ≡ statusNow (toU64 417) : Out} := refl
 
-def owe-417 : evidence {saw417Done ≡ owe (toU64 417) (headerEnd expectDone) : Out} := refl
+def owe-417 : evidence {saw417Done ≡ owe (toU64 417) (headerEnd expectDone) (toU64 0) (toU64 1) (toU64 0) : Out} := refl
 
 def close-501 : evidence {saw501 ≡ statusNow (toU64 501) : Out} := refl
 
-def owe-501 : evidence {saw501Done ≡ owe (toU64 501) (headerEnd traceDone) : Out} := refl
+def owe-501 : evidence {saw501Done ≡ owe (toU64 501) (headerEnd traceDone) (toU64 0) (toU64 0) (toU64 0) : Out} := refl
 
-def owe-gzip : evidence {sawGzip ≡ owe (toU64 501) (headerEnd gzipBuf) : Out} := refl
+def owe-gzip : evidence {sawGzip ≡ owe (toU64 501) (headerEnd gzipBuf) (toU64 0) (toU64 0) (toU64 0) : Out} := refl
 
-def owe-400 : evidence {sawBad ≡ owe (toU64 400) (headerEnd badBuf) : Out} := refl
+def owe-400 : evidence {sawBad ≡ owe (toU64 400) (headerEnd badBuf) (toU64 0) (toU64 0) (toU64 0) : Out} := refl
 
-def owe-400-host : evidence {sawNoHost ≡ owe (toU64 400) (headerEnd noHost) : Out} := refl
+def owe-400-host : evidence {sawNoHost ≡ owe (toU64 400) (headerEnd noHost) (toU64 0) (toU64 0) (toU64 0) : Out} := refl
 
 def accept-read : evidence {sawAccept ≡ more : Out} := refl
 
 def fin-empty : evidence {sawFinEmpty ≡ quiet (toU64 0) : Out} := refl
 
-def fin-partial : evidence {sawFinPartial ≡ owe (toU64 400) (toU64 0) : Out} := refl
+def fin-partial : evidence {sawFinPartial ≡ owe (toU64 400) (toU64 0) (toU64 0) (toU64 0) (toU64 0) : Out} := refl
 
-def fin-oversize : evidence {sawFinOver ≡ owe (toU64 400) (headerEnd tooBig) : Out} := refl
+def fin-oversize : evidence {sawFinOver ≡ owe (toU64 400) (headerEnd tooBig) (toU64 0) (toU64 1) (toU64 100) : Out} := refl
 
-def chunk-more : evidence {sawChunk ≡ moreEnd (headerEnd chunkBuf) : Out} := refl
+def chunk-more : evidence {sawChunk ≡ moreEnd (headerEnd chunkBuf) (toU64 1) (toU64 0) (toU64 0) : Out} := refl
 
-def chunk-one : evidence {sawChunkOne ≡ reply (toU64 0) (headerEnd chunkOne) : Out} := refl
+def chunk-one : evidence {sawChunkOne ≡ reply (toU64 0) (headerEnd chunkOne) (toU64 1) (toU64 0) (toU64 0) : Out} := refl
 
-def chunk-ext : evidence {sawChunkExt ≡ reply (toU64 0) (headerEnd chunkExt) : Out} := refl
+def chunk-ext : evidence {sawChunkExt ≡ reply (toU64 0) (headerEnd chunkExt) (toU64 1) (toU64 0) (toU64 0) : Out} := refl
 
-def chunk-trailer : evidence {sawChunkTrailer ≡ reply (toU64 0) (headerEnd chunkTrailer) : Out} := refl
+def chunk-trailer : evidence {sawChunkTrailer ≡ reply (toU64 0) (headerEnd chunkTrailer) (toU64 1) (toU64 0) (toU64 0) : Out} := refl
 
-def chunk-trailer-bare : evidence {sawChunkBare ≡ owe (toU64 400) (headerEnd chunkBare) : Out} := refl
+def chunk-trailer-bare : evidence {sawChunkBare ≡ owe (toU64 400) (headerEnd chunkBare) (toU64 1) (toU64 0) (toU64 0) : Out} := refl
 
-def chunk-bad : evidence {sawChunkBad ≡ owe (toU64 400) (headerEnd chunkBad) : Out} := refl
+def chunk-bad : evidence {sawChunkBad ≡ owe (toU64 400) (headerEnd chunkBad) (toU64 1) (toU64 0) (toU64 0) : Out} := refl
 
-def chunk-space : evidence {sawChunkSpace ≡ owe (toU64 400) (headerEnd chunkSpace) : Out} := refl
+def chunk-space : evidence {sawChunkSpace ≡ owe (toU64 400) (headerEnd chunkSpace) (toU64 1) (toU64 0) (toU64 0) : Out} := refl
 
-def chunk-ext-lf : evidence {sawChunkExtLf ≡ owe (toU64 400) (headerEnd chunkExtLf) : Out} := refl
+def chunk-ext-lf : evidence {sawChunkExtLf ≡ owe (toU64 400) (headerEnd chunkExtLf) (toU64 1) (toU64 0) (toU64 0) : Out} := refl
 
-def chunk-overflow : evidence {sawChunkOverHex ≡ owe (toU64 400) (headerEnd chunkOverHex) : Out} := refl
+def chunk-overflow : evidence {sawChunkOverHex ≡ owe (toU64 400) (headerEnd chunkOverHex) (toU64 1) (toU64 0) (toU64 0) : Out} := refl
 
 def chunk-too : evidence {sawChunkToo ≡ statusNow (toU64 413) : Out} := refl
 
-def chunk-prem : evidence {sawChunkPrem ≡ owe (toU64 400) (headerEnd chunkPrem) : Out} := refl
+def chunk-prem : evidence {sawChunkPrem ≡ owe (toU64 400) (headerEnd chunkPrem) (toU64 1) (toU64 0) (toU64 0) : Out} := refl
 
-def chunk-close : evidence {sawChunkClose ≡ reply (toU64 1) (headerEnd chunkClose) : Out} := refl
+def chunk-close : evidence {sawChunkClose ≡ reply (toU64 1) (headerEnd chunkClose) (toU64 1) (toU64 0) (toU64 0) : Out} := refl
 
-def chunk-pipe : evidence {sawChunkPipe ≡ reply (toU64 0) (headerEnd chunkPipe) : Out} := refl
+def chunk-pipe : evidence {sawChunkPipe ≡ reply (toU64 0) (headerEnd chunkPipe) (toU64 1) (toU64 0) (toU64 0) : Out} := refl
 
-def chunk-pipe-next : evidence {step0 (take sawChunkPipe) factWrote chunkPipe max10 (toU64 4) (toU64 4) ≡ reply (toU64 0) (headerEnd getBuf) : Out} := refl
+def chunk-pipe-next : evidence {step0 (take sawChunkPipe) factWrote chunkPipe max10 (toU64 4) (toU64 4) ≡ reply (toU64 0) (headerEnd getBuf) (toU64 0) (toU64 0) (toU64 0) : Out} := refl
 
-def chunk-multi : evidence {sawChunkMulti ≡ reply (toU64 0) (headerEnd chunkMulti) : Out} := refl
+def chunk-multi : evidence {sawChunkMulti ≡ reply (toU64 0) (headerEnd chunkMulti) (toU64 1) (toU64 0) (toU64 0) : Out} := refl
 
-def chunk-over-done : evidence {sawChunkOverDone ≡ owe (toU64 413) (headerEnd chunkOne) : Out} := refl
+def chunk-over-done : evidence {sawChunkOverDone ≡ owe (toU64 413) (headerEnd chunkOne) (toU64 1) (toU64 0) (toU64 0) : Out} := refl
 
 def chunk-expect : evidence {sawChunkExpect ≡ statusNow (toU64 417) : Out} := refl
 
-def chunk-expect-done : evidence {sawChunkExpectDone ≡ owe (toU64 417) (headerEnd chunkExpectDone) : Out} := refl
+def chunk-expect-done : evidence {sawChunkExpectDone ≡ owe (toU64 417) (headerEnd chunkExpectDone) (toU64 1) (toU64 0) (toU64 0) : Out} := refl
 
 def chunk-trace : evidence {sawChunkTrace ≡ statusNow (toU64 501) : Out} := refl
 
-def chunk-trace-done : evidence {sawChunkTraceDone ≡ owe (toU64 501) (headerEnd chunkTraceDone) : Out} := refl
+def chunk-trace-done : evidence {sawChunkTraceDone ≡ owe (toU64 501) (headerEnd chunkTraceDone) (toU64 1) (toU64 0) (toU64 0) : Out} := refl
 
-def cont-owed : evidence {sawCont ≡ contAt (toU64 0) (toU64 0) (toU64 0) (headerEnd contBuf) : Out} := refl
+def cont-owed : evidence {sawCont ≡ contAt (toU64 0) (toU64 0) (toU64 0) (headerEnd contBuf) (toU64 0) (toU64 1) (toU64 4) : Out} := refl
 
-def cont-have : evidence {sawContFull ≡ reply (toU64 0) (headerEnd contFull) : Out} := refl
+def cont-have : evidence {sawContFull ≡ reply (toU64 0) (headerEnd contFull) (toU64 0) (toU64 1) (toU64 4) : Out} := refl
 
-def cont-10 : evidence {sawCont10 ≡ moreEnd (headerEnd cont10) : Out} := refl
+def cont-10 : evidence {sawCont10 ≡ moreEnd (headerEnd cont10) (toU64 0) (toU64 1) (toU64 4) : Out} := refl
 
-def cont-head : evidence {sawContHead ≡ moreEnd (headerEnd contHead) : Out} := refl
+def cont-head : evidence {sawContHead ≡ moreEnd (headerEnd contHead) (toU64 0) (toU64 1) (toU64 4) : Out} := refl
 
 def cont-413 : evidence {sawContBig ≡ statusNow (toU64 413) : Out} := refl
 
-def cont-chunk : evidence {sawContChunk ≡ contAt (toU64 0) (toU64 0) (toU64 0) (headerEnd contChunk) : Out} := refl
+def cont-chunk : evidence {sawContChunk ≡ contAt (toU64 0) (toU64 0) (toU64 0) (headerEnd contChunk) (toU64 1) (toU64 0) (toU64 0) : Out} := refl
 
-def cont-chunk-done : evidence {sawContChunkDone ≡ reply (toU64 0) (headerEnd contChunkDone) : Out} := refl
+def cont-chunk-done : evidence {sawContChunkDone ≡ reply (toU64 0) (headerEnd contChunkDone) (toU64 1) (toU64 0) (toU64 0) : Out} := refl
 
-def cont-wrote : evidence {step0 (take sawCont) factWrote contBuf max10 (toU64 1) (toU64 1) ≡ moreSent (toU64 0) (toU64 0) (toU64 0) (headerEnd contBuf) : Out} := refl
+def cont-wrote : evidence {step0 (take sawCont) factWrote contBuf max10 (toU64 1) (toU64 1) ≡ moreSent (toU64 0) (toU64 0) (toU64 0) (headerEnd contBuf) (toU64 0) (toU64 1) (toU64 4) : Out} := refl
 
-def cont-short : evidence {step0 (take sawCont) factWrote contBuf max10 (toU64 1) (toU64 10) ≡ contHold (toU64 6) (toU64 9) (toU64 0) (toU64 0) (toU64 0) (headerEnd contBuf) : Out} := refl
+def cont-short : evidence {step0 (take sawCont) factWrote contBuf max10 (toU64 1) (toU64 10) ≡ contHold (toU64 6) (toU64 9) (toU64 0) (toU64 0) (toU64 0) (headerEnd contBuf) (toU64 0) (toU64 1) (toU64 4) : Out} := refl
 
 def cont-now : evidence {step0 (take sawCont) factNow contBuf max10 (toU64 0) (toU64 0) ≡ quiet (toU64 0) : Out} := refl
 
-def cont-fail : evidence {step0 (take sawCont) factFailed contBuf max10 (toU64 0) (toU64 0) ≡ contHold (toU64 6) (toU64 0) (toU64 0) (toU64 0) (toU64 0) (headerEnd contBuf) : Out} := refl
+def cont-fail : evidence {step0 (take sawCont) factFailed contBuf max10 (toU64 0) (toU64 0) ≡ contHold (toU64 6) (toU64 0) (toU64 0) (toU64 0) (toU64 0) (headerEnd contBuf) (toU64 0) (toU64 1) (toU64 4) : Out} := refl
 
-def cont-peer : evidence {step0 (take sawCont) factPeer contBuf max10 (toU64 0) (toU64 0) ≡ contHold (toU64 8) (toU64 0) (toU64 0) (toU64 0) (toU64 0) (headerEnd contBuf) : Out} := refl
+def cont-peer : evidence {step0 (take sawCont) factPeer contBuf max10 (toU64 0) (toU64 0) ≡ contHold (toU64 8) (toU64 0) (toU64 0) (toU64 0) (toU64 0) (headerEnd contBuf) (toU64 0) (toU64 1) (toU64 4) : Out} := refl
 
 -- The peer close disarms. step0's clocks are already 0, so the
 -- clock is named here. A first interim still arms.
-def cont-peer-wake : evidence {stepFact (take sawCont) factPeer contBuf max10 (toU64 0) (toU64 0) (toU64 1000) (toU64 0) (toU64 60000) ≡ contHold (toU64 8) (toU64 0) (toU64 0) (toU64 0) (toU64 0) (headerEnd contBuf) : Out} := refl
+def cont-peer-wake : evidence {stepFact (take sawCont) factPeer contBuf max10 (toU64 0) (toU64 0) (toU64 1000) (toU64 0) (toU64 60000) ≡ contHold (toU64 8) (toU64 0) (toU64 0) (toU64 0) (toU64 0) (headerEnd contBuf) (toU64 0) (toU64 1) (toU64 4) : Out} := refl
 
-def cont-arm : evidence {stepFact readSt factBytes contBuf max10 (toU64 0) (toU64 0) (toU64 1000) (toU64 0) (toU64 60000) ≡ contAt (toU64 1000) (toU64 0) (toU64 60000) (headerEnd contBuf) : Out} := refl
+def cont-arm : evidence {stepFact readSt factBytes contBuf max10 (toU64 0) (toU64 0) (toU64 1000) (toU64 0) (toU64 60000) ≡ contAt (toU64 1000) (toU64 0) (toU64 60000) (headerEnd contBuf) (toU64 0) (toU64 1) (toU64 4) : Out} := refl
 
-def cont-peer-done : evidence {step0 (take (step0 (take sawCont) factPeer contBuf max10 (toU64 0) (toU64 0))) factWrote contBuf max10 (toU64 1) (toU64 1) ≡ owe (toU64 400) (headerEnd contBuf) : Out} := refl
+def cont-peer-done : evidence {step0 (take (step0 (take sawCont) factPeer contBuf max10 (toU64 0) (toU64 0))) factWrote contBuf max10 (toU64 1) (toU64 1) ≡ owe (toU64 400) (headerEnd contBuf) (toU64 0) (toU64 1) (toU64 4) : Out} := refl
 
-def cont-body : evidence {step0 contSent factBytes contFull max10 (toU64 0) (toU64 0) ≡ reply (toU64 0) (headerEnd contBuf) : Out} := refl
+def cont-body : evidence {step0 contSent factBytes contFull max10 (toU64 0) (toU64 0) ≡ reply (toU64 0) (headerEnd contBuf) (toU64 0) (toU64 1) (toU64 4) : Out} := refl
 
-def cont-hold : evidence {step0 contSent factBytes contBuf max10 (toU64 0) (toU64 0) ≡ moreSent (toU64 0) (toU64 0) (toU64 0) (headerEnd contBuf) : Out} := refl
+def cont-hold : evidence {step0 contSent factBytes contBuf max10 (toU64 0) (toU64 0) ≡ moreSent (toU64 0) (toU64 0) (toU64 0) (headerEnd contBuf) (toU64 0) (toU64 1) (toU64 4) : Out} := refl
 
 def now-read : evidence {sawNow ≡ quiet (toU64 0) : Out} := refl
 
@@ -1260,9 +1302,9 @@ def owe-wrote : evidence {step0 owe400 factWrote badBuf max10 (toU64 1) (toU64 1
 
 def owe-failed : evidence {step0 owe400 factFailed badBuf max10 (toU64 0) (toU64 0) ≡ quiet (toU64 400) : Out} := refl
 
-def owe-peer : evidence {step0 owe400 factPeer badBuf max10 (toU64 0) (toU64 0) ≡ owe (toU64 400) (headerEnd badBuf) : Out} := refl
+def owe-peer : evidence {step0 owe400 factPeer badBuf max10 (toU64 0) (toU64 0) ≡ owe (toU64 400) (headerEnd badBuf) (toU64 0) (toU64 0) (toU64 0) : Out} := refl
 
-def owe-now : evidence {step0 owe400 factNow badBuf max10 (toU64 0) (toU64 0) ≡ owe (toU64 400) (headerEnd badBuf) : Out} := refl
+def owe-now : evidence {step0 owe400 factNow badBuf max10 (toU64 0) (toU64 0) ≡ owe (toU64 400) (headerEnd badBuf) (toU64 0) (toU64 0) (toU64 0) : Out} := refl
 
 def after-413-accept : evidence {step0 closed413 factAccepted tooBig max10 (toU64 0) (toU64 0) ≡ quiet (toU64 413) : Out} := refl
 
@@ -1298,9 +1340,9 @@ def sawFinGet : run Out :=
 def sawFinBody : run Out :=
   step0 readSt factPeer postBody max10 (toU64 0) (toU64 0)
 
-def fin-get-reply : evidence {sawFinGet ≡ reply (toU64 1) (headerEnd getBuf) : Out} := refl
+def fin-get-reply : evidence {sawFinGet ≡ reply (toU64 1) (headerEnd getBuf) (toU64 0) (toU64 0) (toU64 0) : Out} := refl
 
-def fin-body-reply : evidence {sawFinBody ≡ reply (toU64 1) (headerEnd postBody) : Out} := refl
+def fin-body-reply : evidence {sawFinBody ≡ reply (toU64 1) (headerEnd postBody) (toU64 0) (toU64 1) (toU64 4) : Out} := refl
 
 def fin-get-done : evidence {step0 (take sawFinGet) factWrote getBuf max10 (toU64 8) (toU64 8) ≡ quiet (toU64 0) : Out} := refl
 
@@ -1309,7 +1351,7 @@ def fin-body-done : evidence {step0 (take sawFinBody) factWrote postBody max10 (
 def oweShort : run Out :=
   step0 owe400 factWrote badBuf max10 (toU64 1) (toU64 4)
 
-def owe-wrote-short : evidence {oweShort ≡ still (toU64 1) (toU64 400) (toU64 3) (toU64 1) (headerEnd badBuf) : Out} := refl
+def owe-wrote-short : evidence {oweShort ≡ still (toU64 1) (toU64 400) (toU64 3) (toU64 1) (headerEnd badBuf) (toU64 0) (toU64 0) (toU64 0) : Out} := refl
 
 def owe-left : evidence {leftOf oweShort ≡ toU64 3 : U64} := refl
 
@@ -1320,7 +1362,7 @@ def owe-wrote-over : evidence {step0 owe400 factWrote badBuf max10 (toU64 9) (to
 def oweZero : run Out :=
   step0 owe400 factWrote badBuf max10 (toU64 0) (toU64 8)
 
-def owe-wrote-zero : evidence {oweZero ≡ still (toU64 1) (toU64 400) (toU64 8) (toU64 1) (headerEnd badBuf) : Out} := refl
+def owe-wrote-zero : evidence {oweZero ≡ still (toU64 1) (toU64 400) (toU64 8) (toU64 1) (headerEnd badBuf) (toU64 0) (toU64 0) (toU64 0) : Out} := refl
 
 def owe-stale-owed : evidence {step0 (take oweZero) factWrote badBuf max10 (toU64 8) (toU64 1) ≡ quiet (toU64 400) : Out} := refl
 
@@ -1329,21 +1371,21 @@ def owe-empty-span : evidence {step0 owe400 factWrote badBuf max10 (toU64 0) (to
 def owe413Short : run Out :=
   step0 (take saw413Body) factWrote postBody (toU64 0) (toU64 1) (toU64 4)
 
-def owe-413-short : evidence {owe413Short ≡ still (toU64 1) (toU64 413) (toU64 3) (toU64 1) (headerEnd postBody) : Out} := refl
+def owe-413-short : evidence {owe413Short ≡ still (toU64 1) (toU64 413) (toU64 3) (toU64 1) (headerEnd postBody) (toU64 0) (toU64 1) (toU64 4) : Out} := refl
 
-def head-reply : evidence {sawHead ≡ reply (toU64 0) (headerEnd headBuf) : Out} := refl
+def head-reply : evidence {sawHead ≡ reply (toU64 0) (headerEnd headBuf) (toU64 0) (toU64 0) (toU64 0) : Out} := refl
 
 def head-done : evidence {step0 (take sawHead) factWrote headBuf max10 (toU64 8) (toU64 8) ≡ idle : Out} := refl
 
-def close-reply : evidence {sawClose ≡ reply (toU64 1) (headerEnd closeBuf) : Out} := refl
+def close-reply : evidence {sawClose ≡ reply (toU64 1) (headerEnd closeBuf) (toU64 0) (toU64 0) (toU64 0) : Out} := refl
 
 def close-done : evidence {step0 (take sawClose) factWrote closeBuf max10 (toU64 8) (toU64 8) ≡ quiet (toU64 0) : Out} := refl
 
-def http10-reply : evidence {sawHttp10 ≡ reply (toU64 1) (headerEnd http10Buf) : Out} := refl
+def http10-reply : evidence {sawHttp10 ≡ reply (toU64 1) (headerEnd http10Buf) (toU64 0) (toU64 0) (toU64 0) : Out} := refl
 
 def http10-done : evidence {step0 (take sawHttp10) factWrote http10Buf max10 (toU64 8) (toU64 8) ≡ quiet (toU64 0) : Out} := refl
 
-def reply-short : evidence {step0 repGet factWrote getBuf max10 (toU64 3) (toU64 8) ≡ still (toU64 3) (toU64 0) (toU64 5) (toU64 0) (headerEnd getBuf) : Out} := refl
+def reply-short : evidence {step0 repGet factWrote getBuf max10 (toU64 3) (toU64 8) ≡ still (toU64 3) (toU64 0) (toU64 5) (toU64 0) (headerEnd getBuf) (toU64 0) (toU64 0) (toU64 0) : Out} := refl
 
 def replyLeft : run Out :=
   step0 repGet factWrote getBuf max10 (toU64 1) (toU64 8)
@@ -1364,7 +1406,7 @@ def reply-over : evidence {step0 repGet factWrote getBuf max10 (toU64 9) (toU64 
 def replyZero : run Out :=
   step0 repGet factWrote getBuf max10 (toU64 0) (toU64 8)
 
-def reply-wrote-zero : evidence {replyZero ≡ still (toU64 3) (toU64 0) (toU64 8) (toU64 0) (headerEnd getBuf) : Out} := refl
+def reply-wrote-zero : evidence {replyZero ≡ still (toU64 3) (toU64 0) (toU64 8) (toU64 0) (headerEnd getBuf) (toU64 0) (toU64 0) (toU64 0) : Out} := refl
 
 def reply-stale-owed : evidence {step0 (take replyZero) factWrote getBuf max10 (toU64 8) (toU64 0) ≡ idle : Out} := refl
 
@@ -1374,9 +1416,9 @@ def reply-failed : evidence {step0 repGet factFailed getBuf max10 (toU64 0) (toU
 
 def reply-failed-mid : evidence {step0 (take replyLeft) factFailed getBuf max10 (toU64 0) (toU64 0) ≡ quiet (toU64 0) : Out} := refl
 
-def reply-now : evidence {step0 repGet factNow getBuf max10 (toU64 0) (toU64 0) ≡ reply (toU64 0) (headerEnd getBuf) : Out} := refl
+def reply-now : evidence {step0 repGet factNow getBuf max10 (toU64 0) (toU64 0) ≡ reply (toU64 0) (headerEnd getBuf) (toU64 0) (toU64 0) (toU64 0) : Out} := refl
 
-def reply-now-keeps-left : evidence {step0 (take replyLeft) factNow getBuf max10 (toU64 0) (toU64 0) ≡ still (toU64 3) (toU64 0) (toU64 7) (toU64 0) (headerEnd getBuf) : Out} := refl
+def reply-now-keeps-left : evidence {step0 (take replyLeft) factNow getBuf max10 (toU64 0) (toU64 0) ≡ still (toU64 3) (toU64 0) (toU64 7) (toU64 0) (headerEnd getBuf) (toU64 0) (toU64 0) (toU64 0) : Out} := refl
 
 def replyPeer : run Out :=
   step0 (take sawTwo) factPeer twoGet max10 (toU64 0) (toU64 0)
@@ -1385,11 +1427,11 @@ def peer-drops-tail : evidence {step0 (take replyPeer) factWrote twoGet max10 (t
 
 def peer-keep : evidence {keepOut replyPeer ≡ toU64 1 : U64} := refl
 
-def pipe-one : evidence {sawTwo ≡ reply (toU64 0) (headerEnd twoGet) : Out} := refl
+def pipe-one : evidence {sawTwo ≡ reply (toU64 0) (headerEnd twoGet) (toU64 0) (toU64 0) (toU64 0) : Out} := refl
 
 def pipe-tail : evidence {tailOf twoGet ≡ getBuf : Slice} := refl
 
-def pipe-second : evidence {step0 (take sawTwo) factWrote twoGet max10 (toU64 4) (toU64 4) ≡ reply (toU64 0) (headerEnd getBuf) : Out} := refl
+def pipe-second : evidence {step0 (take sawTwo) factWrote twoGet max10 (toU64 4) (toU64 4) ≡ reply (toU64 0) (headerEnd getBuf) (toU64 0) (toU64 0) (toU64 0) : Out} := refl
 
 def pipeTail : run Out :=
   step0 (take (step0 (take sawTwo) factWrote twoGet max10 (toU64 4) (toU64 4))) factWrote getBuf max10 (toU64 4) (toU64 4)
@@ -1399,7 +1441,7 @@ def pipe-done : evidence {pipeTail ≡ idle : Out} := refl
 def pipeAgain : run Out :=
   step0 (take (step0 (take sawTwo) factWrote twoGet max10 (toU64 4) (toU64 4))) factWrote twoGet max10 (toU64 4) (toU64 4)
 
-def pipe-full-again : evidence {pipeAgain ≡ reply (toU64 0) (headerEnd getBuf) : Out} := refl
+def pipe-full-again : evidence {pipeAgain ≡ reply (toU64 0) (headerEnd getBuf) (toU64 0) (toU64 0) (toU64 0) : Out} := refl
 
 def pipe-again-differs : evidence {u64eq (spanOf pipeAgain) (spanOf pipeTail) ≡ false : Bool} := refl
 
@@ -1407,19 +1449,19 @@ def pipe-partial : evidence {step0 (take sawPipe) factWrote pipePart max10 (toU6
 
 def frame-get : evidence {framedEnd getBuf ≡ sliceLen getBuf : U64} := refl
 
-def stream-open : evidence {sawStream ≡ reply (toU64 0) (headerEnd streamBuf) : Out} := refl
+def stream-open : evidence {sawStream ≡ reply (toU64 0) (headerEnd streamBuf) (toU64 0) (toU64 1) (toU64 16385) : Out} := refl
 
-def stream-413 : evidence {sawStream413 ≡ owe (toU64 413) (headerEnd streamBuf) : Out} := refl
+def stream-413 : evidence {sawStream413 ≡ owe (toU64 413) (headerEnd streamBuf) (toU64 0) (toU64 1) (toU64 16385) : Out} := refl
 
-def stream-peer-reply : evidence {sawStreamPeer ≡ reply (toU64 1) (headerEnd streamBuf) : Out} := refl
+def stream-peer-reply : evidence {sawStreamPeer ≡ reply (toU64 1) (headerEnd streamBuf) (toU64 0) (toU64 1) (toU64 16385) : Out} := refl
 
 def stream-peer-done : evidence {step0 (take sawStreamPeer) factWrote streamBuf maxBig (toU64 8) (toU64 8) ≡ quiet (toU64 0) : Out} := refl
 
-def write-bytes-holds : evidence {step0 repGet factBytes getBuf max10 (toU64 0) (toU64 0) ≡ reply (toU64 0) (headerEnd getBuf) : Out} := refl
+def write-bytes-holds : evidence {step0 repGet factBytes getBuf max10 (toU64 0) (toU64 0) ≡ reply (toU64 0) (headerEnd getBuf) (toU64 0) (toU64 0) (toU64 0) : Out} := refl
 
-def write-accept : evidence {stepFact repGet factAccepted getBuf max10 (toU64 0) (toU64 0) (toU64 1000) (toU64 424242) (toU64 60000) ≡ moreAt (toU64 1000) (toU64 0) (toU64 60000) (toU64 0) : Out} := refl
+def write-accept : evidence {stepFact repGet factAccepted getBuf max10 (toU64 0) (toU64 0) (toU64 1000) (toU64 424242) (toU64 60000) ≡ moreAt (toU64 1000) (toU64 0) (toU64 60000) (toU64 0) (toU64 0) (toU64 0) (toU64 0) : Out} := refl
 
-def owe-accept : evidence {stepFact owe400 factAccepted badBuf max10 (toU64 0) (toU64 0) (toU64 1000) (toU64 424242) (toU64 60000) ≡ moreAt (toU64 1000) (toU64 0) (toU64 60000) (toU64 0) : Out} := refl
+def owe-accept : evidence {stepFact owe400 factAccepted badBuf max10 (toU64 0) (toU64 0) (toU64 1000) (toU64 424242) (toU64 60000) ≡ moreAt (toU64 1000) (toU64 0) (toU64 60000) (toU64 0) (toU64 0) (toU64 0) (toU64 0) : Out} := refl
 
 def read-failed-holds : evidence {step0 readSt factFailed getBuf max10 (toU64 0) (toU64 0) ≡ more : Out} := refl
 
@@ -1432,9 +1474,9 @@ def idle-failed-holds : evidence {step0 idleSt factFailed b"" max10 (toU64 0) (t
 
 def idle-peer : evidence {step0 idleSt factPeer b"" max10 (toU64 0) (toU64 0) ≡ quiet (toU64 0) : Out} := refl
 
-def idle-peer-get : evidence {step0 idleSt factPeer getBuf max10 (toU64 0) (toU64 0) ≡ reply (toU64 1) (headerEnd getBuf) : Out} := refl
+def idle-peer-get : evidence {step0 idleSt factPeer getBuf max10 (toU64 0) (toU64 0) ≡ reply (toU64 1) (headerEnd getBuf) (toU64 0) (toU64 0) (toU64 0) : Out} := refl
 
-def idle-second : evidence {step0 idleSt factBytes getBuf max10 (toU64 0) (toU64 0) ≡ reply (toU64 0) (headerEnd getBuf) : Out} := refl
+def idle-second : evidence {step0 idleSt factBytes getBuf max10 (toU64 0) (toU64 0) ≡ reply (toU64 0) (headerEnd getBuf) (toU64 0) (toU64 0) (toU64 0) : Out} := refl
 
 def idle-partial : evidence {step0 idleSt factBytes lineBuf max10 (toU64 0) (toU64 0) ≡ more : Out} := refl
 
@@ -1467,7 +1509,7 @@ def sawAcceptWake : run Out :=
 
 def accept-wake : evidence {wakeOf sawAcceptWake ≡ toU64 61000 : U64} := refl
 
-def accept-drops-deadline : evidence {sawAcceptWake ≡ moreAt (toU64 1000) (toU64 0) (toU64 60000) (toU64 0) : Out} := refl
+def accept-drops-deadline : evidence {sawAcceptWake ≡ moreAt (toU64 1000) (toU64 0) (toU64 60000) (toU64 0) (toU64 0) (toU64 0) (toU64 0) : Out} := refl
 
 def sawLineKeep : run Out :=
   stepFact readSt factBytes lineBuf max10 (toU64 0) (toU64 0) (toU64 1000) (toU64 424242) (toU64 60000)
@@ -1508,14 +1550,14 @@ def sawCapLine : run Out :=
 def sawCapHdr : run Out :=
   step0 readSt factBytes capHdr maxBig (toU64 0) (toU64 0)
 
-def cap-line-414 : evidence {sawCapLine ≡ owe (toU64 414) (toU64 0) : Out} := refl
+def cap-line-414 : evidence {sawCapLine ≡ owe (toU64 414) (toU64 0) (toU64 0) (toU64 0) (toU64 0) : Out} := refl
 
-def cap-hdr-431 : evidence {sawCapHdr ≡ owe (toU64 431) (toU64 0) : Out} := refl
+def cap-hdr-431 : evidence {sawCapHdr ≡ owe (toU64 431) (toU64 0) (toU64 0) (toU64 0) (toU64 0) : Out} := refl
 
 def capLineShort : run Out :=
   step0 (take sawCapLine) factWrote capLine maxBig (toU64 1) (toU64 4)
 
-def cap-line-short : evidence {capLineShort ≡ still (toU64 1) (toU64 414) (toU64 3) (toU64 1) (toU64 0) : Out} := refl
+def cap-line-short : evidence {capLineShort ≡ still (toU64 1) (toU64 414) (toU64 3) (toU64 1) (toU64 0) (toU64 0) (toU64 0) (toU64 0) : Out} := refl
 
 def cap-line-done : evidence {step0 (take capLineShort) factWrote capLine maxBig (toU64 3) (toU64 0) ≡ quiet (toU64 414) : Out} := refl
 
@@ -1527,7 +1569,7 @@ def cap-hdr-done : evidence {step0 (take sawCapHdr) factWrote capHdr maxBig (toU
 def shortTwo : run Out :=
   step0 (take sawTwo) factWrote twoGet max10 (toU64 1) (toU64 8)
 
-def peer-short : evidence {step0 (take shortTwo) factPeer twoGet max10 (toU64 0) (toU64 0) ≡ still (toU64 3) (toU64 0) (toU64 7) (toU64 1) (headerEnd twoGet) : Out} := refl
+def peer-short : evidence {step0 (take shortTwo) factPeer twoGet max10 (toU64 0) (toU64 0) ≡ still (toU64 3) (toU64 0) (toU64 7) (toU64 1) (headerEnd twoGet) (toU64 0) (toU64 0) (toU64 0) : Out} := refl
 
 def peer-short-drops : evidence {step0 (take (step0 (take shortTwo) factPeer twoGet max10 (toU64 0) (toU64 0))) factWrote twoGet max10 (toU64 7) (toU64 0) ≡ quiet (toU64 0) : Out} := refl
 
@@ -1535,19 +1577,19 @@ def peer-short-drops : evidence {step0 (take (step0 (take shortTwo) factPeer two
 def leftoverSt : run St :=
   take (step0 (take sawPipe) factWrote pipePart max10 (toU64 4) (toU64 4))
 
-def leftover-bytes : evidence {step0 leftoverSt factBytes getBuf max10 (toU64 0) (toU64 0) ≡ reply (toU64 0) (headerEnd getBuf) : Out} := refl
+def leftover-bytes : evidence {step0 leftoverSt factBytes getBuf max10 (toU64 0) (toU64 0) ≡ reply (toU64 0) (headerEnd getBuf) (toU64 0) (toU64 0) (toU64 0) : Out} := refl
 
 def leftoverWake : run Out :=
   stepFact (take sawPipe) factWrote pipePart max10 (toU64 4) (toU64 4) (toU64 1000) (toU64 0) (toU64 60000)
 
-def leftover-wake : evidence {leftoverWake ≡ moreAt (toU64 1000) (toU64 0) (toU64 60000) (toU64 0) : Out} := refl
+def leftover-wake : evidence {leftoverWake ≡ moreAt (toU64 1000) (toU64 0) (toU64 60000) (toU64 0) (toU64 0) (toU64 0) (toU64 0) : Out} := refl
 
 def leftoverKeep : run Out :=
   stepFact (take sawPipe) factWrote pipePart max10 (toU64 4) (toU64 4) (toU64 1000) (toU64 424242) (toU64 60000)
 
 def leftover-wake-keeps : evidence {wakeOf leftoverKeep ≡ toU64 424242 : U64} := refl
 
-def idle-peer-partial : evidence {step0 idleSt factPeer lineBuf max10 (toU64 0) (toU64 0) ≡ owe (toU64 400) (toU64 0) : Out} := refl
+def idle-peer-partial : evidence {step0 idleSt factPeer lineBuf max10 (toU64 0) (toU64 0) ≡ owe (toU64 400) (toU64 0) (toU64 0) (toU64 0) (toU64 0) : Out} := refl
 
 def closedClose : run St :=
   take (step0 (take sawClose) factWrote closeBuf max10 (toU64 8) (toU64 8))
@@ -1556,7 +1598,7 @@ def after-close-failed : evidence {step0 closedClose factFailed closeBuf max10 (
 
 def after-close-accept : evidence {step0 closedClose factAccepted b"" max10 (toU64 0) (toU64 0) ≡ quiet (toU64 0) : Out} := refl
 
-def idle-accept : evidence {stepFact idleSt factAccepted b"" max10 (toU64 0) (toU64 0) (toU64 1000) (toU64 424242) (toU64 60000) ≡ moreAt (toU64 1000) (toU64 0) (toU64 60000) (toU64 0) : Out} := refl
+def idle-accept : evidence {stepFact idleSt factAccepted b"" max10 (toU64 0) (toU64 0) (toU64 1000) (toU64 424242) (toU64 60000) ≡ moreAt (toU64 1000) (toU64 0) (toU64 60000) (toU64 0) (toU64 0) (toU64 0) (toU64 0) : Out} := refl
 
 -- headersDone, and the header block ends past 16384. The request
 -- line fits, so capCode is 431. capHdr is the other arm: the header
@@ -1571,48 +1613,72 @@ def headers-done-431 : evidence {headersDone capHdrDone ≡ true : Bool} := refl
 
 def headers-end-431 : evidence {gt16384 (headerEnd capHdrDone) ≡ true : Bool} := refl
 
-def cap-hdr-done-431 : evidence {sawHdrDone ≡ owe (toU64 431) (headerEnd capHdrDone) : Out} := refl
+def cap-hdr-done-431 : evidence {sawHdrDone ≡ owe (toU64 431) (headerEnd capHdrDone) (toU64 0) (toU64 0) (toU64 0) : Out} := refl
 
-def over-400 : evidence {overStatus (toU64 400) (toU64 0) ≡ owe (toU64 400) (toU64 0) : Out} := refl
+def over-400 : evidence {overStatus (toU64 400) (toU64 0) (toU64 0) (toU64 0) (toU64 0) ≡ owe (toU64 400) (toU64 0) (toU64 0) (toU64 0) (toU64 0) : Out} := refl
 
-def over-413 : evidence {overStatus (toU64 413) (toU64 0) ≡ owe (toU64 413) (toU64 0) : Out} := refl
+def over-413 : evidence {overStatus (toU64 413) (toU64 0) (toU64 0) (toU64 0) (toU64 0) ≡ owe (toU64 413) (toU64 0) (toU64 0) (toU64 0) (toU64 0) : Out} := refl
 
-def over-other : evidence {coverOf (overStatus (toU64 500) (toU64 0)) ≡ toU64 1 : U64} := refl
+def over-other : evidence {coverOf (overStatus (toU64 500) (toU64 0) (toU64 0) (toU64 0) (toU64 0)) ≡ toU64 1 : U64} := refl
 
-def hand-agree : evidence {hand (toU64 0) (toU64 0) (toU64 0) (toU64 0) (toU64 0) (toU64 0) (toU64 1) (toU64 0) (toU64 1) (toU64 0) ≡ reply (toU64 0) (toU64 0) : Out} := refl
+def hand-agree : evidence {hand (toU64 0) (toU64 0) (toU64 0) (toU64 0) (toU64 0) (toU64 0) (toU64 1) (toU64 0) (toU64 1) (toU64 0) (toU64 0) (toU64 0) (toU64 0) ≡ reply (toU64 0) (toU64 0) (toU64 0) (toU64 0) (toU64 0) : Out} := refl
 
-def hand-close : evidence {hand (toU64 0) (toU64 1) (toU64 0) (toU64 0) (toU64 0) (toU64 0) (toU64 1) (toU64 0) (toU64 1) (toU64 0) ≡ reply (toU64 1) (toU64 0) : Out} := refl
+def hand-close : evidence {hand (toU64 0) (toU64 1) (toU64 0) (toU64 0) (toU64 0) (toU64 0) (toU64 1) (toU64 0) (toU64 1) (toU64 0) (toU64 0) (toU64 0) (toU64 0) ≡ reply (toU64 1) (toU64 0) (toU64 0) (toU64 0) (toU64 0) : Out} := refl
 
-def hand-bad : evidence {hand (toU64 0) (toU64 0) (toU64 1) (toU64 0) (toU64 0) (toU64 0) (toU64 1) (toU64 0) (toU64 1) (toU64 0) ≡ reply (toU64 1) (toU64 0) : Out} := refl
+def hand-bad : evidence {hand (toU64 0) (toU64 0) (toU64 1) (toU64 0) (toU64 0) (toU64 0) (toU64 1) (toU64 0) (toU64 1) (toU64 0) (toU64 0) (toU64 0) (toU64 0) ≡ reply (toU64 1) (toU64 0) (toU64 0) (toU64 0) (toU64 0) : Out} := refl
 
-def hand-keep : evidence {hand (toU64 1) (toU64 0) (toU64 0) (toU64 0) (toU64 0) (toU64 0) (toU64 1) (toU64 0) (toU64 1) (toU64 0) ≡ reply (toU64 1) (toU64 0) : Out} := refl
+def hand-keep : evidence {hand (toU64 1) (toU64 0) (toU64 0) (toU64 0) (toU64 0) (toU64 0) (toU64 1) (toU64 0) (toU64 1) (toU64 0) (toU64 0) (toU64 0) (toU64 0) ≡ reply (toU64 1) (toU64 0) (toU64 0) (toU64 0) (toU64 0) : Out} := refl
 
-def hand-500 : evidence {hand (toU64 0) (toU64 0) (toU64 0) (toU64 1) (toU64 1) (toU64 0) (toU64 1) (toU64 0) (toU64 1) (toU64 0) ≡ shutHandle (toU64 500) : Out} := refl
+def hand-500 : evidence {hand (toU64 0) (toU64 0) (toU64 0) (toU64 1) (toU64 1) (toU64 0) (toU64 1) (toU64 0) (toU64 1) (toU64 0) (toU64 0) (toU64 0) (toU64 0) ≡ shutHandle (toU64 500) : Out} := refl
 
-def hand-refuse : evidence {hand (toU64 0) (toU64 0) (toU64 0) (toU64 0) (toU64 1) (toU64 0) (toU64 1) (toU64 0) (toU64 1) (toU64 0) ≡ shutHandle (toU64 0) : Out} := refl
+def hand-refuse : evidence {hand (toU64 0) (toU64 0) (toU64 0) (toU64 0) (toU64 1) (toU64 0) (toU64 1) (toU64 0) (toU64 1) (toU64 0) (toU64 0) (toU64 0) (toU64 0) ≡ shutHandle (toU64 0) : Out} := refl
 
-def hand-pull-len : evidence {hand (toU64 0) (toU64 0) (toU64 0) (toU64 0) (toU64 0) (toU64 1) (toU64 1) (toU64 0) (toU64 1) (toU64 0) ≡ spanPull (toU64 0) (toU64 3) (toU64 0) : Out} := refl
+def hand-pull-len : evidence {hand (toU64 0) (toU64 0) (toU64 0) (toU64 0) (toU64 0) (toU64 1) (toU64 1) (toU64 0) (toU64 1) (toU64 0) (toU64 0) (toU64 0) (toU64 0) ≡ spanPull (toU64 0) (toU64 3) (toU64 0) (toU64 0) (toU64 0) (toU64 0) : Out} := refl
 
-def hand-pull-len-bad : evidence {hand (toU64 0) (toU64 0) (toU64 1) (toU64 0) (toU64 0) (toU64 1) (toU64 1) (toU64 0) (toU64 1) (toU64 0) ≡ spanPull (toU64 1) (toU64 3) (toU64 0) : Out} := refl
+def hand-pull-len-bad : evidence {hand (toU64 0) (toU64 0) (toU64 1) (toU64 0) (toU64 0) (toU64 1) (toU64 1) (toU64 0) (toU64 1) (toU64 0) (toU64 0) (toU64 0) (toU64 0) ≡ spanPull (toU64 1) (toU64 3) (toU64 0) (toU64 0) (toU64 0) (toU64 0) : Out} := refl
 
-def hand-pull-chunk : evidence {hand (toU64 0) (toU64 0) (toU64 0) (toU64 0) (toU64 0) (toU64 2) (toU64 1) (toU64 0) (toU64 1) (toU64 0) ≡ spanPull (toU64 0) (toU64 4) (toU64 0) : Out} := refl
+def hand-pull-chunk : evidence {hand (toU64 0) (toU64 0) (toU64 0) (toU64 0) (toU64 0) (toU64 2) (toU64 1) (toU64 0) (toU64 1) (toU64 0) (toU64 0) (toU64 0) (toU64 0) ≡ spanPull (toU64 0) (toU64 4) (toU64 0) (toU64 0) (toU64 0) (toU64 0) : Out} := refl
 
-def hand-pull-chunk-close : evidence {hand (toU64 0) (toU64 1) (toU64 0) (toU64 0) (toU64 0) (toU64 2) (toU64 1) (toU64 0) (toU64 1) (toU64 0) ≡ spanPull (toU64 1) (toU64 4) (toU64 0) : Out} := refl
+def hand-pull-chunk-close : evidence {hand (toU64 0) (toU64 1) (toU64 0) (toU64 0) (toU64 0) (toU64 2) (toU64 1) (toU64 0) (toU64 1) (toU64 0) (toU64 0) (toU64 0) (toU64 0) ≡ spanPull (toU64 1) (toU64 4) (toU64 0) (toU64 0) (toU64 0) (toU64 0) : Out} := refl
 
-def hand-pull-delim : evidence {hand (toU64 0) (toU64 0) (toU64 0) (toU64 0) (toU64 0) (toU64 2) (toU64 0) (toU64 0) (toU64 1) (toU64 0) ≡ spanPull (toU64 1) (toU64 5) (toU64 0) : Out} := refl
+def hand-pull-delim : evidence {hand (toU64 0) (toU64 0) (toU64 0) (toU64 0) (toU64 0) (toU64 2) (toU64 0) (toU64 0) (toU64 1) (toU64 0) (toU64 0) (toU64 0) (toU64 0) ≡ spanPull (toU64 1) (toU64 5) (toU64 0) (toU64 0) (toU64 0) (toU64 0) : Out} := refl
 
-def hand-pull-head : evidence {hand (toU64 0) (toU64 0) (toU64 0) (toU64 0) (toU64 0) (toU64 2) (toU64 1) (toU64 1) (toU64 1) (toU64 0) ≡ spanPull (toU64 1) (toU64 5) (toU64 0) : Out} := refl
+def hand-pull-head : evidence {hand (toU64 0) (toU64 0) (toU64 0) (toU64 0) (toU64 0) (toU64 2) (toU64 1) (toU64 1) (toU64 1) (toU64 0) (toU64 0) (toU64 0) (toU64 0) ≡ spanPull (toU64 1) (toU64 5) (toU64 0) (toU64 0) (toU64 0) (toU64 0) : Out} := refl
 
-def hand-toobig : evidence {hand (toU64 0) (toU64 0) (toU64 0) (toU64 0) (toU64 0) (toU64 0) (toU64 1) (toU64 0) (toU64 0) (toU64 0) ≡ shutHandle (toU64 0) : Out} := refl
+def hand-toobig : evidence {hand (toU64 0) (toU64 0) (toU64 0) (toU64 0) (toU64 0) (toU64 0) (toU64 1) (toU64 0) (toU64 0) (toU64 0) (toU64 0) (toU64 0) (toU64 0) ≡ shutHandle (toU64 0) : Out} := refl
 
-def hand-toobig-owe : evidence {hand (toU64 0) (toU64 0) (toU64 0) (toU64 1) (toU64 0) (toU64 0) (toU64 1) (toU64 0) (toU64 0) (toU64 0) ≡ oweFit (toU64 0) : Out} := refl
+def hand-toobig-owe : evidence {hand (toU64 0) (toU64 0) (toU64 0) (toU64 1) (toU64 0) (toU64 0) (toU64 1) (toU64 0) (toU64 0) (toU64 0) (toU64 0) (toU64 0) (toU64 0) ≡ oweFit (toU64 0) (toU64 0) (toU64 0) (toU64 0) : Out} := refl
 
-def hand-500-cover : evidence {coverOf (hand (toU64 0) (toU64 0) (toU64 0) (toU64 1) (toU64 1) (toU64 0) (toU64 1) (toU64 0) (toU64 1) (toU64 0)) ≡ toU64 0 : U64} := refl
+def hand-500-cover : evidence {coverOf (hand (toU64 0) (toU64 0) (toU64 0) (toU64 1) (toU64 1) (toU64 0) (toU64 1) (toU64 0) (toU64 1) (toU64 0) (toU64 0) (toU64 0) (toU64 0)) ≡ toU64 0 : U64} := refl
 
-def hand-pull-cover : evidence {coverOf (hand (toU64 0) (toU64 0) (toU64 0) (toU64 0) (toU64 0) (toU64 1) (toU64 1) (toU64 0) (toU64 1) (toU64 0)) ≡ toU64 0 : U64} := refl
+def hand-pull-cover : evidence {coverOf (hand (toU64 0) (toU64 0) (toU64 0) (toU64 0) (toU64 0) (toU64 1) (toU64 1) (toU64 0) (toU64 1) (toU64 0) (toU64 0) (toU64 0) (toU64 0)) ≡ toU64 0 : U64} := refl
 
 def hand-500-later : evidence {step0 (take (shutHandle (toU64 500))) factBytes getBuf max10 (toU64 0) (toU64 0) ≡ quiet (toU64 500) : Out} := refl
 
 def remember-get-step : evidence {rememberEnd (toU64 0) getBuf ≡ headerEnd getBuf : U64} := refl
 
 def hend-of-get : evidence {hendOf sawGet ≡ headerEnd getBuf : U64} := refl
+
+def te-of-get : evidence {teOf sawGet ≡ toU64 0 : U64} := refl
+
+def sawCL-of-get : evidence {sawCLOf sawGet ≡ toU64 0 : U64} := refl
+
+def cl-of-get : evidence {clOf sawGet ≡ toU64 0 : U64} := refl
+
+def te-of-chunk : evidence {teOf sawChunkOne ≡ toU64 1 : U64} := refl
+
+def sawCL-of-chunk : evidence {sawCLOf sawChunkOne ≡ toU64 0 : U64} := refl
+
+def cl-of-chunk : evidence {clOf sawChunkOne ≡ toU64 0 : U64} := refl
+
+def te-of-stream : evidence {teOf sawStream ≡ toU64 0 : U64} := refl
+
+def sawCL-of-stream : evidence {sawCLOf sawStream ≡ toU64 1 : U64} := refl
+
+def cl-of-stream : evidence {clOf sawStream ≡ toU64 16385 : U64} := refl
+
+def facts-idle : evidence {teOf idle ≡ toU64 0 : U64} := refl
+
+def facts-pipe-done : evidence {teOf pipeTail ≡ toU64 0 : U64} := refl
+
+def facts-pipe-done-cl : evidence {clOf pipeTail ≡ toU64 0 : U64} := refl
