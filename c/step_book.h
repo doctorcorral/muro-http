@@ -60,6 +60,7 @@ typedef struct BookStep {
   uint64_t bcode;
   uint64_t bleft;
   uint64_t bkeep;
+  uint64_t bhend;
   struct HostIn *hin;
   MuroHttpHandler handler;
   void *handler_user;

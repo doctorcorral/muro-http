@@ -157,6 +157,10 @@ typedef struct HttpStep {
   int spins;
   uint8_t spare[512];
   size_t spare_len;
+  /* Header-block end carried across steps. 0 means unknown. The book
+     adapter (muro_http_step in step_book.c) load/stores this as
+     BookStep.bhend so muro-hello-book can reuse a stored end. */
+  uint64_t hend;
 } HttpStep;
 
 void muro_http_step_bind(HttpStep *st, uint8_t *in, size_t in_cap, uint8_t *out, size_t out_cap,

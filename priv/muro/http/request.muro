@@ -1284,6 +1284,158 @@ def tailLen : run Π (+ s : Slice) → U64 :=
       | true => subi (sliceLen s) (headerEnd s)
       | false => toU64 0
 
+-- A stored end is the header block already found, so the fold
+-- does not run again. 0 means unknown: a complete header block
+-- is never at offset 0 (CRLF CRLF is at least four bytes). A
+-- stored end must also sit inside the current slice (hend <=
+-- sliceLen). A value past the slice is treated as unknown. The
+-- adapter clears hend before consume() slides the buffer:
+-- finishWrite resets it to 0 and remember stores that Out, then
+-- consume moves the tail. The bound check is the cheap fallback
+-- if that ever fails.
+def endKnown : run Π (+ hend : U64) → Π (+ s : Slice) → Bool :=
+  λ (+ hend : U64) → λ (+ s : Slice) →
+    and (not (u64eq hend (toU64 0))) (not (u64lt (sliceLen s) hend))
+
+def headerEndAt : run Π (+ hend : U64) → Π (+ s : Slice) → U64 :=
+  λ (+ hend : U64) → λ (+ s : Slice) →
+    match (endKnown hend s) motive (λ _ → U64)
+      | true => hend
+      | false => headerEnd s
+
+def headersDoneAt : run Π (+ hend : U64) → Π (+ s : Slice) → Bool :=
+  λ (+ hend : U64) → λ (+ s : Slice) →
+    match (endKnown hend s) motive (λ _ → Bool)
+      | true => true
+      | false => headersDone s
+
+-- Map a measured headerEnd to the stored form: the incomplete
+-- sentinel (sliceLen + 1) becomes 0, and a real end is kept.
+def storedEnd : run Π (+ h : U64) → Π (+ s : Slice) → U64 :=
+  λ (+ h : U64) → λ (+ s : Slice) →
+    match (u64eq h (addi (sliceLen s) (toU64 1))) motive (λ _ → U64)
+      | true => toU64 0
+      | false => h
+
+-- Bind headerEnd once. Callers should remember before statusOfAt
+-- so a complete first read takes the known-end arms and does not
+-- fold the header again at every headersDoneAt / headerEndAt site.
+def rememberEnd : run Π (+ hend : U64) → Π (+ s : Slice) → U64 :=
+  λ (+ hend : U64) → λ (+ s : Slice) →
+    match (endKnown hend s) motive (λ _ → U64)
+      | true => hend
+      | false => storedEnd (headerEnd s) s
+
+def bodyTailAt : run Π (+ hend : U64) → Π (+ s : Slice) → Slice :=
+  λ (+ hend : U64) → λ (+ s : Slice) →
+    match (headersDoneAt hend s) motive (λ _ → Slice)
+      | true =>
+          slice s (headerEndAt hend s) (subi (sliceLen s) (headerEndAt hend s))
+      | false => b""
+
+def chunkScanAt : run Π (+ hend : U64) → Π (+ s : Slice) → Ck :=
+  λ (+ hend : U64) → λ (+ s : Slice) →
+    sliceFold Ck ckStart
+      (λ (b : U8) → λ (_r : Slice) → λ (st : Ck) → ckByte st b)
+      (bodyTailAt hend s)
+
+
+def tailLenAt : run Π (+ hend : U64) → Π (+ s : Slice) → U64 :=
+  λ (+ hend : U64) → λ (+ s : Slice) →
+    match (headersDoneAt hend s) motive (λ _ → U64)
+      | true => subi (sliceLen s) (headerEndAt hend s)
+      | false => toU64 0
+
+def bodyAtAt : run Π (+ hend : U64) → Π (+ s : Slice) → U64 :=
+  λ (+ hend : U64) → λ (+ s : Slice) →
+    match (headersDoneAt hend s) motive (λ _ → U64)
+      | true => headerEndAt hend s
+      | false => addi (sliceLen s) (toU64 1)
+
+def bodyShortAt : run Π (+ hend : U64) → Π (+ st : HSt) → Π (+ s : Slice) → Bool :=
+  λ (+ hend : U64) → λ (+ st : HSt) → λ (+ s : Slice) →
+    and (sawCLSt st) (u64lt (sliceLen s) (addi (headerEndAt hend s) (contentLengthSt st)))
+
+def streamLenAt : run Π (+ hend : U64) → Π (+ st : HSt) → Π (+ s : Slice) → Bool :=
+  λ (+ hend : U64) → λ (+ st : HSt) → λ (+ s : Slice) →
+    and (headersDoneAt hend s) (and (bodyShortAt hend st s) (gt16384 (contentLengthSt st)))
+
+def bodyLenAt : run Π (+ hend : U64) → Π (+ st : HSt) → Π (+ s : Slice) → U64 :=
+  λ (+ hend : U64) → λ (+ st : HSt) → λ (+ s : Slice) →
+    match (headersDoneAt hend s) motive (λ _ → U64)
+      | true =>
+          (match (and (sawCLSt st) (not (bodyShortAt hend st s))) motive (λ _ → U64)
+            | true => contentLengthSt st
+            | false => toU64 0)
+      | false => toU64 0
+
+def chunkStatusAt : run Π (+ hend : U64) → Π (+ s : Slice) → Status :=
+  λ (+ hend : U64) → λ (+ s : Slice) →
+    match (chunkScanAt hend s) motive (λ _ → Status)
+      | ck ph _acc _rem _total _fl _at =>
+          (match (u64eq ph (toU64 9)) motive (λ _ → Status)
+            | true => status-malformed
+            | false =>
+                (match (u64eq ph (toU64 8)) motive (λ _ → Status)
+                  | true => status-ok
+                  | false =>
+                      (match (u64lt (toU64 16384) (tailLenAt hend s)) motive (λ _ → Status)
+                        | true => status-ok
+                        | false => status-need-more)))
+
+def statusOfAt : run Π (+ hend : U64) → Π (+ st : HSt) → Π (+ s : Slice) → Status :=
+  λ (+ hend : U64) → λ (+ st : HSt) → λ (+ s : Slice) →
+    match (has (scanFl st) (toU64 8192)) motive (λ _ → Status)
+      | true => status-malformed
+      | false =>
+          (match (headersDoneAt hend s) motive (λ _ → Status)
+            | true =>
+                (match (gt16384 (headerEndAt hend s)) motive (λ _ → Status)
+                  | true => status-malformed
+                  | false =>
+                      (match (lineOk s) motive (λ _ → Status)
+                        | true =>
+                            (match (headersOkSt st) motive (λ _ → Status)
+                              | true =>
+                                  (match (or (methodBad s) (or (teBadSt st) (hostBadSt st s))) motive (λ _ → Status)
+                                    | true => status-malformed
+                                    | false =>
+                                        (match (teUnkSt st) motive (λ _ → Status)
+                                          | true => status-unimplemented
+                                          | false =>
+                                              (match (teChunkSt st) motive (λ _ → Status)
+                                                | true => chunkStatusAt hend s
+                                                | false =>
+                                                    (match (streamLenAt hend st s) motive (λ _ → Status)
+                                                      | true => status-ok
+                                                      | false =>
+                                                          (match (bodyShortAt hend st s) motive (λ _ → Status)
+                                                            | true => status-need-more
+                                                            | false => status-ok)))))
+                              | false => status-malformed)
+                        | false => status-malformed))
+            | false =>
+                (match (gt16384 (sliceLen s)) motive (λ _ → Status)
+                  | true => status-malformed
+                  | false => status-need-more))
+
+def framedEndHs : run Π (+ hend : U64) → Π (+ st : HSt) → Π (+ s : Slice) → U64 :=
+  λ (+ hend : U64) → λ (+ st : HSt) → λ (+ s : Slice) →
+    match (teChunkSt st) motive (λ _ → U64)
+      | true =>
+          (match (chunkScanAt hend s) motive (λ _ → U64)
+            | ck ph _acc _rem _total _fl at =>
+                (match (u64eq ph (toU64 8)) motive (λ _ → U64)
+                  | true => addi (headerEndAt hend s) at
+                  | false => sliceLen s))
+      | false =>
+          (match (streamLenAt hend st s) motive (λ _ → U64)
+            | true => sliceLen s
+            | false => addi (bodyAtAt hend s) (bodyLenAt hend st s))
+
+def framedEndAt : run Π (+ hend : U64) → Π (+ s : Slice) → U64 :=
+  λ (+ hend : U64) → λ (+ s : Slice) → framedEndHs hend (scan s) s
+
 def chunkScan : run Π (+ s : Slice) → Ck :=
   λ (+ s : Slice) →
     sliceFold Ck ckStart
@@ -1712,3 +1864,21 @@ def stream-take-edge : evidence {streamTake b"POST /p HTTP/1.1\r\nHost: t\r\nCon
 def stream-end-edge : evidence {framedEnd b"POST /p HTTP/1.1\r\nHost: t\r\nContent-Length: 16384\r\n\r\n" ≡ toU64 52 : U64} := refl
 
 def stream-take-lf : evidence {streamTake b"POST /p HTTP/1.1\nHost: t\nContent-Length: 16385\n\n" ≡ toU64 0 : U64} := refl
+
+def remember-get : evidence {rememberEnd (toU64 0) b"GET / HTTP/1.1\r\nHost: h\r\n\r\n" ≡ headerEnd b"GET / HTTP/1.1\r\nHost: h\r\n\r\n" : U64} := refl
+
+def header-end-at-stored : evidence {headerEndAt (headerEnd b"GET / HTTP/1.1\r\nHost: h\r\n\r\n") b"GET / HTTP/1.1\r\nHost: h\r\n\r\n" ≡ headerEnd b"GET / HTTP/1.1\r\nHost: h\r\n\r\n" : U64} := refl
+
+def framed-end-at-get : evidence {framedEndAt (headerEnd b"GET / HTTP/1.1\r\nHost: h\r\n\r\n") b"GET / HTTP/1.1\r\nHost: h\r\n\r\n" ≡ framedEnd b"GET / HTTP/1.1\r\nHost: h\r\n\r\n" : U64} := refl
+
+def stored-end-incomplete : evidence {storedEnd (headerEnd b"GET / HTTP/1.1\r\nHost: h\r\n") b"GET / HTTP/1.1\r\nHost: h\r\n" ≡ toU64 0 : U64} := refl
+
+def status-of-at-remember : evidence {statusOfAt (rememberEnd (toU64 0) b"GET / HTTP/1.1\r\nHost: h\r\n\r\n") (scan b"GET / HTTP/1.1\r\nHost: h\r\n\r\n") b"GET / HTTP/1.1\r\nHost: h\r\n\r\n" ≡ statusOf b"GET / HTTP/1.1\r\nHost: h\r\n\r\n" : Status} := refl
+
+def framed-end-at-post : evidence {framedEndAt (headerEnd b"POST /posts HTTP/1.1\r\nHost: t\r\nContent-Length: 2\r\n\r\nab") b"POST /posts HTTP/1.1\r\nHost: t\r\nContent-Length: 2\r\n\r\nab" ≡ framedEnd b"POST /posts HTTP/1.1\r\nHost: t\r\nContent-Length: 2\r\n\r\nab" : U64} := refl
+
+def framed-end-at-chunk : evidence {framedEndAt (headerEnd b"POST /p HTTP/1.1\r\nHost: t\r\nTransfer-Encoding: chunked\r\n\r\n0\r\n\r\n") b"POST /p HTTP/1.1\r\nHost: t\r\nTransfer-Encoding: chunked\r\n\r\n0\r\n\r\n" ≡ framedEnd b"POST /p HTTP/1.1\r\nHost: t\r\nTransfer-Encoding: chunked\r\n\r\n0\r\n\r\n" : U64} := refl
+
+def framed-end-at-stream : evidence {framedEndAt (headerEnd b"POST /p HTTP/1.1\r\nHost: t\r\nContent-Length: 16385\r\n\r\n") b"POST /p HTTP/1.1\r\nHost: t\r\nContent-Length: 16385\r\n\r\n" ≡ framedEnd b"POST /p HTTP/1.1\r\nHost: t\r\nContent-Length: 16385\r\n\r\n" : U64} := refl
+
+def header-end-at-past : evidence {headerEndAt (toU64 99) b"GET / HTTP/1.1\r\nHost: h\r\n\r\n" ≡ headerEnd b"GET / HTTP/1.1\r\nHost: h\r\n\r\n" : U64} := refl

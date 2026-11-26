@@ -2,6 +2,84 @@
 
 ## 0.1.0-dev — unreleased
 
+- Pin muro `0.22.33` from Hex (`{:muro, "~> 0.22.33"}` in
+  `mix.exs`, `muro: "0.22.33"` in `muro.exs`), the work-saved
+  inliner and known-dead-arm specialization from
+  [murolang/muro#295](https://github.com/murolang/muro/pull/295),
+  and carry the end-of-headers offset in `step.muro` state. `St` and `Out` gain
+  `hend`. `0` means unknown; a complete header block is never at
+  offset `0`. `rememberEnd` records `headerEnd` once headers are
+  done. `onBuf` binds one `scan` and that stored end, then uses
+  `statusOfAt`, `policyHs`, `wantContHs`, `headerEndAt`,
+  `chunkScanAt`, and `framedEndAt` so later steps do not walk the
+  header block again. `finishWrite` of a keep-alive uses the old
+  request's `hend` to split the tail, then resets `hend` to `0` for
+  the next request. Adapter `BookStep` stores `bhend`,
+  `http_step_still` / `http_step_hand` / `http_step_overStatus`
+  take it, and `out_field` 11 is `hend` (fields 0–10 unchanged).
+  The production book host (`muro_http_step` in `c/step_book.c`,
+  used by `c/muro-hello-book`) persists that end: `HttpStep` has
+  `hend`, and `load_http` / `store_http` copy it to and from
+  `BookStep.bhend`, so a later step on the same request reuses
+  the stored end. `headerEndAt`, `headersDoneAt`, and
+  `rememberEnd` take a stored end only when it is in `(0, sliceLen]`
+  (`endKnown`); a value past the slice falls back to a fresh fold.
+  The adapter clears `hend` (via `finishWrite`, then `remember`)
+  before `consume()` slides the buffer. `book_is` in
+  `c/test_step_slice.c` compares field 11 (`Out.hend`). Keep-alive
+  and pipeline cases assert idle `hend == 0` and that a pipelined
+  GET then GET /x rebinds after the buffer slides (a stale first
+  end would still fall inside GET /x). A C test mirrors
+  `header-end-at-past`: a stored end past the slice is ignored.
+  `carry_header_end_book` covers the book's `Out.hend` and
+  `BookStep.bhend` (this file's handwritten host does not write
+  `HttpStep.hend`). `./c/test_book_host` checks the production
+  host: a short POST carries `hend` into the body step, keep-alive
+  idle clears it and the next GET rebinds it, the same pipelined
+  pair rebinds after `consume()`, a past-slice stored end folds
+  again, and a `Connection: close` finish skips consume (`keepHand`
+  forces keep 1, so `finishWrite` takes quiet and does not classify
+  an unconsumed tail). `mix muro.check --fuel 5000000` on `request.muro` and `step.muro`
+  reports `All terms check`. `./c/test_step_slice` is scripted 535,
+  book-cmp 10971, book-skip 0, quiet-read-shut 74. `c/muro-hello`
+  and `c/muro-hello-book` each pass 71 conformance cases. Versus
+  `origin/main` the book adds 4 evidence theorems on `step.muro`
+  and 9 on `request.muro`, 186 and 106 total. On omarzo, median of
+  five interleaved sittings (each sitting is the median of three
+  5 s keepalive GET runs, `c=128`, workers 4, `taskset` 0–3 / 4–7,
+  governor `powersave`), comparing the 0.22.32 pin-only book
+  against the first header-end book plus the C server: book
+  108758.10 rps to 95873.98 rps (0.882×, paired 0.831–0.894), C
+  184889.64 rps to 189921.83 rps (1.027×, within load noise). The
+  C/book gap went from 1.700× to 1.981×. Profile (user-space
+  `perf_event_open`, 200k keepalive GET, workers 4): the
+  header-end book did 59645 instructions/request vs 44105 for the
+  pin (1.35×). A tight `stepFact` loop showed the same two `scan`
+  calls but 5 `crlfFold` walks per request vs the pin's 2. Root
+  cause: `onBuf` passed the incoming `hend` (0 on a keep-alive
+  GET) into `statusOfAt` and only then called `rememberEnd`, so
+  every `headersDoneAt` / `headerEndAt` took the unknown-end arm
+  and the emitter did not hoist `headerEnd`. `reqCompleteHs` also
+  used `bodyShortSt` (always `headerEnd`). `finishWrite` called
+  `framedEndAt` twice in the pipelined arm. The follow-up binds
+  `headerEnd` once (`storedEnd`), calls `rememberEnd` before
+  `statusOfAt`, uses `bodyShortAt` in `reqCompleteHs`, and binds
+  `framedEndAt` once in `finishWriteAt`. After that, the
+  microbench is 1 `crlfFold` per request (and 22397 inst vs the
+  pin's 23824). Server-level inst/request fell to 54786 (1.24×
+  the pin). A second five-sitting A/B of that fix (10:11–10:17 AM
+  CST, load 2 rising into the 20s–40s): book 122214.11 rps to
+  110691.92 rps (0.906×, sittings 0.833–0.910), C 208177.53 rps
+  to 223312.48 rps (1.073×, load noise). The remaining gap is the
+  still-larger generated C (`onBuf` / `onBufScan` each ~14k, a
+  25k `readFact` that inlines `onBuf`, book text +13%): the `*At`
+  helpers still compile the unknown-end arms into the keep-alive
+  path, and the emitter inlines those large terms. A muro emitter
+  change that did not inline above a size, or that specialized
+  `headerEndAt` when `hend` is already bound nonzero, would
+  shrink that path. Errors and non2xx were 0 on every run.
+  `c/step.c` and `c/host.c` are unchanged. The library version
+  stays `0.1.0-dev`. The pin is muro `0.22.33`.
 - Chunked request bodies, `Expect: 100-continue`, an open streamed
   body, accept during a write or while idle, and a body-reader
   override of 400 or 413 are decided in `priv/muro/http/step.muro`.

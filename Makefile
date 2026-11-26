@@ -165,6 +165,9 @@ c/step_book_host.o: c/step_book.c c/step_book.h c/step.h c/host_render.h c/host_
 c/muro-hello-book: c/hello.o $(BOOK_HOST)
 	$(CC) $(LDFLAGS) -o $@ c/hello.o $(BOOK_HOST)
 
+c/test_book_host: c/test_book_host.o $(BOOK_HOST)
+	$(CC) $(LDFLAGS) -o $@ c/test_book_host.o $(BOOK_HOST)
+
 c/muro-stream: c/stream.o $(HOST)
 	$(CC) $(LDFLAGS) -o $@ c/stream.o $(HOST)
 
@@ -187,7 +190,7 @@ c-conformance: c/muro-hello
 c-conformance-book: c/muro-hello-book
 	PYTHONDONTWRITEBYTECODE=1 python3 c/test_conformance.py c/muro-hello-book
 
-c-check: bench/loadgen c/test_classify c/test_conn c/test_scan_cache c/test_sess c/test_render c/test_body c/test_jwt c/test_json c/test_store c/test_poll c/test_route c/test_tags c/test_serve c/test_workers c/muro-httpd c/muro-hello c/muro-hello-book c/muro-stream c/test_e2e c/test_hello c/test_http11 c/test_step c/test_step_slice
+c-check: bench/loadgen c/test_classify c/test_conn c/test_scan_cache c/test_sess c/test_render c/test_body c/test_jwt c/test_json c/test_store c/test_poll c/test_route c/test_tags c/test_serve c/test_workers c/muro-httpd c/muro-hello c/muro-hello-book c/muro-stream c/test_e2e c/test_hello c/test_http11 c/test_step c/test_step_slice c/test_book_host
 	./c/test_classify
 	./c/test_conn
 	./c/test_scan_cache
@@ -211,13 +214,14 @@ c-check: bench/loadgen c/test_classify c/test_conn c/test_scan_cache c/test_sess
 	  echo "c/generated/step_slice calls the OS" >&2; exit 1; \
 	fi
 	./c/test_step_slice
+	./c/test_book_host
 
 c-sanitize:
 	$(MAKE) clean
 	$(MAKE) c-check CFLAGS="$(SAN_CFLAGS)" LDFLAGS="$(SAN_LDFLAGS)"
 
 clean:
-	rm -f c/*.o c/conn.patched.c c/muro-httpd c/muro-hello c/muro-hello-book c/muro-stream c/test_classify c/test_conn c/test_scan_cache c/test_sess c/test_render c/test_e2e c/test_admit c/test_body c/test_jwt c/test_json c/test_store c/test_poll c/test_route c/test_tags c/test_hello c/test_serve c/test_workers c/test_http11 c/test_step c/test_step_slice bench/loadgen fuzz/step_fuzz
+	rm -f c/*.o c/conn.patched.c c/muro-httpd c/muro-hello c/muro-hello-book c/muro-stream c/test_classify c/test_conn c/test_scan_cache c/test_sess c/test_render c/test_e2e c/test_admit c/test_body c/test_jwt c/test_json c/test_store c/test_poll c/test_route c/test_tags c/test_hello c/test_serve c/test_workers c/test_http11 c/test_step c/test_step_slice c/test_book_host bench/loadgen fuzz/step_fuzz
 
 # libFuzzer + ASan + UBSan. clang is fixed here so CC, c-check, and
 # c-sanitize keep using $(CC). Objects are not written into c/.
